@@ -1,11 +1,12 @@
-// PhoneDock site: theme, copy buttons, reveals, the hero cue panel, and the lazy 3D stage.
+// PhoneDock site: theme, copy buttons, reveals, the recordings, and the hero's real runs with the agent card.
+import { startDemo } from './demo.js';
+
 const root = document.documentElement;
 root.classList.add('js');
 
 const params = new URLSearchParams(location.search);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const prefersDark = matchMedia('(prefers-color-scheme: dark)');
-const listeners = new Set();
 
 // ---------- Theme ----------
 function resolvedTheme() {
@@ -17,16 +18,6 @@ function applyTheme() {
   const theme = resolvedTheme();
   root.dataset.resolved = theme;
   document.querySelector('[data-theme-toggle]')?.setAttribute('aria-label', theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme');
-  // The light posters follow the page theme, not the system one; the narrow one keeps its width condition.
-  for (const source of document.querySelectorAll('[data-poster-light]')) {
-    source.media = theme !== 'light' ? 'not all' : 'narrow' in source.dataset ? '(max-width: 820px)' : 'all';
-  }
-  if ('posterSwap' in root.dataset) {
-    const show = () => delete root.dataset.posterSwap;
-    document.querySelector('[data-poster]')?.addEventListener('load', show, { once: true });
-    setTimeout(show, 1500);
-  }
-  for (const fn of listeners) fn(theme);
 }
 if (params.get('theme') === 'light' || params.get('theme') === 'dark') root.dataset.theme = params.get('theme');
 applyTheme();
@@ -64,7 +55,7 @@ for (const btn of document.querySelectorAll('[data-copy]')) {
 }
 
 // ---------- Reveals and section lights ----------
-const revealTargets = document.querySelectorAll('.sec-head, .what-lede, .roles, .chain, .calls, .handoff-media, .lineup li, .runsheet li, .book, .setup-steps, .plain-col, .faq-list');
+const revealTargets = document.querySelectorAll('.sec-head, .what-lede, .roles, .chain, .calls, .handoff-media, .runs .run, .runsheet li, .fleet, .targets, .book, .setup-steps, .plain-col, .faq-list');
 for (const el of revealTargets) el.classList.add('rv');
 const io = new IntersectionObserver((entries) => {
   for (const e of entries) {
@@ -75,9 +66,9 @@ const io = new IntersectionObserver((entries) => {
 }, { rootMargin: '0px 0px -8% 0px', threshold: 0.08 });
 for (const el of revealTargets) io.observe(el);
 
-function whileVisible(el, on, off, margin = '0px') {
+function whileVisible(el, on, off, threshold = 0.25) {
   if (!el) return;
-  new IntersectionObserver(([e]) => (e.isIntersecting ? on() : off?.()), { rootMargin: margin, threshold: 0.25 }).observe(el);
+  new IntersectionObserver(([e]) => (e.isIntersecting ? on() : off?.()), { threshold }).observe(el);
 }
 const chain = document.querySelector('[data-chain]');
 whileVisible(chain, () => chain.classList.add('is-on'), () => chain.classList.remove('is-on'));
@@ -117,7 +108,8 @@ whileVisible(chain, () => chain.classList.add('is-on'), () => chain.classList.re
 const curtain = document.querySelector('.curtain');
 whileVisible(curtain, () => curtain.classList.add('is-lit'));
 
-// Recordings play only while they're on screen. With reduced motion they wait for Play. Pause always works.
+// Recordings load and play only while they're on screen. With reduced motion they show their poster and wait for
+// Play. Pause always works.
 for (const box of document.querySelectorAll('[data-clip]')) {
   const video = box.querySelector('video');
   const btn = box.querySelector('[data-clip-hold]');
@@ -132,7 +124,7 @@ for (const box of document.querySelectorAll('[data-clip]')) {
     held = !video.paused;
     if (held) video.pause(); else video.play().catch(sync);
   });
-  whileVisible(box, () => { seen = true; go(); }, () => { seen = false; video.pause(); });
+  whileVisible(box, () => { seen = true; go(); }, () => { seen = false; video.pause(); }, 0.35);
   sync();
 }
 
@@ -156,117 +148,6 @@ for (const box of document.querySelectorAll('[data-clip]')) {
   light();
 })();
 
-// ---------- Hero cue panel ----------
-const cueEl = document.querySelector('[data-cue]');
-const cue = (() => {
-  const state = cueEl.querySelector('[data-cue-state]');
-  const wide = matchMedia('(min-width: 1081px)');
-  const callEl = cueEl.querySelector('[data-cue-call]');
-  const acts = cueEl.querySelector('[data-cue-actions]');
-  const take = cueEl.querySelector('[data-cue-take]');
-  const done = cueEl.querySelector('[data-cue-done]');
-  let takeWaiters = []; let doneWaiters = []; let lastAt = null;
-  take.addEventListener('click', () => { const w = takeWaiters; takeWaiters = []; w.forEach((r) => r('person')); });
-  done.addEventListener('click', () => { const w = doneWaiters; doneWaiters = []; w.forEach((r) => r('person')); });
-  const api = {
-    set({ mode, label, call: callHtml }) {
-      if (mode) cueEl.dataset.state = mode;
-      if (label != null) state.textContent = label;
-      if (callHtml != null) callEl.innerHTML = callHtml;
-    },
-    actions(which) {
-      const f = document.activeElement;
-      acts.hidden = which === 'none';
-      take.hidden = which !== 'take';
-      done.disabled = which !== 'done';
-      // If the focused button just went away, move focus to what the panel offers next, never to the page top.
-      if (!cueEl.contains(f) || f === cueEl || (f.offsetParent !== null && !f.disabled)) return;
-      const hold = cueEl.querySelector('[data-hold]');
-      const next = which === 'take' ? take : which === 'done' ? done : hold?.offsetParent ? hold : cueEl;
-      if (next === cueEl) cueEl.tabIndex = -1;
-      next.focus({ preventScroll: true });
-    },
-    whenTake() { return new Promise((r) => takeWaiters.push(r)); },
-    whenDone() { return new Promise((r) => doneWaiters.push(r)); },
-    // Sit the panel just above the PhoneDock window in the scene, centred on it. (x, y) is the middle of the window's
-    // top edge in stage pixels. Below 1081px the panel stays in the flow under the stage.
-    place(x, y) {
-      lastAt = [x, y];
-      if (!wide.matches) { cueEl.classList.remove('is-placed'); cueEl.style.removeProperty('--cue-x'); cueEl.style.removeProperty('--cue-y'); return; }
-      const w = cueEl.offsetWidth, h = cueEl.offsetHeight, hero = cueEl.parentElement;
-      const left = Math.max(16, Math.min(hero.clientWidth - w - 16, x - w / 2));
-      const top = Math.max(72, y - h - 14);
-      cueEl.style.setProperty('--cue-x', `${Math.round(left)}px`);
-      cueEl.style.setProperty('--cue-y', `${Math.round(top)}px`);
-      cueEl.classList.add('is-placed');
-    },
-  };
-  // The handoff state adds a row of buttons: re-place on any size change, so the panel grows upward, off the window.
-  new ResizeObserver(() => { if (lastAt) api.place(...lastAt); }).observe(cueEl);
-  return api;
-})();
-
-function staticCue() {
-  // No animation: the panel holds the handoff moment, and its buttons still answer.
-  cueEl.classList.add('is-static');
-  // Nothing moves here, so the panel can announce what changes after each click.
-  cueEl.querySelector('.cue-text')?.setAttribute('aria-live', 'polite');
-  cue.set({ mode: 'handoff', label: 'Claude Code is waiting for you', call: 'Approve the Face ID prompt, then tap Done.' });
-  cue.actions('take');
-  cue.whenTake().then(() => {
-    cue.set({ mode: 'you', label: 'You’re driving', call: 'Agents are locked out while you have it.' });
-    cue.actions('done');
-    return cue.whenDone();
-  }).then(() => {
-    cue.set({ mode: 'agent', label: 'Claude Code is driving', call: 'The agent carries on from where it stopped.' });
-    cue.actions('none');
-  });
-}
-
-// Until the live stage takes over (or for good, without it), sit the panel above the window in the poster picture:
-// object-fit: cover maths on the anchor (the window's top edge) measured when the poster was rendered.
-let stageLive = false;
-function posterCue() {
-  const [fx, fy] = (stageEl.dataset.anchor || '').split(',').map(Number);
-  if (!Number.isFinite(fx) || !Number.isFinite(fy)) return;
-  const pos = () => {
-    if (stageLive) return;
-    const W = stageEl.clientWidth, H = stageEl.clientHeight;
-    const k = Math.max(W / 1600, H / 1000);
-    const ox = 0, oy = (H - 1000 * k) * 0.5; // object-position: 0% 50%
-    cue.place(ox + fx * 1600 * k, oy + fy * 1000 * k);
-  };
-  pos();
-  new ResizeObserver(pos).observe(stageEl);
-}
-
-// ---------- The 3D stage (lazy) ----------
-// A throwaway test context costs as much as the real one: check for the API here, and make the stage's one context
-// in boot(), before downloading three.js.
-const webglOK = () => 'WebGL2RenderingContext' in window;
-const stageEl = document.querySelector('[data-stage]');
-const canvas = document.querySelector('[data-stage-canvas]');
-const saveData = navigator.connection?.saveData === true;
-const freezeAt = params.has('freeze') ? params.get('freeze') : null;
-posterCue();
-
-if ((reduceMotion.matches && freezeAt == null) || saveData || !webglOK()) {
-  staticCue();
-} else {
-  const boot = () => {
-    const gl = canvas.getContext('webgl2', { antialias: true, powerPreference: 'high-performance', preserveDrawingBuffer: freezeAt != null });
-    if (!gl) { staticCue(); return; }
-    return import('./stage.js')
-      .then((m) => { stageLive = true; return m.start({
-        canvas, gl, stageEl, cue, freezeAt,
-        theme: resolvedTheme(),
-        onTheme: (fn) => listeners.add(fn),
-        currentTheme: resolvedTheme,
-        holdButton: document.querySelector('[data-hold]'),
-      }); })
-      .catch((err) => { console.warn('Stage fell back to the poster:', err); stageLive = false; staticCue(); posterCue(); });
-  };
-  if (freezeAt != null) boot();
-  else if (document.readyState === 'complete') setTimeout(boot, 60);
-  else addEventListener('load', () => (window.requestIdleCallback ? requestIdleCallback(boot, { timeout: 900 }) : setTimeout(boot, 120)), { once: true });
-}
+// ---------- The hero's real runs ----------
+const demo = document.querySelector('[data-demo]');
+if (demo) startDemo({ root: demo, reduceMotion, params });

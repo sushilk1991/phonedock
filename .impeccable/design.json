@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-04T17:11:21.915Z",
+  "generatedAt": "2026-11-04T20:20:23.000Z",
   "title": "Design System: PhoneDock site",
   "scope": "Public landing page in site/ only. The Mac app design guide is design/DESIGN.md.",
   "extensions": {
@@ -66,24 +66,6 @@
         "light": "#7a2fa8",
         "dark": "#d08cff",
         "cssVar": "--agent-ink",
-        "tonalRamp": [
-          "oklch(15.0% 0.021 309.3)",
-          "oklch(26.4% 0.068 309.3)",
-          "oklch(37.9% 0.116 309.3)",
-          "oklch(49.3% 0.163 309.3)",
-          "oklch(60.7% 0.163 309.3)",
-          "oklch(72.1% 0.116 309.3)",
-          "oklch(83.6% 0.068 309.3)",
-          "oklch(95.0% 0.021 309.3)"
-        ]
-      },
-      "agent-strong": {
-        "role": "secondary",
-        "displayName": "Agent Purple Fill",
-        "canonical": "light-dark(#7a2fa8, #8e44c8)",
-        "light": "#7a2fa8",
-        "dark": "#8e44c8",
-        "cssVar": "--agent-strong",
         "tonalRamp": [
           "oklch(15.0% 0.021 309.3)",
           "oklch(26.4% 0.068 309.3)",
@@ -278,19 +260,19 @@
       "ink-3": {
         "role": "neutral",
         "displayName": "Graphite Ink 3",
-        "canonical": "light-dark(#8c8c95, #5c5c6b)",
-        "light": "#8c8c95",
-        "dark": "#5c5c6b",
+        "canonical": "light-dark(#66666e, #7c7c8c)",
+        "light": "#66666e",
+        "dark": "#7c7c8c",
         "cssVar": "--ink-3",
         "tonalRamp": [
-          "oklch(15.0% 0.001 286.0)",
-          "oklch(26.4% 0.005 286.0)",
-          "oklch(37.9% 0.008 286.0)",
-          "oklch(49.3% 0.012 286.0)",
-          "oklch(60.7% 0.012 286.0)",
-          "oklch(72.1% 0.008 286.0)",
-          "oklch(83.6% 0.005 286.0)",
-          "oklch(95.0% 0.001 286.0)"
+          "oklch(15.0% 0.004 286.0)",
+          "oklch(26.4% 0.006 286.0)",
+          "oklch(37.9% 0.009 286.0)",
+          "oklch(49.3% 0.011 286.0)",
+          "oklch(60.7% 0.011 286.0)",
+          "oklch(72.1% 0.009 286.0)",
+          "oklch(83.6% 0.006 286.0)",
+          "oklch(95.0% 0.004 286.0)"
         ]
       },
       "line": {
@@ -309,19 +291,104 @@
         "dark": "rgb(255 255 255 / 0.16)",
         "cssVar": "--line-2"
       },
-      "handset-black": {
+      "booth": {
         "role": "neutral",
-        "displayName": "Handset Black",
-        "canonical": "#0c0c0e",
+        "displayName": "Booth Light",
+        "canonical": "light-dark(rgb(88 86 214 / 0), rgb(94 92 230 / 0.13))",
+        "cssVar": "--booth",
+        "light": "transparent",
+        "dark": "rgb(94 92 230 / 0.13)",
         "tonalRamp": [
-          "oklch(15.0% 0.000 285.9)",
-          "oklch(26.4% 0.002 285.9)",
-          "oklch(37.9% 0.003 285.9)",
-          "oklch(49.3% 0.004 285.9)",
-          "oklch(60.7% 0.004 285.9)",
-          "oklch(72.1% 0.003 285.9)",
-          "oklch(83.6% 0.002 285.9)",
-          "oklch(95.0% 0.000 285.9)"
+          "oklch(15.0% 0.061 278.1)",
+          "oklch(26.4% 0.102 278.1)",
+          "oklch(37.9% 0.142 278.1)",
+          "oklch(49.3% 0.183 278.1)",
+          "oklch(60.7% 0.183 278.1)",
+          "oklch(72.1% 0.142 278.1)",
+          "oklch(83.6% 0.102 278.1)",
+          "oklch(95.0% 0.061 278.1)"
+        ]
+      },
+      "pool": {
+        "role": "neutral",
+        "displayName": "Closing Pool",
+        "canonical": "light-dark(rgb(255 255 255 / 0.9), rgb(206 210 255 / 0.13))",
+        "cssVar": "--pool",
+        "light": "rgb(255 255 255 / 0.9)",
+        "dark": "rgb(206 210 255 / 0.13)",
+        "tonalRamp": [
+          "oklch(15.0% 0.019 281.0)",
+          "oklch(26.4% 0.031 281.0)",
+          "oklch(37.9% 0.044 281.0)",
+          "oklch(49.3% 0.056 281.0)",
+          "oklch(60.7% 0.056 281.0)",
+          "oklch(72.1% 0.044 281.0)",
+          "oklch(83.6% 0.031 281.0)",
+          "oklch(95.0% 0.019 281.0)"
+        ]
+      },
+      "scrim": {
+        "role": "neutral",
+        "displayName": "Show Scrim",
+        "canonical": "#07070b",
+        "note": "Fixed in both themes. Used as rgb(7 7 11 / alpha) in every scrim gradient and as the devices stage ground.",
+        "tonalRamp": [
+          "oklch(15.0% 0.003 285.0)",
+          "oklch(26.4% 0.005 285.0)",
+          "oklch(37.9% 0.007 285.0)",
+          "oklch(49.3% 0.009 285.0)",
+          "oklch(60.7% 0.009 285.0)",
+          "oklch(72.1% 0.007 285.0)",
+          "oklch(83.6% 0.005 285.0)",
+          "oklch(95.0% 0.003 285.0)"
+        ]
+      },
+      "term-glass": {
+        "role": "neutral",
+        "displayName": "Agent Card Glass",
+        "canonical": "rgb(13 13 19 / 0.84)",
+        "note": "Fixed. The agent card body, over a 16px backdrop blur.",
+        "tonalRamp": [
+          "oklch(15.0% 0.004 284.9)",
+          "oklch(26.4% 0.006 284.9)",
+          "oklch(37.9% 0.009 284.9)",
+          "oklch(49.3% 0.011 284.9)",
+          "oklch(60.7% 0.011 284.9)",
+          "oklch(72.1% 0.009 284.9)",
+          "oklch(83.6% 0.006 284.9)",
+          "oklch(95.0% 0.004 284.9)"
+        ]
+      },
+      "phone-black": {
+        "role": "neutral",
+        "displayName": "Phone Black",
+        "canonical": "#050507",
+        "note": "Fixed. The phone slab.",
+        "tonalRamp": [
+          "oklch(15.0% 0.002 285.4)",
+          "oklch(26.4% 0.003 285.4)",
+          "oklch(37.9% 0.004 285.4)",
+          "oklch(49.3% 0.006 285.4)",
+          "oklch(60.7% 0.006 285.4)",
+          "oklch(72.1% 0.004 285.4)",
+          "oklch(83.6% 0.003 285.4)",
+          "oklch(95.0% 0.002 285.4)"
+        ]
+      },
+      "phone-rim": {
+        "role": "neutral",
+        "displayName": "Phone Rim",
+        "canonical": "#2a2a31",
+        "note": "Fixed. The 2px metal rim ring in the phone lift.",
+        "tonalRamp": [
+          "oklch(15.0% 0.004 285.6)",
+          "oklch(26.4% 0.006 285.6)",
+          "oklch(37.9% 0.009 285.6)",
+          "oklch(49.3% 0.011 285.6)",
+          "oklch(60.7% 0.011 285.6)",
+          "oklch(72.1% 0.009 285.6)",
+          "oklch(83.6% 0.006 285.6)",
+          "oklch(95.0% 0.004 285.6)"
         ]
       },
       "on-fill": {
@@ -341,50 +408,13 @@
       }
     },
     "themes": {
-      "mechanism": "CSS light-dark() on :root with color-scheme light dark. data-theme=\"light\" or \"dark\" on <html> forces a theme, stored in localStorage as pd-theme.",
-      "stageLooks": {
-        "source": "site/js/stage.js LOOKS",
-        "dark": {
-          "bg": "#0a0a0f",
-          "floor": "#1a1a24",
-          "agent": "#bf5af2",
-          "you": "#8f8cff",
-          "handoff": "#ff9f0a",
-          "packet": "#b9b4ff",
-          "spotlight": "#f4f2ff",
-          "beamColour": "#dfe0ff",
-          "beams": 0.11,
-          "glow": 0.75,
-          "spotIdle": 0.36,
-          "additive": true,
-          "fog": [
-            11,
-            30
-          ]
-        },
-        "light": {
-          "bg": "#e8e8ec",
-          "floor": "#dcdce3",
-          "agent": "#af52de",
-          "you": "#5856d6",
-          "handoff": "#c2410c",
-          "packet": "#5856d6",
-          "spotlight": "#f4f2ff",
-          "beams": 0,
-          "glow": 0,
-          "spotIdle": 0.6,
-          "additive": false,
-          "fog": [
-            13,
-            34
-          ]
-        }
-      }
+      "mechanism": "CSS light-dark() on :root with color-scheme light dark. data-theme=\"light\" or \"dark\" on <html> forces a theme, stored in localStorage as pd-theme and applied before first paint.",
+      "showBands": "The hero, use cases and handoff sections carry .show, which forces color-scheme: dark in both themes. The nav is dark-scheme until scrolled past 24px."
     },
     "typographyMeta": {
       "display": {
         "displayName": "Display",
-        "purpose": "Hero headline only. Below 820px it is clamp(2.125rem, 9.4vw, 2.75rem). The closing heading uses 800 weight at 116% width, clamp(2.5rem, 5.2vw, 4.75rem), -0.035em.",
+        "purpose": "Hero headline only, max 9.5em. Below 820px it is clamp(2.125rem, 9.4vw, 2.75rem). The closing heading uses 800 weight at 116% width, clamp(2.5rem, 5.2vw, 4.75rem), -0.035em.",
         "fontStretch": "110%"
       },
       "headline": {
@@ -399,11 +429,15 @@
       },
       "quote": {
         "displayName": "Quote",
-        "purpose": "Prompts in the run-sheet."
+        "purpose": "Prompts in the More prompts to try run-sheet."
+      },
+      "run-prompt": {
+        "displayName": "Run Prompt",
+        "purpose": "The quoted prompt in each use-case run. The plain Instagram line is 480 in ink-2."
       },
       "title": {
         "displayName": "Title",
-        "purpose": "Setup step titles, device names, Privacy and limits subheads (680 to 700, 1.0625 to 1.25rem).",
+        "purpose": "Setup step titles, device names, use-case app names, More prompts to try, Privacy and limits subheads (680 to 700, 1 to 1.25rem).",
         "fontStretch": "108%"
       },
       "sub": {
@@ -416,7 +450,16 @@
       },
       "small": {
         "displayName": "Small",
-        "purpose": "Captions and notes."
+        "purpose": "Captions, use-case answers and notes; the agent card prompt (560) and answer."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "The demo note under the agent card and the call count beside each answer."
+      },
+      "tab": {
+        "displayName": "Tab",
+        "purpose": "The three task tabs above the agent card.",
+        "fontStretch": "104%"
       },
       "label": {
         "displayName": "Label",
@@ -431,7 +474,11 @@
       },
       "mono": {
         "displayName": "Mono",
-        "purpose": "Inline tool calls and commands."
+        "purpose": "Inline tool calls and commands; tabular clock digits in the agent card."
+      },
+      "term-call": {
+        "displayName": "Agent Card Call",
+        "purpose": "phonedock · name(args) lines in the agent card log."
       },
       "code-block": {
         "displayName": "Code Block",
@@ -457,9 +504,19 @@
     ],
     "shadows": [
       {
-        "name": "panel-lift",
-        "value": "0 18px 40px -26px rgb(0 0 0 / 0.65)",
-        "purpose": "Cue panel."
+        "name": "card-lift",
+        "value": "0 1px 0 rgb(255 255 255 / 0.05) inset, 0 40px 80px -40px rgb(0 0 0 / 0.9)",
+        "purpose": "The agent card, with backdrop-filter: blur(16px) saturate(1.2)."
+      },
+      {
+        "name": "phone-lift",
+        "value": "inset 0 0 0 1px rgb(255 255 255 / 0.06), 0 0 0 2px #2a2a31, 0 0 0 3px #0b0b0e, 0 44px 70px -40px rgb(0 0 0 / 0.9)",
+        "purpose": "The CSS phone frame: rim rings and a long soft drop."
+      },
+      {
+        "name": "window-lift",
+        "value": "0 0 0 1px rgb(255 255 255 / 0.12), 0 0 0 7px rgb(10 10 15 / 0.55), 0 48px 90px -30px rgb(0 0 0 / 0.85)",
+        "purpose": "The real app window on the devices stage. Below 820px: 0 0 0 1px rgb(255 255 255 / 0.12), 0 24px 48px -20px rgb(0 0 0 / 0.85)."
       },
       {
         "name": "hub-lift",
@@ -477,9 +534,14 @@
         "purpose": "Handoff recording frame."
       },
       {
-        "name": "handset-lift",
-        "value": "0 0 0 1px var(--line-2), 0 34px 60px -38px rgb(0 0 0 / 0.75)",
-        "purpose": "CSS handsets."
+        "name": "stage-edge",
+        "value": "0 0 0 1px var(--line)",
+        "purpose": "Hairline edge of the devices stage."
+      },
+      {
+        "name": "heading-glow",
+        "value": "text-shadow: 0 2px 30px rgb(0 0 0 / 0.6)",
+        "purpose": "The handoff heading over its mood image."
       },
       {
         "name": "icon-drop",
@@ -487,6 +549,41 @@
         "purpose": "App icon in the closing section, as a filter."
       }
     ],
+    "atmosphere": [
+      {
+        "name": "hero-scrim",
+        "value": "linear-gradient(90deg, rgb(7 7 11 / 0.94) 0%, rgb(7 7 11 / 0.74) 32%, rgb(7 7 11 / 0.2) 60%, rgb(7 7 11 / 0.42) 100%), linear-gradient(180deg, rgb(7 7 11 / 0.6) 0%, transparent 16%, transparent 72%, var(--ground) 100%)",
+        "purpose": "Left scrim over the defocused desk photo, fading into the band below. Below 1200px: one top-to-bottom scrim."
+      },
+      {
+        "name": "hero-grain",
+        "value": "SVG feTurbulence fractalNoise (baseFrequency 0.9, 2 octaves) tile, opacity 0.07, mix-blend-mode overlay, masked out over the bottom 40%",
+        "purpose": "Film grain so the defocused plate reads as film."
+      },
+      {
+        "name": "phone-pool",
+        "value": "radial-gradient(closest-side, rgb(110 96 255 / 0.3), transparent 72%)",
+        "purpose": "Cool light pool behind the hero phone. Booth light, not state colour."
+      },
+      {
+        "name": "handoff-mask",
+        "value": "mask-image: linear-gradient(90deg, transparent 0%, #000 42%)",
+        "purpose": "Masks the handoff mood image in from the left (30% below 1080px, none below 820px)."
+      },
+      {
+        "name": "fleet-scrim",
+        "value": "linear-gradient(180deg, rgb(7 7 11 / 0.2) 0%, rgb(7 7 11 / 0.5) 45%, rgb(7 7 11 / 0.9) 100%)",
+        "purpose": "Darkens the blurred phones image behind the app window."
+      },
+      {
+        "name": "log-fade",
+        "value": "mask-image: linear-gradient(180deg, transparent 0, #000 64px)",
+        "purpose": "Top fade on the agent card log once it is full."
+      }
+    ],
+    "shapes": {
+      "phone": "Proportional to --pw: bezel 3%, outer radius 15%, screen radius 12%, screen aspect 1072 / 2400, status strip 4.4% tall with a punch-hole camera (radial-gradient), plain black strip on the iPhone clip."
+    },
     "motion": [
       {
         "name": "ease-out",
@@ -506,7 +603,7 @@
       {
         "name": "nav",
         "value": "0.3s",
-        "purpose": "Nav wash and rule after 24px of scroll."
+        "purpose": "Nav wash, blur and rule after 24px of scroll."
       },
       {
         "name": "reveal",
@@ -514,14 +611,34 @@
         "purpose": "Section blocks fade up once on entry, only when reduced motion is not requested."
       },
       {
-        "name": "stage-fade",
-        "value": "0.9s",
-        "purpose": "The WebGL canvas fades in over the poster."
+        "name": "hero-settle",
+        "value": "2.4s, scale(1.06) and opacity 0 to none",
+        "purpose": "The hero photo settles in on load."
       },
       {
-        "name": "handoff-ring",
-        "value": "1.4s infinite",
-        "purpose": "Pulsing ring on the cue light in the handoff state. Static at 0.6 opacity with reduced motion."
+        "name": "prompt-type",
+        "value": "120 characters/s, block caret blinking 1s steps(1)",
+        "purpose": "The agent card types the real prompt."
+      },
+      {
+        "name": "call-in",
+        "value": "0.42s, translateY(8px) and opacity 0 to none, 0.07s stagger",
+        "purpose": "A call line lands at its time in the clip."
+      },
+      {
+        "name": "answer-type",
+        "value": "75 characters/s, held 4.2s",
+        "purpose": "The answer types, then the next run starts."
+      },
+      {
+        "name": "clip-crossfade",
+        "value": "0.5s",
+        "purpose": "Hero recordings cross-fade between runs."
+      },
+      {
+        "name": "step-light",
+        "value": "0.3s",
+        "purpose": "Handoff step lights follow the recording (3s, 7s, 13.5s)."
       },
       {
         "name": "wire-packet",
@@ -532,39 +649,50 @@
         "name": "pool",
         "value": "1.6s",
         "purpose": "Closing light pool brightens from 0.25 to 1 opacity when in view."
+      },
+      {
+        "name": "chevron",
+        "value": "0.25s",
+        "purpose": "FAQ chevron turns on open."
       }
     ],
     "breakpoints": [
       {
-        "name": "wide",
-        "value": "1081px",
-        "purpose": "Cue panel placed above the 3D window. Nav links shown."
+        "name": "hero-stack",
+        "value": "1199px",
+        "purpose": "Hero stacks: copy, then the demo centred; vertical scrim."
       },
       {
         "name": "mid",
         "value": "1080px",
-        "purpose": "Hero stacks: stage, cue panel, copy. Gutter 40px, section padding 96px. Nav links hide."
+        "purpose": "Gutter 40px, section padding 96px. Nav links hide. Runs and devices two across."
       },
       {
         "name": "narrow",
         "value": "820px",
-        "purpose": "Single-column grids, gutter 20px, section padding 72px, prompt book pages stack."
+        "purpose": "Gutter 20px, section padding 72px. Demo one column with the phone first. Runs become a swipe carousel. Handoff mood image above the heading, steps stack. Prompt book pages stack."
+      },
+      {
+        "name": "phone",
+        "value": "600px",
+        "purpose": "Demo reorders to tabs, phone, card, note so it fits one view; prompt clamps to 2 lines, log 128px."
       },
       {
         "name": "small",
         "value": "480px",
-        "purpose": "Keys share the row width, GitHub label hides."
+        "purpose": "Keys share the row width, GitHub label hides, device kinds one column."
       }
     ],
     "fallbacks": {
-      "poster": "Rendered stills of the same Three.js scene at the handoff moment, per theme and for narrow screens (site/assets/hero-poster-*.webp), each with a provenance JSON.",
-      "triggers": [
-        "prefers-reduced-motion: reduce",
-        "Save-Data",
-        "no WebGL2",
-        "stage.js load failure"
-      ],
-      "cue": "Static cue panel that holds the handoff moment with working Take Over and Done and a polite live region."
+      "heroReducedMotion": "The first run's poster frame and its whole transcript (prompt, calls, more line, answer) shown at once, held, with Play to start.",
+      "clipFailure": "A clip that has not loaded 10s after its prompt leaves the run as static text.",
+      "freeze": "?at=<run>,<seconds> freezes a run at a moment for screenshots.",
+      "screenReaders": "The typed card is aria-hidden; a visually hidden line gives the whole run (prompt and answer) at once.",
+      "recordings": "Every clip shows its poster and waits for Play under reduced motion, and plays only while on screen."
+    },
+    "imagery": {
+      "real": "Screen recordings (run-*.mp4, instagram, handoff) and a frame of the real app (app-window.webp), each with a provenance JSON beside it.",
+      "mood": "AI-generated stills (bg-desk, mood-phones, mood-faceid): defocused, scrimmed or masked, credited in the footer, never presented as recordings."
     }
   },
   "components": [
@@ -574,7 +702,7 @@
       "refersTo": "key-primary",
       "description": "The indigo action, Download for Mac. A key with a lamp dot that turns solid white on hover.",
       "html": "<a class=\"ds-key ds-key-primary\" href=\"#\"><span class=\"ds-lamp\" aria-hidden=\"true\"></span>Download for Mac</a>",
-      "css": ".ds-key { --lamp: var(--ink-3, #8c8c95); display: inline-flex; align-items: center; gap: 0.65em; min-height: 48px; padding: 0 20px 0 16px; border-radius: 10px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 620 1rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-decoration: none; cursor: pointer; transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover { border-color: var(--ink-2, #55555b); } .ds-key:active { transform: translateY(1px); } .ds-key:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-lamp { width: 12px; height: 12px; padding: 2px; border-radius: 50%; flex: none; border: 1.5px solid var(--lamp-ring, var(--line-2, rgb(17 17 20 / 0.2))); background: var(--lamp) content-box; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover .ds-lamp, .ds-key:focus-visible .ds-lamp { --lamp: var(--accent-ink, #5856d6); --lamp-ring: var(--accent-ink, #5856d6); } .ds-key-primary { --lamp: rgb(255 255 255 / 0.45); --lamp-ring: rgb(255 255 255 / 0.35); background: var(--accent, #5856d6); border-color: transparent; color: #fff; } .ds-key-primary:hover { background: color-mix(in oklab, var(--accent, #5856d6) 88%, #fff); border-color: transparent; } .ds-key-primary:hover .ds-lamp, .ds-key-primary:focus-visible .ds-lamp { --lamp: #fff; --lamp-ring: #fff; }"
+      "css": ".ds-key { --lamp: var(--ink-3, #66666e); display: inline-flex; align-items: center; gap: 0.65em; min-height: 48px; padding: 0 20px 0 16px; border-radius: 10px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 620 1rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-decoration: none; cursor: pointer; transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover { border-color: var(--ink-2, #55555b); } .ds-key:active { transform: translateY(1px); } .ds-key:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-lamp { width: 12px; height: 12px; padding: 2px; border-radius: 50%; flex: none; border: 1.5px solid var(--lamp-ring, var(--line-2, rgb(17 17 20 / 0.2))); background: var(--lamp) content-box; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover .ds-lamp, .ds-key:focus-visible .ds-lamp { --lamp: var(--accent-ink, #5856d6); --lamp-ring: var(--accent-ink, #5856d6); } .ds-key-primary { --lamp: rgb(255 255 255 / 0.45); --lamp-ring: rgb(255 255 255 / 0.35); background: var(--accent, #5856d6); border-color: transparent; color: #fff; } .ds-key-primary:hover { background: color-mix(in oklab, var(--accent, #5856d6) 88%, #fff); border-color: transparent; } .ds-key-primary:hover .ds-lamp, .ds-key-primary:focus-visible .ds-lamp { --lamp: #fff; --lamp-ring: #fff; }"
     },
     {
       "name": "Key",
@@ -582,15 +710,39 @@
       "refersTo": "key",
       "description": "Secondary action. A hairline key on a paper wash whose lamp lights indigo on hover or focus.",
       "html": "<a class=\"ds-key\" href=\"#\"><span class=\"ds-lamp\" aria-hidden=\"true\"></span>View on GitHub</a>",
-      "css": ".ds-key { --lamp: var(--ink-3, #8c8c95); display: inline-flex; align-items: center; gap: 0.65em; min-height: 48px; padding: 0 20px 0 16px; border-radius: 10px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 620 1rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-decoration: none; cursor: pointer; transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover { border-color: var(--ink-2, #55555b); } .ds-key:active { transform: translateY(1px); } .ds-key:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-lamp { width: 12px; height: 12px; padding: 2px; border-radius: 50%; flex: none; border: 1.5px solid var(--lamp-ring, var(--line-2, rgb(17 17 20 / 0.2))); background: var(--lamp) content-box; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover .ds-lamp, .ds-key:focus-visible .ds-lamp { --lamp: var(--accent-ink, #5856d6); --lamp-ring: var(--accent-ink, #5856d6); }"
+      "css": ".ds-key { --lamp: var(--ink-3, #66666e); display: inline-flex; align-items: center; gap: 0.65em; min-height: 48px; padding: 0 20px 0 16px; border-radius: 10px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 620 1rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-decoration: none; cursor: pointer; transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover { border-color: var(--ink-2, #55555b); } .ds-key:active { transform: translateY(1px); } .ds-key:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-lamp { width: 12px; height: 12px; padding: 2px; border-radius: 50%; flex: none; border: 1.5px solid var(--lamp-ring, var(--line-2, rgb(17 17 20 / 0.2))); background: var(--lamp) content-box; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover .ds-lamp, .ds-key:focus-visible .ds-lamp { --lamp: var(--accent-ink, #5856d6); --lamp-ring: var(--accent-ink, #5856d6); }"
     },
     {
-      "name": "Cue Panel",
+      "name": "Agent Card",
+      "kind": "card",
+      "refersTo": "agent-card",
+      "description": "The site's own dark terminal card titled Claude Code, with its task tabs: lamp, recording clock, Pause, the real prompt, the real PhoneDock calls (running call in a purple ring) and the answer.",
+      "html": "<div class=\"ds-tasks\"><button type=\"button\" class=\"ds-task\" aria-pressed=\"true\">Google<span class=\"ds-rail\"><span style=\"--p:0.6\"></span></span></button><button type=\"button\" class=\"ds-task\" aria-pressed=\"false\">Play Store<span class=\"ds-rail\"><span></span></span></button><button type=\"button\" class=\"ds-task\" aria-pressed=\"false\">YouTube<span class=\"ds-rail\"><span></span></span></button></div><div class=\"ds-term\"><div class=\"ds-bar\"><span class=\"ds-tlamp\"></span><span class=\"ds-name\">Claude Code</span><span class=\"ds-clock\">at <span class=\"ds-mono\">0:13</span></span><button type=\"button\" class=\"ds-hold\"><svg aria-hidden=\"true\" viewBox=\"0 0 12 12\" width=\"12\" height=\"12\"><rect x=\"2\" y=\"1.5\" width=\"2.6\" height=\"9\" rx=\"1\" fill=\"currentColor\"/><rect x=\"7.4\" y=\"1.5\" width=\"2.6\" height=\"9\" rx=\"1\" fill=\"currentColor\"/></svg>Pause</button></div><div class=\"ds-prompt\"><span class=\"ds-mark\">&gt;</span><p>Search Google for the best noise cancelling headphones under $200, open the top review and tell me its best overall pick.</p></div><ol class=\"ds-log\"><li class=\"ds-ln\"><span class=\"ds-dot\"></span><code><span class=\"ds-ns\">phonedock · </span><span class=\"ds-fn\">get_ui</span>()</code></li><li class=\"ds-ln\"><span class=\"ds-dot\"></span><code><span class=\"ds-ns\">phonedock · </span><span class=\"ds-fn\">tap</span>(x: 228, y: 810)</code></li><li class=\"ds-ln ds-run\"><span class=\"ds-dot\"></span><code><span class=\"ds-ns\">phonedock · </span><span class=\"ds-fn\">screenshot</span>()</code></li><li class=\"ds-ln ds-more\"><span class=\"ds-dot\"></span><span>1 more call, then the answer</span></li><li class=\"ds-ln ds-answer\"><span class=\"ds-dot\"></span><p>RTINGS.com picks the JBL Live 780NC as best overall under $200.</p></li></ol></div>",
+      "css": ".ds-tasks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; max-width: 380px; margin-bottom: 12px; padding: 8px; background: #0a0a0f; border-radius: 10px; } .ds-task { display: grid; gap: 9px; padding: 6px 2px 4px; border: 0; background: none; color: #a9a9b9; font: 620 0.8125rem/1.2 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-align: left; cursor: pointer; border-radius: 6px; } .ds-task:hover, .ds-task[aria-pressed=\"true\"] { color: #eeeef4; } .ds-task:focus-visible { outline: 2px solid #a5a3ff; outline-offset: 3px; } .ds-rail { display: block; height: 2px; border-radius: 2px; background: rgb(255 255 255 / 0.14); overflow: hidden; } .ds-rail span { display: block; height: 100%; background: #eeeef4; transform-origin: 0 50%; transform: scaleX(var(--p, 0)); } .ds-task[aria-pressed=\"true\"] .ds-rail span { background: #bf5af2; } .ds-term { max-width: 380px; border-radius: 16px; overflow: hidden; border: 1px solid rgb(255 255 255 / 0.1); background: rgb(13 13 19 / 0.84); box-shadow: 0 1px 0 rgb(255 255 255 / 0.05) inset, 0 40px 80px -40px rgb(0 0 0 / 0.9); backdrop-filter: blur(16px) saturate(1.2); color: #eeeef4; font: 420 0.9375rem/1.5 Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-bar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 6px 6px 14px; border-bottom: 1px solid rgb(255 255 255 / 0.085); } .ds-tlamp { width: 12px; height: 12px; padding: 2px; flex: none; border-radius: 50%; border: 1.5px solid #bf5af2; background: #bf5af2 content-box; box-sizing: border-box; } .ds-name { font-weight: 650; font-size: 0.875rem; font-stretch: 104%; } .ds-clock { margin-left: auto; color: #a9a9b9; font-size: 0.75rem; } .ds-mono { font-family: \"JetBrains Mono\", ui-monospace, Menlo, monospace; color: #eeeef4; font-variant-numeric: tabular-nums; } .ds-hold { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; color: #a9a9b9; font: 560 0.75rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; cursor: pointer; } .ds-hold:hover { color: #eeeef4; background: rgb(255 255 255 / 0.085); } .ds-hold:focus-visible { outline: 2px solid #a5a3ff; outline-offset: 3px; } .ds-prompt, .ds-ln { display: grid; grid-template-columns: 12px minmax(0, 1fr); column-gap: 10px; align-items: baseline; } .ds-prompt { padding: 14px 16px; border-bottom: 1px solid rgb(255 255 255 / 0.085); } .ds-prompt p, .ds-ln p { margin: 0; } .ds-prompt p { font-weight: 560; line-height: 1.45; } .ds-mark { color: #a5a3ff; font: 600 0.8125rem \"JetBrains Mono\", ui-monospace, Menlo, monospace; } .ds-log { list-style: none; margin: 0; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 9px; } .ds-dot { width: 7px; height: 7px; border-radius: 50%; background: #7c7c8c; justify-self: center; box-sizing: border-box; } .ds-ln code { color: #a9a9b9; font: 450 0.75rem/1.55 \"JetBrains Mono\", ui-monospace, Menlo, monospace; letter-spacing: -0.01em; overflow-wrap: anywhere; } .ds-ns { color: #7c7c8c; } .ds-fn { color: #eeeef4; } .ds-run .ds-dot { width: 11px; height: 11px; padding: 1.5px; border: 1.5px solid #bf5af2; background: #bf5af2 content-box; } .ds-run code { color: #eeeef4; } .ds-more { color: #7c7c8c; font-size: 0.75rem; } .ds-more .ds-dot { background: transparent; } .ds-answer .ds-dot { background: #30d158; }"
+    },
+    {
+      "name": "Phone Frame",
       "kind": "custom",
-      "refersTo": "cue-panel",
-      "description": "Says who is in control of the hero demo. Shown in the handoff state with Take Over and Done.",
-      "html": "<div class=\"ds-cue\"><div class=\"ds-cue-row\"><span class=\"ds-cue-light\" aria-hidden=\"true\"></span><p class=\"ds-cue-text\"><span class=\"ds-cue-state\">Claude Code is waiting for you</span><span>Approve the Face ID prompt, then tap Done.</span></p></div><div class=\"ds-cue-actions\"><button type=\"button\" class=\"ds-key-small ds-take\">Take Over</button><button type=\"button\" class=\"ds-key-small\" disabled>Done</button></div></div>",
-      "css": ".ds-cue { --state: var(--handoff, #c2410c); display: grid; gap: 8px; max-width: 440px; padding: 8px 8px 8px 16px; border: 1px solid color-mix(in oklab, var(--handoff, #c2410c) 55%, var(--line-2, rgb(17 17 20 / 0.2))); border-radius: 16px; background: var(--paper, #fff); box-shadow: 0 18px 40px -26px rgb(0 0 0 / 0.65); font: 420 0.875rem/1.4 Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-cue-row { display: flex; align-items: center; gap: 10px; min-height: 34px; } .ds-cue-light { position: relative; width: 14px; height: 14px; padding: 2.5px; border-radius: 50%; flex: none; border: 1.5px solid var(--state); background: var(--state) content-box; } .ds-cue-light::after { content: \"\"; position: absolute; inset: -5px; border-radius: 50%; border: 1.5px solid var(--state); animation: ds-ring 1.4s cubic-bezier(0.16, 1, 0.3, 1) infinite; } @keyframes ds-ring { from { transform: scale(0.5); opacity: 1; } to { transform: scale(1.5); opacity: 0; } } @media (prefers-reduced-motion: reduce) { .ds-cue-light::after { animation: none; opacity: 0.6; } } .ds-cue-text { margin: 0; color: var(--ink-2, #55555b); } .ds-cue-state { display: block; font-weight: 640; color: var(--handoff-ink, #9a3d00); } .ds-cue-actions { display: flex; gap: 8px; margin: 0 0 6px 24px; } .ds-key-small { min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 640 0.875rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; cursor: pointer; } .ds-key-small:hover { border-color: var(--ink-2, #55555b); } .ds-key-small:disabled { opacity: 0.45; cursor: default; } .ds-take { background: var(--agent-strong, #7a2fa8); color: #fff; border-color: transparent; } .ds-take:hover { background: color-mix(in oklab, var(--agent-strong, #7a2fa8) 88%, #fff); border-color: transparent; } .ds-key-small:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; }"
+      "refersTo": "phone-frame",
+      "description": "A plain black CSS slab with no brand marks: proportional bezel and corners, a black status strip with a punch-hole camera, and a real recording inside.",
+      "html": "<div class=\"ds-phone\"><div class=\"ds-screen\"><div class=\"ds-rec\">Recording</div></div></div>",
+      "css": ".ds-phone { --pw: 200px; position: relative; width: var(--pw); padding: calc(var(--pw) * 0.03); border-radius: calc(var(--pw) * 0.15); background: #050507; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06), 0 0 0 2px #2a2a31, 0 0 0 3px #0b0b0e, 0 44px 70px -40px rgb(0 0 0 / 0.9); box-sizing: border-box; } .ds-screen { position: relative; aspect-ratio: 1072 / 2400; border-radius: calc(var(--pw) * 0.12); overflow: hidden; background: #000; } .ds-screen::before { content: \"\"; position: absolute; top: 0; left: 0; right: 0; height: 4.4%; z-index: 1; background: radial-gradient(circle at 50% 56%, #17171c 0 calc(var(--pw) * 0.018), #000 calc(var(--pw) * 0.02)); } .ds-rec { position: absolute; left: 0; right: 0; bottom: 0; height: 95.6%; display: grid; place-items: center; background: linear-gradient(180deg, #1c1c26, #0d0d13); color: #a9a9b9; font: 560 0.75rem Archivo, ui-sans-serif, system-ui, sans-serif; }"
+    },
+    {
+      "name": "Clip Hold",
+      "kind": "button",
+      "refersTo": "clip-hold",
+      "description": "Pause/Play control on every recording: dark translucent glass in the bottom-right corner.",
+      "html": "<button type=\"button\" class=\"ds-clip-hold\"><svg aria-hidden=\"true\" viewBox=\"0 0 12 12\" width=\"12\" height=\"12\"><rect x=\"2\" y=\"1.5\" width=\"2.6\" height=\"9\" rx=\"1\" fill=\"currentColor\"/><rect x=\"7.4\" y=\"1.5\" width=\"2.6\" height=\"9\" rx=\"1\" fill=\"currentColor\"/></svg>Pause</button>",
+      "css": ".ds-clip-hold { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: 0; border-radius: 10px; background: rgb(18 18 20 / 0.72); color: #fff; font: 600 0.75rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; cursor: pointer; backdrop-filter: blur(8px); transition: background-color 0.2s; } .ds-clip-hold:hover { background: rgb(18 18 20 / 0.9); } .ds-clip-hold:focus-visible { outline: 2px solid #fff; outline-offset: 2px; box-shadow: 0 0 0 4px var(--accent, #5856d6); }"
+    },
+    {
+      "name": "Use-Case Answer",
+      "kind": "custom",
+      "refersTo": "lamp",
+      "description": "The answer under each use-case run: agent lamp, Claude Code, the call count, and the first line of the real answer.",
+      "html": "<div class=\"ds-ra\"><p class=\"ds-who\"><span class=\"ds-ralamp\"></span>Claude Code <span class=\"ds-calls\">9 PhoneDock calls</span></p><p class=\"ds-text\">“RTINGS.com picks the JBL Live 780NC as best overall under $200.”</p></div>",
+      "css": ".ds-ra { max-width: 280px; font-family: Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-ra p { margin: 0; } .ds-who { display: flex; align-items: center; gap: 8px; color: var(--ink, #111114); font-size: 0.875rem; font-weight: 650; } .ds-ralamp { width: 12px; height: 12px; padding: 2px; flex: none; border-radius: 50%; border: 1.5px solid var(--agent, #af52de); background: var(--agent, #af52de) content-box; box-sizing: border-box; } .ds-calls { margin-left: auto; color: var(--ink-2, #55555b); font-size: 0.8125rem; font-weight: 480; font-variant-numeric: tabular-nums; } .ds-text { margin-top: 8px; color: var(--ink-2, #55555b); font-size: 0.9375rem; line-height: 1.55; }"
     },
     {
       "name": "Command Field",
@@ -604,25 +756,25 @@
       "name": "Navigation",
       "kind": "nav",
       "refersTo": "nav-button",
-      "description": "Fixed top bar after scroll. Quiet ink-2 links with rounded hover fills and an outlined 36px GitHub button.",
+      "description": "Fixed top bar after scroll: a 90% ground wash with a 14px backdrop blur. Quiet ink-2 links with rounded hover fills and an outlined 36px GitHub button.",
       "html": "<nav class=\"ds-nav\"><a class=\"ds-brand\" href=\"#\">PhoneDock</a><ul class=\"ds-links\"><li><a href=\"#\">How it works</a></li><li><a href=\"#\">Handoff</a></li><li><a href=\"#\">Setup</a></li></ul><a class=\"ds-gh\" href=\"#\">GitHub</a></nav>",
-      "css": ".ds-nav { display: flex; align-items: center; gap: 24px; height: 64px; padding-inline: 24px; background: color-mix(in oklab, var(--ground, #e8e8ec) 94%, transparent); border-bottom: 1px solid var(--line, rgb(17 17 20 / 0.11)); font-family: Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-brand { color: var(--ink, #111114); text-decoration: none; font-weight: 720; font-stretch: 112%; font-size: 1.0625rem; letter-spacing: -0.01em; } .ds-links { display: flex; gap: 4px; margin: 0 auto; padding: 0; list-style: none; } .ds-links a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--ink-2, #55555b); text-decoration: none; font-size: 0.9375rem; font-weight: 520; } .ds-links a:hover { color: var(--ink, #111114); background: var(--line, rgb(17 17 20 / 0.11)); } .ds-gh { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); border-radius: 9px; color: var(--ink, #111114); font: 560 0.875rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; text-decoration: none; } .ds-gh:hover { border-color: var(--ink-2, #55555b); } .ds-links a:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-gh:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; }"
+      "css": ".ds-nav { display: flex; align-items: center; gap: 24px; height: 64px; padding-inline: 24px; background: color-mix(in oklab, var(--ground, #e8e8ec) 90%, transparent); -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2); border-bottom: 1px solid var(--line, rgb(17 17 20 / 0.11)); font-family: Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-brand { color: var(--ink, #111114); text-decoration: none; font-weight: 720; font-stretch: 112%; font-size: 1.0625rem; letter-spacing: -0.01em; } .ds-links { display: flex; gap: 4px; margin: 0 auto; padding: 0; list-style: none; } .ds-links a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--ink-2, #55555b); text-decoration: none; font-size: 0.9375rem; font-weight: 520; } .ds-links a:hover { color: var(--ink, #111114); background: var(--line, rgb(17 17 20 / 0.11)); } .ds-gh { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); border-radius: 9px; color: var(--ink, #111114); font: 560 0.875rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; text-decoration: none; } .ds-gh:hover { border-color: var(--ink-2, #55555b); } .ds-links a:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-gh:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; }"
     },
     {
       "name": "Handoff Steps",
       "kind": "custom",
       "refersTo": "cue-light",
-      "description": "Ruled step list whose lights follow the handoff recording. The second step is shown lit.",
+      "description": "Three steps across, whose lights follow the handoff recording. The second step is shown lit.",
       "html": "<ol class=\"ds-steps\"><li><span class=\"ds-step-light\" style=\"--on: var(--handoff, #c2410c)\"></span><div><p class=\"ds-step-title\">The agent asks.</p><p>It shows up above the phone in the app.</p></div></li><li class=\"ds-lit\"><span class=\"ds-step-light\" style=\"--on: var(--you, #5856d6)\"></span><div><p class=\"ds-step-title\">You take over.</p><p>Agents are locked out while you have it.</p></div></li><li><span class=\"ds-step-light\" style=\"--on: var(--agent, #af52de)\"></span><div><p class=\"ds-step-title\">You hand it back.</p><p>The agent carries on from where it stopped.</p></div></li></ol>",
-      "css": ".ds-steps { list-style: none; margin: 0; padding: 0; font: 420 1.0625rem/1.6 Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-steps li { display: grid; grid-template-columns: 22px 1fr; gap: 14px; padding: 18px 0; border-top: 1px solid var(--line, rgb(17 17 20 / 0.11)); color: var(--ink-2, #55555b); } .ds-steps li:last-child { border-bottom: 1px solid var(--line, rgb(17 17 20 / 0.11)); } .ds-steps p { margin: 0; } .ds-step-title { color: var(--ink, #111114); font-weight: 650; margin-bottom: 2px; } .ds-step-light { width: 14px; height: 14px; padding: 2.5px; margin-top: 0.45em; border-radius: 50%; border: 1.5px solid var(--line-2, rgb(17 17 20 / 0.2)); background: var(--ink-3, #8c8c95) content-box; transition: background-color 0.3s, border-color 0.3s; } .ds-steps li.ds-lit .ds-step-light, .ds-steps li:hover .ds-step-light { background-color: var(--on); border-color: var(--on); }"
+      "css": ".ds-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 32px; list-style: none; margin: 0; padding: 0; font: 420 1.0625rem/1.6 Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-steps li { display: grid; grid-template-columns: 22px 1fr; gap: 14px; padding: 18px 0; border-top: 1px solid var(--line, rgb(17 17 20 / 0.11)); color: var(--ink-2, #55555b); } .ds-steps p { margin: 0; } .ds-step-title { color: var(--ink, #111114); font-weight: 650; margin-bottom: 2px; } .ds-step-light { width: 14px; height: 14px; padding: 2.5px; margin-top: 0.45em; border-radius: 50%; border: 1.5px solid var(--line-2, rgb(17 17 20 / 0.2)); background: var(--ink-3, #66666e) content-box; transition: background-color 0.3s, border-color 0.3s; } .ds-steps li.ds-lit .ds-step-light, .ds-steps li:hover .ds-step-light { background-color: var(--on); border-color: var(--on); }"
     },
     {
       "name": "Run-Sheet Row",
       "kind": "custom",
       "refersTo": "quote",
-      "description": "One ruled row of Prompts to try: kind, quoted prompt, note.",
+      "description": "One ruled row of More prompts to try: kind, quoted prompt, note.",
       "html": "<ul class=\"ds-runsheet\"><li><p class=\"ds-kind\">Tests for CI.</p><blockquote class=\"ds-ask\">“Save what you just did as a test.”</blockquote><p class=\"ds-what\">It becomes a YAML file that runs on every pull request.</p></li></ul>",
-      "css": ".ds-runsheet { list-style: none; margin: 0; padding: 0; font-family: Archivo, ui-sans-serif, system-ui, sans-serif; color: var(--ink, #111114); } .ds-runsheet li { display: grid; grid-template-columns: 3fr 6fr 3fr; gap: 40px; align-items: baseline; padding: 32px 0; border-block: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); } .ds-kind { margin: 0; font-weight: 660; font-stretch: 108%; } .ds-ask { margin: 0; font-size: 1.5rem; line-height: 1.4; font-weight: 520; letter-spacing: -0.012em; } .ds-what { margin: 0; color: var(--ink-2, #55555b); font-size: 0.9375rem; }"
+      "css": ".ds-runsheet { list-style: none; margin: 0; padding: 0; font-family: Archivo, ui-sans-serif, system-ui, sans-serif; color: var(--ink, #111114); } .ds-runsheet li { display: grid; grid-template-columns: 3fr 6fr 3fr; gap: 40px; align-items: baseline; padding: 28px 0; border-block: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); } .ds-kind { margin: 0; font-weight: 660; font-stretch: 108%; } .ds-ask { margin: 0; font-size: 1.5rem; line-height: 1.4; font-weight: 520; letter-spacing: -0.012em; } .ds-what { margin: 0; color: var(--ink-2, #55555b); font-size: 0.9375rem; }"
     },
     {
       "name": "Beta Tag",
@@ -635,24 +787,29 @@
   ],
   "narrative": {
     "northStar": "The Stage Seen from the Booth",
-    "overview": "The page is a stage manager's view of a show. Phones stand on their marks under a light rig, an agent calls the show, and a cue light hands the one step it can't do to a person. Dark mode is show mode: matte black tinted indigo, cool light pools, a faint haze beam over each phone. Light mode is work-light mode: the app's pale stage grey with white paper and graphite ink. Both themes come from one set of `light-dark()` custom properties on `:root`, and the 3D stage reads its own colours from the `LOOKS` table in `site/js/stage.js`.\n\nSaturated colour belongs to state. The three control colours from the Mac app (agent purple, you indigo, needs-you orange) mark who is in control, and the accent indigo fills the primary key. Everything else is ground, paper, ink and hairline rules. Sections are long ruled lists and two-column grids on the bare ground, with very few boxed containers. The real product carries the proof: the 3D hero, a screen recording of the handoff, captured phone screens in CSS handsets and a phone recording in the Prompts run-sheet.\n\nMotion is gentle and always optional. The hero stage, the wire packets in How it works, the handoff ring and the reveals all stop under `prefers-reduced-motion`. Recordings play only while on screen and always carry a Pause/Play control.",
+    "overview": "The page is a stage manager's view of a show that really happened. A plain black phone plays real screen recordings while, beside it, a dark terminal card titled Claude Code prints the agent's real calls as they land in the clip and ends on its real answer. Dark mode is show mode: matte black tinted indigo, cool light pools, film grain over a defocused night desk. Light mode is work-light mode: the app's pale stage grey with white paper and graphite ink. Both themes come from one set of `light-dark()` custom properties on `:root`, and three show bands (the hero, the use cases and the handoff) stay dark in both.\n\nSaturated colour belongs to state. The three control colours from the Mac app (agent purple, you indigo, needs-you orange) mark who is in control, and the accent indigo fills the primary key. Everything else is ground, paper, ink, hairline rules and booth light. Sections are long ruled lists and column grids on the bare ground, with very few boxed containers. Real footage carries every claim: the hero reel, the four use-case runs, the handoff recording and a frame of the real PhoneDock window. AI-generated stills appear only as mood, defocused, scrimmed or masked, and are credited in the footer.\n\nMotion is gentle and always optional. The typed prompt, the landing calls, the reveals, the wire packets and the recordings all have a still path under `prefers-reduced-motion`, and every recording carries a Pause/Play control. There are no libraries, no Three.js and no WebGL: static HTML, one stylesheet and two small modules.",
     "keyCharacteristics": [
-      "Two themes from one token set, switched by `light-dark()` and a stored toggle.",
+      "Two themes from one token set, switched by `light-dark()` and a stored toggle; show bands force the dark scheme.",
       "Archivo variable, expanded and heavy for headlines. JetBrains Mono only for tool calls, commands and YAML.",
       "Buttons are cue-light keys with a lamp dot.",
-      "State colour appears only as round cue lights, lamp dots and state-coloured text or fills.",
+      "State colour appears only as round ring-and-core lights, lamp dots, progress rails and state-coloured text or fills.",
       "Hairline-ruled lists (run-sheet, setup steps, handoff steps, FAQ) carry most sections.",
-      "A Three.js stage in the hero, with a rendered poster for reduced motion and no WebGL."
+      "Real recordings in a plain CSS phone frame, synced to a terminal card of the agent's real calls."
     ],
     "rules": [
       {
         "name": "The State Colour Rule",
-        "body": "Purple, indigo and orange mean agent, you and needs-you everywhere on the page and in the 3D scene. Don't use them for decoration.",
+        "body": "Purple, indigo and orange mean agent, you and needs-you everywhere on the page. Don't use them for decoration. Cool booth light (the indigo pool behind the hero phone, `booth`, `pool`) is lighting, not state, and stays low-alpha.",
         "section": "colors"
       },
       {
         "name": "The Shared Palette Rule",
         "body": "Control colours match `design/DESIGN.md` exactly, per theme. New state colours start in the app's guide, then come here.",
+        "section": "colors"
+      },
+      {
+        "name": "The Show Band Rule",
+        "body": "The hero, the use cases and the handoff force `color-scheme: dark` in both themes, so the footage always sits on show black. The nav reads in the dark scheme over the hero and follows the page theme once scrolled.",
         "section": "colors"
       },
       {
@@ -662,7 +819,7 @@
       },
       {
         "name": "The Typed Text Rule",
-        "body": "JetBrains Mono appears only for tool calls (`get_ui`, `tap`, `request_human`), shell commands and flow YAML or terminal output. Prose, labels and buttons never use it.",
+        "body": "JetBrains Mono appears only for tool calls (`get_ui`, `tap`, `request_human`), shell commands, the agent card's call lines and clock, and flow YAML or terminal output. Prose, prompts, answers, labels and buttons never use it.",
         "section": "typography"
       },
       {
@@ -671,25 +828,35 @@
         "section": "layout"
       },
       {
+        "name": "The One View Rule",
+        "body": "On a phone the hero demo (tabs, phone, card, note) fits one viewport, so a call lands in view while the screen changes.",
+        "section": "layout"
+      },
+      {
         "name": "The Lit Is Live Rule",
-        "body": "Light marks what is active: the phone in play gets the spotlight, the lit handoff step follows the recording, and the closing pool brightens when it scrolls into view.",
+        "body": "Light marks what is active: the running call wears the purple ring, the active task's rail fills purple, the lit handoff step follows the recording, the phone in play stands in a light pool, and the closing pool brightens when it scrolls into view.",
         "section": "elevation"
       }
     ],
     "dos": [
-      "Do take every colour from the custom properties on `:root` and give each new token a light and dark value through `light-dark()`.",
+      "Do take every colour from the custom properties on `:root` and give each new token a light and dark value through `light-dark()`; only show-band darks are fixed.",
       "Do keep agent purple, you indigo and needs-you orange tied to agent, person and help-needed states, matching `design/DESIGN.md`.",
       "Do make buttons as keys: a lamp dot, 10px corners, 48px height, hairline border, and the indigo fill only for the primary action.",
       "Do set headlines in Archivo at 110% to 116% width, 760 to 800 weight, with negative tracking.",
       "Do keep JetBrains Mono for tool calls, commands, YAML and terminal output.",
       "Do keep at least 8px of inner padding in any bordered or filled container.",
       "Do give every moving element a reduced-motion path and every video a visible Pause/Play control.",
-      "Do show the real product (renders of the app, screen recordings, captured screens) and mark each shipping raster's origin in its sidecar JSON."
+      "Do let real footage carry every claim: screen recordings, the agent's own calls and answers, frames of the real app. Mark each shipping raster's origin in its sidecar JSON.",
+      "Do keep AI-generated images to mood: defocused, scrimmed or masked, behind real footage or a heading, and credited in the footer."
     ],
     "donts": [
+      "Don't present an AI image as a recording or let it carry a claim about what the product did.",
+      "Don't name or show the real phone's brand or model; the phone frame stays a plain black slab.",
+      "Don't crop footage so a privacy blur becomes the subject.",
+      "Don't build fake product UI (drawn screens, mock phones, a 3D stage); show the real thing.",
       "Don't use the state colours as decoration, gradients or section tints.",
       "Don't set prose, labels or buttons in JetBrains Mono.",
-      "Don't add hard offset shadows. Lifted objects use the long, soft, negatively spread shadows listed above with a hairline edge.",
+      "Don't add hard offset shadows. Lifted objects use the long, soft, negatively spread shadows listed above with a hairline or rim edge.",
       "Don't use front-of-house theatre imagery (curtains, masks, velvet, marquee bulbs).",
       "Don't put a small uppercase label above a section heading. Condensed caps are kept for diagram column labels and the Beta tag."
     ]

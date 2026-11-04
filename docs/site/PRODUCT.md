@@ -11,7 +11,7 @@ web
 
 ## Stack
 
-Public landing page: plain static HTML/CSS/JS in `site/`, Three.js vendored as an ES module, deployed to GitHub Pages
+Public landing page: plain static HTML/CSS/JS in `site/` with no libraries and no build step, deployed to GitHub Pages
 under `/phonedock/` (pinned by the brief). The product itself is a native macOS app (SwiftUI) plus a local Node
 service; its own design guide is `design/DESIGN.md`.
 
