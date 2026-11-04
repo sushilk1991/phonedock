@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PhoneDock Sample</string>
+    <string name="name_hint">Your name</string>
+    <string name="greet">Greet</string>
+    <string name="notifications">Notifications</string>
+    <string name="notifications_on">Notifications on</string>
+    <string name="notifications_off">Notifications off</string>
+    <string name="crash">Crash</string>
+    <string name="account">Account</string>
+    <string name="password_hint">Password</string>
+    <string name="sign_in">Sign in</string>
+    <string name="signed_in">Signed in</string>
+    <string name="signed_out">Not signed in</string>
+</resources>

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+build/
+app/.build/
+*.log
+.DS_Store
+fixtures/downloads/
+/-
+__pycache__/
+.yoyo/
+.claude/worktrees/

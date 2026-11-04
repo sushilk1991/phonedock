@@ -1,0 +1,39 @@
+{
+  "name": "phonedock",
+  "version": "0.1.0",
+  "description": "Lets coding agents use Android emulators, iOS simulators and real phones, with an MCP server, a CLI and SDKs",
+  "type": "module",
+  "license": "Apache-2.0",
+  "homepage": "https://sushilk1991.github.io/phonedock/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sushilk1991/phonedock.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sushilk1991/phonedock/issues"
+  },
+  "bin": {
+    "phonedock": "bin/phonedock"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "daemon": "node src/daemon/main.ts",
+    "cli": "node src/cli/main.ts",
+    "mcp": "node src/cli/main.ts mcp",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test 'src/**/*.test.ts'",
+    "bundle": "node scripts/bundle.mjs",
+    "app": "bash scripts/build-app.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

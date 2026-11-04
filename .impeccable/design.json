@@ -1,0 +1,697 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-04T17:11:21.915Z",
+  "title": "Design System: PhoneDock site",
+  "scope": "Public landing page in site/ only. The Mac app design guide is design/DESIGN.md.",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Rig Indigo",
+        "canonical": "light-dark(#5856d6, #5e5ce6)",
+        "light": "#5856d6",
+        "dark": "#5e5ce6",
+        "cssVar": "--accent",
+        "tonalRamp": [
+          "oklch(15.0% 0.021 278.3)",
+          "oklch(26.4% 0.070 278.3)",
+          "oklch(37.9% 0.118 278.3)",
+          "oklch(49.3% 0.167 278.3)",
+          "oklch(60.7% 0.167 278.3)",
+          "oklch(72.1% 0.118 278.3)",
+          "oklch(83.6% 0.070 278.3)",
+          "oklch(95.0% 0.021 278.3)"
+        ]
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Rig Indigo Ink",
+        "canonical": "light-dark(#5856d6, #a5a3ff)",
+        "light": "#5856d6",
+        "dark": "#a5a3ff",
+        "cssVar": "--accent-ink",
+        "tonalRamp": [
+          "oklch(15.0% 0.021 278.3)",
+          "oklch(26.4% 0.070 278.3)",
+          "oklch(37.9% 0.118 278.3)",
+          "oklch(49.3% 0.167 278.3)",
+          "oklch(60.7% 0.167 278.3)",
+          "oklch(72.1% 0.118 278.3)",
+          "oklch(83.6% 0.070 278.3)",
+          "oklch(95.0% 0.021 278.3)"
+        ]
+      },
+      "agent": {
+        "role": "secondary",
+        "displayName": "Agent Purple",
+        "canonical": "light-dark(#af52de, #bf5af2)",
+        "light": "#af52de",
+        "dark": "#bf5af2",
+        "cssVar": "--agent",
+        "tonalRamp": [
+          "oklch(15.0% 0.024 312.4)",
+          "oklch(26.4% 0.078 312.4)",
+          "oklch(37.9% 0.132 312.4)",
+          "oklch(49.3% 0.186 312.4)",
+          "oklch(60.7% 0.186 312.4)",
+          "oklch(72.1% 0.132 312.4)",
+          "oklch(83.6% 0.078 312.4)",
+          "oklch(95.0% 0.024 312.4)"
+        ]
+      },
+      "agent-ink": {
+        "role": "secondary",
+        "displayName": "Agent Purple Ink",
+        "canonical": "light-dark(#7a2fa8, #d08cff)",
+        "light": "#7a2fa8",
+        "dark": "#d08cff",
+        "cssVar": "--agent-ink",
+        "tonalRamp": [
+          "oklch(15.0% 0.021 309.3)",
+          "oklch(26.4% 0.068 309.3)",
+          "oklch(37.9% 0.116 309.3)",
+          "oklch(49.3% 0.163 309.3)",
+          "oklch(60.7% 0.163 309.3)",
+          "oklch(72.1% 0.116 309.3)",
+          "oklch(83.6% 0.068 309.3)",
+          "oklch(95.0% 0.021 309.3)"
+        ]
+      },
+      "agent-strong": {
+        "role": "secondary",
+        "displayName": "Agent Purple Fill",
+        "canonical": "light-dark(#7a2fa8, #8e44c8)",
+        "light": "#7a2fa8",
+        "dark": "#8e44c8",
+        "cssVar": "--agent-strong",
+        "tonalRamp": [
+          "oklch(15.0% 0.021 309.3)",
+          "oklch(26.4% 0.068 309.3)",
+          "oklch(37.9% 0.116 309.3)",
+          "oklch(49.3% 0.163 309.3)",
+          "oklch(60.7% 0.163 309.3)",
+          "oklch(72.1% 0.116 309.3)",
+          "oklch(83.6% 0.068 309.3)",
+          "oklch(95.0% 0.021 309.3)"
+        ]
+      },
+      "you": {
+        "role": "secondary",
+        "displayName": "You Indigo",
+        "canonical": "light-dark(#5856d6, #7d7aff)",
+        "light": "#5856d6",
+        "dark": "#7d7aff",
+        "cssVar": "--you",
+        "tonalRamp": [
+          "oklch(15.0% 0.021 278.3)",
+          "oklch(26.4% 0.070 278.3)",
+          "oklch(37.9% 0.118 278.3)",
+          "oklch(49.3% 0.167 278.3)",
+          "oklch(60.7% 0.167 278.3)",
+          "oklch(72.1% 0.118 278.3)",
+          "oklch(83.6% 0.070 278.3)",
+          "oklch(95.0% 0.021 278.3)"
+        ]
+      },
+      "handoff": {
+        "role": "tertiary",
+        "displayName": "Needs-You Orange",
+        "canonical": "light-dark(#c2410c, #ff9f0a)",
+        "light": "#c2410c",
+        "dark": "#ff9f0a",
+        "cssVar": "--handoff",
+        "tonalRamp": [
+          "oklch(15.0% 0.019 38.4)",
+          "oklch(26.4% 0.063 38.4)",
+          "oklch(37.9% 0.108 38.4)",
+          "oklch(49.3% 0.152 38.4)",
+          "oklch(60.7% 0.152 38.4)",
+          "oklch(72.1% 0.108 38.4)",
+          "oklch(83.6% 0.063 38.4)",
+          "oklch(95.0% 0.019 38.4)"
+        ]
+      },
+      "handoff-ink": {
+        "role": "tertiary",
+        "displayName": "Needs-You Orange Ink",
+        "canonical": "light-dark(#9a3d00, #ff9f0a)",
+        "light": "#9a3d00",
+        "dark": "#ff9f0a",
+        "cssVar": "--handoff-ink",
+        "tonalRamp": [
+          "oklch(15.0% 0.015 44.8)",
+          "oklch(26.4% 0.050 44.8)",
+          "oklch(37.9% 0.085 44.8)",
+          "oklch(49.3% 0.120 44.8)",
+          "oklch(60.7% 0.120 44.8)",
+          "oklch(72.1% 0.085 44.8)",
+          "oklch(83.6% 0.050 44.8)",
+          "oklch(95.0% 0.015 44.8)"
+        ]
+      },
+      "ok": {
+        "role": "tertiary",
+        "displayName": "Pass Green",
+        "canonical": "light-dark(#248a3d, #30d158)",
+        "light": "#248a3d",
+        "dark": "#30d158",
+        "cssVar": "--ok",
+        "tonalRamp": [
+          "oklch(15.0% 0.016 147.5)",
+          "oklch(26.4% 0.053 147.5)",
+          "oklch(37.9% 0.090 147.5)",
+          "oklch(49.3% 0.128 147.5)",
+          "oklch(60.7% 0.128 147.5)",
+          "oklch(72.1% 0.090 147.5)",
+          "oklch(83.6% 0.053 147.5)",
+          "oklch(95.0% 0.016 147.5)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Stage Grey / Stage Black",
+        "canonical": "light-dark(#e8e8ec, #0a0a0f)",
+        "light": "#e8e8ec",
+        "dark": "#0a0a0f",
+        "cssVar": "--ground",
+        "tonalRamp": [
+          "oklch(15.0% 0.001 286.3)",
+          "oklch(26.4% 0.002 286.3)",
+          "oklch(37.9% 0.003 286.3)",
+          "oklch(49.3% 0.005 286.3)",
+          "oklch(60.7% 0.005 286.3)",
+          "oklch(72.1% 0.003 286.3)",
+          "oklch(83.6% 0.002 286.3)",
+          "oklch(95.0% 0.001 286.3)"
+        ]
+      },
+      "ground-deep": {
+        "role": "neutral",
+        "displayName": "Deep Ground",
+        "canonical": "light-dark(#dedee4, #07070b)",
+        "light": "#dedee4",
+        "dark": "#07070b",
+        "cssVar": "--ground-deep",
+        "tonalRamp": [
+          "oklch(15.0% 0.001 286.2)",
+          "oklch(26.4% 0.003 286.2)",
+          "oklch(37.9% 0.005 286.2)",
+          "oklch(49.3% 0.007 286.2)",
+          "oklch(60.7% 0.007 286.2)",
+          "oklch(72.1% 0.005 286.2)",
+          "oklch(83.6% 0.003 286.2)",
+          "oklch(95.0% 0.001 286.2)"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Prompt-Book Paper",
+        "canonical": "light-dark(#ffffff, #12121a)",
+        "light": "#ffffff",
+        "dark": "#12121a",
+        "cssVar": "--paper",
+        "tonalRamp": [
+          "oklch(15.0% 0.000 89.9)",
+          "oklch(26.4% 0.000 89.9)",
+          "oklch(37.9% 0.000 89.9)",
+          "oklch(49.3% 0.000 89.9)",
+          "oklch(60.7% 0.000 89.9)",
+          "oklch(72.1% 0.000 89.9)",
+          "oklch(83.6% 0.000 89.9)",
+          "oklch(95.0% 0.000 89.9)"
+        ]
+      },
+      "paper-2": {
+        "role": "neutral",
+        "displayName": "Second Paper",
+        "canonical": "light-dark(#f6f6f8, #171722)",
+        "light": "#f6f6f8",
+        "dark": "#171722",
+        "cssVar": "--paper-2",
+        "tonalRamp": [
+          "oklch(15.0% 0.000 286.4)",
+          "oklch(26.4% 0.001 286.4)",
+          "oklch(37.9% 0.002 286.4)",
+          "oklch(49.3% 0.002 286.4)",
+          "oklch(60.7% 0.002 286.4)",
+          "oklch(72.1% 0.002 286.4)",
+          "oklch(83.6% 0.001 286.4)",
+          "oklch(95.0% 0.000 286.4)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Graphite Ink",
+        "canonical": "light-dark(#111114, #eeeef4)",
+        "light": "#111114",
+        "dark": "#eeeef4",
+        "cssVar": "--ink",
+        "tonalRamp": [
+          "oklch(15.0% 0.001 285.8)",
+          "oklch(26.4% 0.002 285.8)",
+          "oklch(37.9% 0.004 285.8)",
+          "oklch(49.3% 0.005 285.8)",
+          "oklch(60.7% 0.005 285.8)",
+          "oklch(72.1% 0.004 285.8)",
+          "oklch(83.6% 0.002 285.8)",
+          "oklch(95.0% 0.001 285.8)"
+        ]
+      },
+      "ink-2": {
+        "role": "neutral",
+        "displayName": "Graphite Ink 2",
+        "canonical": "light-dark(#55555b, #a9a9b9)",
+        "light": "#55555b",
+        "dark": "#a9a9b9",
+        "cssVar": "--ink-2",
+        "tonalRamp": [
+          "oklch(15.0% 0.001 286.0)",
+          "oklch(26.4% 0.004 286.0)",
+          "oklch(37.9% 0.006 286.0)",
+          "oklch(49.3% 0.008 286.0)",
+          "oklch(60.7% 0.008 286.0)",
+          "oklch(72.1% 0.006 286.0)",
+          "oklch(83.6% 0.004 286.0)",
+          "oklch(95.0% 0.001 286.0)"
+        ]
+      },
+      "ink-3": {
+        "role": "neutral",
+        "displayName": "Graphite Ink 3",
+        "canonical": "light-dark(#8c8c95, #5c5c6b)",
+        "light": "#8c8c95",
+        "dark": "#5c5c6b",
+        "cssVar": "--ink-3",
+        "tonalRamp": [
+          "oklch(15.0% 0.001 286.0)",
+          "oklch(26.4% 0.005 286.0)",
+          "oklch(37.9% 0.008 286.0)",
+          "oklch(49.3% 0.012 286.0)",
+          "oklch(60.7% 0.012 286.0)",
+          "oklch(72.1% 0.008 286.0)",
+          "oklch(83.6% 0.005 286.0)",
+          "oklch(95.0% 0.001 286.0)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "light-dark(rgb(17 17 20 / 0.11), rgb(255 255 255 / 0.085))",
+        "light": "rgb(17 17 20 / 0.11)",
+        "dark": "rgb(255 255 255 / 0.085)",
+        "cssVar": "--line"
+      },
+      "line-2": {
+        "role": "neutral",
+        "displayName": "Strong Hairline",
+        "canonical": "light-dark(rgb(17 17 20 / 0.2), rgb(255 255 255 / 0.16))",
+        "light": "rgb(17 17 20 / 0.2)",
+        "dark": "rgb(255 255 255 / 0.16)",
+        "cssVar": "--line-2"
+      },
+      "handset-black": {
+        "role": "neutral",
+        "displayName": "Handset Black",
+        "canonical": "#0c0c0e",
+        "tonalRamp": [
+          "oklch(15.0% 0.000 285.9)",
+          "oklch(26.4% 0.002 285.9)",
+          "oklch(37.9% 0.003 285.9)",
+          "oklch(49.3% 0.004 285.9)",
+          "oklch(60.7% 0.004 285.9)",
+          "oklch(72.1% 0.003 285.9)",
+          "oklch(83.6% 0.002 285.9)",
+          "oklch(95.0% 0.000 285.9)"
+        ]
+      },
+      "on-fill": {
+        "role": "neutral",
+        "displayName": "On Fill White",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15.0% 0.000 89.9)",
+          "oklch(26.4% 0.000 89.9)",
+          "oklch(37.9% 0.000 89.9)",
+          "oklch(49.3% 0.000 89.9)",
+          "oklch(60.7% 0.000 89.9)",
+          "oklch(72.1% 0.000 89.9)",
+          "oklch(83.6% 0.000 89.9)",
+          "oklch(95.0% 0.000 89.9)"
+        ]
+      }
+    },
+    "themes": {
+      "mechanism": "CSS light-dark() on :root with color-scheme light dark. data-theme=\"light\" or \"dark\" on <html> forces a theme, stored in localStorage as pd-theme.",
+      "stageLooks": {
+        "source": "site/js/stage.js LOOKS",
+        "dark": {
+          "bg": "#0a0a0f",
+          "floor": "#1a1a24",
+          "agent": "#bf5af2",
+          "you": "#8f8cff",
+          "handoff": "#ff9f0a",
+          "packet": "#b9b4ff",
+          "spotlight": "#f4f2ff",
+          "beamColour": "#dfe0ff",
+          "beams": 0.11,
+          "glow": 0.75,
+          "spotIdle": 0.36,
+          "additive": true,
+          "fog": [
+            11,
+            30
+          ]
+        },
+        "light": {
+          "bg": "#e8e8ec",
+          "floor": "#dcdce3",
+          "agent": "#af52de",
+          "you": "#5856d6",
+          "handoff": "#c2410c",
+          "packet": "#5856d6",
+          "spotlight": "#f4f2ff",
+          "beams": 0,
+          "glow": 0,
+          "spotIdle": 0.6,
+          "additive": false,
+          "fog": [
+            13,
+            34
+          ]
+        }
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero headline only. Below 820px it is clamp(2.125rem, 9.4vw, 2.75rem). The closing heading uses 800 weight at 116% width, clamp(2.5rem, 5.2vw, 4.75rem), -0.035em.",
+        "fontStretch": "110%"
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section headings.",
+        "fontStretch": "112%"
+      },
+      "lede": {
+        "displayName": "Lede",
+        "purpose": "The opening statement of What it is, capped at 44ch.",
+        "fontStretch": "104%"
+      },
+      "quote": {
+        "displayName": "Quote",
+        "purpose": "Prompts in the run-sheet."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Setup step titles, device names, Privacy and limits subheads (680 to 700, 1.0625 to 1.25rem).",
+        "fontStretch": "108%"
+      },
+      "sub": {
+        "displayName": "Sub",
+        "purpose": "Lines under section headings, in ink-2, max 38rem."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Running text. Strong is 650."
+      },
+      "small": {
+        "displayName": "Small",
+        "purpose": "Captions and notes."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Uppercase condensed column labels in the How it works diagram.",
+        "fontStretch": "80%",
+        "textTransform": "uppercase"
+      },
+      "key": {
+        "displayName": "Key",
+        "purpose": "Text on keys.",
+        "fontStretch": "104%"
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Inline tool calls and commands."
+      },
+      "code-block": {
+        "displayName": "Code Block",
+        "purpose": "Flow YAML and terminal output in the prompt book."
+      }
+    },
+    "fonts": [
+      {
+        "family": "Archivo",
+        "src": "site/fonts/archivo-var.woff2",
+        "weight": "400 850",
+        "stretch": "75% 125%",
+        "license": "OFL",
+        "selfHosted": true
+      },
+      {
+        "family": "JetBrains Mono",
+        "src": "site/fonts/jetbrains-mono-var.woff2",
+        "weight": "100 800",
+        "license": "OFL",
+        "selfHosted": true
+      }
+    ],
+    "shadows": [
+      {
+        "name": "panel-lift",
+        "value": "0 18px 40px -26px rgb(0 0 0 / 0.65)",
+        "purpose": "Cue panel."
+      },
+      {
+        "name": "hub-lift",
+        "value": "0 24px 60px -36px rgb(0 0 0 / 0.5)",
+        "purpose": "PhoneDock card in the How it works diagram."
+      },
+      {
+        "name": "book-lift",
+        "value": "0 40px 90px -50px rgb(0 0 0 / 0.45)",
+        "purpose": "Open prompt book in Flows."
+      },
+      {
+        "name": "media-lift",
+        "value": "0 0 0 1px var(--line-2), 0 40px 100px -50px rgb(0 0 0 / 0.55)",
+        "purpose": "Handoff recording frame."
+      },
+      {
+        "name": "handset-lift",
+        "value": "0 0 0 1px var(--line-2), 0 34px 60px -38px rgb(0 0 0 / 0.75)",
+        "purpose": "CSS handsets."
+      },
+      {
+        "name": "icon-drop",
+        "value": "drop-shadow(0 24px 30px rgb(0 0 0 / 0.35))",
+        "purpose": "App icon in the closing section, as a filter."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Every CSS transition and keyframe on the page."
+      },
+      {
+        "name": "key-state",
+        "value": "0.18s",
+        "purpose": "Key border and background. Press is 0.12s with a 1px drop."
+      },
+      {
+        "name": "lamp",
+        "value": "0.2s",
+        "purpose": "Lamp dot lighting on hover or focus."
+      },
+      {
+        "name": "nav",
+        "value": "0.3s",
+        "purpose": "Nav wash and rule after 24px of scroll."
+      },
+      {
+        "name": "reveal",
+        "value": "0.9s, translateY(18px) to none",
+        "purpose": "Section blocks fade up once on entry, only when reduced motion is not requested."
+      },
+      {
+        "name": "stage-fade",
+        "value": "0.9s",
+        "purpose": "The WebGL canvas fades in over the poster."
+      },
+      {
+        "name": "handoff-ring",
+        "value": "1.4s infinite",
+        "purpose": "Pulsing ring on the cue light in the handoff state. Static at 0.6 opacity with reduced motion."
+      },
+      {
+        "name": "wire-packet",
+        "value": "2.6s infinite",
+        "purpose": "Packets along the diagram wires while visible. Off with reduced motion."
+      },
+      {
+        "name": "pool",
+        "value": "1.6s",
+        "purpose": "Closing light pool brightens from 0.25 to 1 opacity when in view."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide",
+        "value": "1081px",
+        "purpose": "Cue panel placed above the 3D window. Nav links shown."
+      },
+      {
+        "name": "mid",
+        "value": "1080px",
+        "purpose": "Hero stacks: stage, cue panel, copy. Gutter 40px, section padding 96px. Nav links hide."
+      },
+      {
+        "name": "narrow",
+        "value": "820px",
+        "purpose": "Single-column grids, gutter 20px, section padding 72px, prompt book pages stack."
+      },
+      {
+        "name": "small",
+        "value": "480px",
+        "purpose": "Keys share the row width, GitHub label hides."
+      }
+    ],
+    "fallbacks": {
+      "poster": "Rendered stills of the same Three.js scene at the handoff moment, per theme and for narrow screens (site/assets/hero-poster-*.webp), each with a provenance JSON.",
+      "triggers": [
+        "prefers-reduced-motion: reduce",
+        "Save-Data",
+        "no WebGL2",
+        "stage.js load failure"
+      ],
+      "cue": "Static cue panel that holds the handoff moment with working Take Over and Done and a polite live region."
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Key",
+      "kind": "button",
+      "refersTo": "key-primary",
+      "description": "The indigo action, Download for Mac. A key with a lamp dot that turns solid white on hover.",
+      "html": "<a class=\"ds-key ds-key-primary\" href=\"#\"><span class=\"ds-lamp\" aria-hidden=\"true\"></span>Download for Mac</a>",
+      "css": ".ds-key { --lamp: var(--ink-3, #8c8c95); display: inline-flex; align-items: center; gap: 0.65em; min-height: 48px; padding: 0 20px 0 16px; border-radius: 10px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 620 1rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-decoration: none; cursor: pointer; transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover { border-color: var(--ink-2, #55555b); } .ds-key:active { transform: translateY(1px); } .ds-key:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-lamp { width: 12px; height: 12px; padding: 2px; border-radius: 50%; flex: none; border: 1.5px solid var(--lamp-ring, var(--line-2, rgb(17 17 20 / 0.2))); background: var(--lamp) content-box; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover .ds-lamp, .ds-key:focus-visible .ds-lamp { --lamp: var(--accent-ink, #5856d6); --lamp-ring: var(--accent-ink, #5856d6); } .ds-key-primary { --lamp: rgb(255 255 255 / 0.45); --lamp-ring: rgb(255 255 255 / 0.35); background: var(--accent, #5856d6); border-color: transparent; color: #fff; } .ds-key-primary:hover { background: color-mix(in oklab, var(--accent, #5856d6) 88%, #fff); border-color: transparent; } .ds-key-primary:hover .ds-lamp, .ds-key-primary:focus-visible .ds-lamp { --lamp: #fff; --lamp-ring: #fff; }"
+    },
+    {
+      "name": "Key",
+      "kind": "button",
+      "refersTo": "key",
+      "description": "Secondary action. A hairline key on a paper wash whose lamp lights indigo on hover or focus.",
+      "html": "<a class=\"ds-key\" href=\"#\"><span class=\"ds-lamp\" aria-hidden=\"true\"></span>View on GitHub</a>",
+      "css": ".ds-key { --lamp: var(--ink-3, #8c8c95); display: inline-flex; align-items: center; gap: 0.65em; min-height: 48px; padding: 0 20px 0 16px; border-radius: 10px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 620 1rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 104%; text-decoration: none; cursor: pointer; transition: border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.18s cubic-bezier(0.16, 1, 0.3, 1), transform 0.12s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover { border-color: var(--ink-2, #55555b); } .ds-key:active { transform: translateY(1px); } .ds-key:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-lamp { width: 12px; height: 12px; padding: 2px; border-radius: 50%; flex: none; border: 1.5px solid var(--lamp-ring, var(--line-2, rgb(17 17 20 / 0.2))); background: var(--lamp) content-box; transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-key:hover .ds-lamp, .ds-key:focus-visible .ds-lamp { --lamp: var(--accent-ink, #5856d6); --lamp-ring: var(--accent-ink, #5856d6); }"
+    },
+    {
+      "name": "Cue Panel",
+      "kind": "custom",
+      "refersTo": "cue-panel",
+      "description": "Says who is in control of the hero demo. Shown in the handoff state with Take Over and Done.",
+      "html": "<div class=\"ds-cue\"><div class=\"ds-cue-row\"><span class=\"ds-cue-light\" aria-hidden=\"true\"></span><p class=\"ds-cue-text\"><span class=\"ds-cue-state\">Claude Code is waiting for you</span><span>Approve the Face ID prompt, then tap Done.</span></p></div><div class=\"ds-cue-actions\"><button type=\"button\" class=\"ds-key-small ds-take\">Take Over</button><button type=\"button\" class=\"ds-key-small\" disabled>Done</button></div></div>",
+      "css": ".ds-cue { --state: var(--handoff, #c2410c); display: grid; gap: 8px; max-width: 440px; padding: 8px 8px 8px 16px; border: 1px solid color-mix(in oklab, var(--handoff, #c2410c) 55%, var(--line-2, rgb(17 17 20 / 0.2))); border-radius: 16px; background: var(--paper, #fff); box-shadow: 0 18px 40px -26px rgb(0 0 0 / 0.65); font: 420 0.875rem/1.4 Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-cue-row { display: flex; align-items: center; gap: 10px; min-height: 34px; } .ds-cue-light { position: relative; width: 14px; height: 14px; padding: 2.5px; border-radius: 50%; flex: none; border: 1.5px solid var(--state); background: var(--state) content-box; } .ds-cue-light::after { content: \"\"; position: absolute; inset: -5px; border-radius: 50%; border: 1.5px solid var(--state); animation: ds-ring 1.4s cubic-bezier(0.16, 1, 0.3, 1) infinite; } @keyframes ds-ring { from { transform: scale(0.5); opacity: 1; } to { transform: scale(1.5); opacity: 0; } } @media (prefers-reduced-motion: reduce) { .ds-cue-light::after { animation: none; opacity: 0.6; } } .ds-cue-text { margin: 0; color: var(--ink-2, #55555b); } .ds-cue-state { display: block; font-weight: 640; color: var(--handoff-ink, #9a3d00); } .ds-cue-actions { display: flex; gap: 8px; margin: 0 0 6px 24px; } .ds-key-small { min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: color-mix(in oklab, var(--paper, #fff) 72%, transparent); color: var(--ink, #111114); font: 640 0.875rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; cursor: pointer; } .ds-key-small:hover { border-color: var(--ink-2, #55555b); } .ds-key-small:disabled { opacity: 0.45; cursor: default; } .ds-take { background: var(--agent-strong, #7a2fa8); color: #fff; border-color: transparent; } .ds-take:hover { background: color-mix(in oklab, var(--agent-strong, #7a2fa8) 88%, #fff); border-color: transparent; } .ds-key-small:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; }"
+    },
+    {
+      "name": "Command Field",
+      "kind": "input",
+      "refersTo": "command-field",
+      "description": "A copyable command in mono with a Copy button that goes green after a copy.",
+      "html": "<div class=\"ds-cmd\"><code>phonedock setup</code><button type=\"button\" class=\"ds-copy\"><svg aria-hidden=\"true\" viewBox=\"0 0 16 16\" width=\"15\" height=\"15\"><rect x=\"5\" y=\"5\" width=\"9\" height=\"9\" rx=\"2\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"/><path d=\"M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"/></svg>Copy</button></div>",
+      "css": ".ds-cmd { display: flex; align-items: center; gap: 12px; padding: 14px 14px 14px 20px; border-radius: 12px; background: var(--paper, #fff); border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); } .ds-cmd code { flex: 1; min-width: 0; font: 450 1rem \"JetBrains Mono\", ui-monospace, Menlo, monospace; letter-spacing: -0.01em; color: var(--ink, #111114); white-space: nowrap; overflow-x: auto; } .ds-copy { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); background: var(--paper-2, #f6f6f8); color: var(--ink, #111114); font: 600 0.8125rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; cursor: pointer; } .ds-copy:hover { border-color: var(--ink-2, #55555b); } .ds-copy:active { color: var(--ok, #248a3d); border-color: color-mix(in oklab, var(--ok, #248a3d) 50%, transparent); } .ds-copy:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; }"
+    },
+    {
+      "name": "Navigation",
+      "kind": "nav",
+      "refersTo": "nav-button",
+      "description": "Fixed top bar after scroll. Quiet ink-2 links with rounded hover fills and an outlined 36px GitHub button.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-brand\" href=\"#\">PhoneDock</a><ul class=\"ds-links\"><li><a href=\"#\">How it works</a></li><li><a href=\"#\">Handoff</a></li><li><a href=\"#\">Setup</a></li></ul><a class=\"ds-gh\" href=\"#\">GitHub</a></nav>",
+      "css": ".ds-nav { display: flex; align-items: center; gap: 24px; height: 64px; padding-inline: 24px; background: color-mix(in oklab, var(--ground, #e8e8ec) 94%, transparent); border-bottom: 1px solid var(--line, rgb(17 17 20 / 0.11)); font-family: Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-brand { color: var(--ink, #111114); text-decoration: none; font-weight: 720; font-stretch: 112%; font-size: 1.0625rem; letter-spacing: -0.01em; } .ds-links { display: flex; gap: 4px; margin: 0 auto; padding: 0; list-style: none; } .ds-links a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--ink-2, #55555b); text-decoration: none; font-size: 0.9375rem; font-weight: 520; } .ds-links a:hover { color: var(--ink, #111114); background: var(--line, rgb(17 17 20 / 0.11)); } .ds-gh { display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); border-radius: 9px; color: var(--ink, #111114); font: 560 0.875rem/1 Archivo, ui-sans-serif, system-ui, sans-serif; text-decoration: none; } .ds-gh:hover { border-color: var(--ink-2, #55555b); } .ds-links a:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; } .ds-gh:focus-visible { outline: 2px solid var(--accent-ink, #5856d6); outline-offset: 3px; }"
+    },
+    {
+      "name": "Handoff Steps",
+      "kind": "custom",
+      "refersTo": "cue-light",
+      "description": "Ruled step list whose lights follow the handoff recording. The second step is shown lit.",
+      "html": "<ol class=\"ds-steps\"><li><span class=\"ds-step-light\" style=\"--on: var(--handoff, #c2410c)\"></span><div><p class=\"ds-step-title\">The agent asks.</p><p>It shows up above the phone in the app.</p></div></li><li class=\"ds-lit\"><span class=\"ds-step-light\" style=\"--on: var(--you, #5856d6)\"></span><div><p class=\"ds-step-title\">You take over.</p><p>Agents are locked out while you have it.</p></div></li><li><span class=\"ds-step-light\" style=\"--on: var(--agent, #af52de)\"></span><div><p class=\"ds-step-title\">You hand it back.</p><p>The agent carries on from where it stopped.</p></div></li></ol>",
+      "css": ".ds-steps { list-style: none; margin: 0; padding: 0; font: 420 1.0625rem/1.6 Archivo, ui-sans-serif, system-ui, sans-serif; } .ds-steps li { display: grid; grid-template-columns: 22px 1fr; gap: 14px; padding: 18px 0; border-top: 1px solid var(--line, rgb(17 17 20 / 0.11)); color: var(--ink-2, #55555b); } .ds-steps li:last-child { border-bottom: 1px solid var(--line, rgb(17 17 20 / 0.11)); } .ds-steps p { margin: 0; } .ds-step-title { color: var(--ink, #111114); font-weight: 650; margin-bottom: 2px; } .ds-step-light { width: 14px; height: 14px; padding: 2.5px; margin-top: 0.45em; border-radius: 50%; border: 1.5px solid var(--line-2, rgb(17 17 20 / 0.2)); background: var(--ink-3, #8c8c95) content-box; transition: background-color 0.3s, border-color 0.3s; } .ds-steps li.ds-lit .ds-step-light, .ds-steps li:hover .ds-step-light { background-color: var(--on); border-color: var(--on); }"
+    },
+    {
+      "name": "Run-Sheet Row",
+      "kind": "custom",
+      "refersTo": "quote",
+      "description": "One ruled row of Prompts to try: kind, quoted prompt, note.",
+      "html": "<ul class=\"ds-runsheet\"><li><p class=\"ds-kind\">Tests for CI.</p><blockquote class=\"ds-ask\">“Save what you just did as a test.”</blockquote><p class=\"ds-what\">It becomes a YAML file that runs on every pull request.</p></li></ul>",
+      "css": ".ds-runsheet { list-style: none; margin: 0; padding: 0; font-family: Archivo, ui-sans-serif, system-ui, sans-serif; color: var(--ink, #111114); } .ds-runsheet li { display: grid; grid-template-columns: 3fr 6fr 3fr; gap: 40px; align-items: baseline; padding: 32px 0; border-block: 1px solid var(--line-2, rgb(17 17 20 / 0.2)); } .ds-kind { margin: 0; font-weight: 660; font-stretch: 108%; } .ds-ask { margin: 0; font-size: 1.5rem; line-height: 1.4; font-weight: 520; letter-spacing: -0.012em; } .ds-what { margin: 0; color: var(--ink-2, #55555b); font-size: 0.9375rem; }"
+    },
+    {
+      "name": "Beta Tag",
+      "kind": "chip",
+      "refersTo": "beta-tag",
+      "description": "Condensed caps tag for real iPhone support.",
+      "html": "<span class=\"ds-beta\">Beta</span>",
+      "css": ".ds-beta { display: inline-block; padding: 4px 8px; border-radius: 6px; border: 1px solid currentColor; font: 650 0.6875rem/1.3 Archivo, ui-sans-serif, system-ui, sans-serif; font-stretch: 85%; letter-spacing: 0.06em; text-transform: uppercase; color: var(--handoff-ink, #9a3d00); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Stage Seen from the Booth",
+    "overview": "The page is a stage manager's view of a show. Phones stand on their marks under a light rig, an agent calls the show, and a cue light hands the one step it can't do to a person. Dark mode is show mode: matte black tinted indigo, cool light pools, a faint haze beam over each phone. Light mode is work-light mode: the app's pale stage grey with white paper and graphite ink. Both themes come from one set of `light-dark()` custom properties on `:root`, and the 3D stage reads its own colours from the `LOOKS` table in `site/js/stage.js`.\n\nSaturated colour belongs to state. The three control colours from the Mac app (agent purple, you indigo, needs-you orange) mark who is in control, and the accent indigo fills the primary key. Everything else is ground, paper, ink and hairline rules. Sections are long ruled lists and two-column grids on the bare ground, with very few boxed containers. The real product carries the proof: the 3D hero, a screen recording of the handoff, captured phone screens in CSS handsets and a phone recording in the Prompts run-sheet.\n\nMotion is gentle and always optional. The hero stage, the wire packets in How it works, the handoff ring and the reveals all stop under `prefers-reduced-motion`. Recordings play only while on screen and always carry a Pause/Play control.",
+    "keyCharacteristics": [
+      "Two themes from one token set, switched by `light-dark()` and a stored toggle.",
+      "Archivo variable, expanded and heavy for headlines. JetBrains Mono only for tool calls, commands and YAML.",
+      "Buttons are cue-light keys with a lamp dot.",
+      "State colour appears only as round cue lights, lamp dots and state-coloured text or fills.",
+      "Hairline-ruled lists (run-sheet, setup steps, handoff steps, FAQ) carry most sections.",
+      "A Three.js stage in the hero, with a rendered poster for reduced motion and no WebGL."
+    ],
+    "rules": [
+      {
+        "name": "The State Colour Rule",
+        "body": "Purple, indigo and orange mean agent, you and needs-you everywhere on the page and in the 3D scene. Don't use them for decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Shared Palette Rule",
+        "body": "Control colours match `design/DESIGN.md` exactly, per theme. New state colours start in the app's guide, then come here.",
+        "section": "colors"
+      },
+      {
+        "name": "The Wide Headline Rule",
+        "body": "Headlines use Archivo at 110% to 116% width with negative tracking (-0.028em to -0.035em). Body text stays at 100% width.",
+        "section": "typography"
+      },
+      {
+        "name": "The Typed Text Rule",
+        "body": "JetBrains Mono appears only for tool calls (`get_ui`, `tap`, `request_human`), shell commands and flow YAML or terminal output. Prose, labels and buttons never use it.",
+        "section": "typography"
+      },
+      {
+        "name": "The Inner Padding Rule",
+        "body": "A bordered or filled container keeps at least 8px of inner padding between its edge and its content.",
+        "section": "layout"
+      },
+      {
+        "name": "The Lit Is Live Rule",
+        "body": "Light marks what is active: the phone in play gets the spotlight, the lit handoff step follows the recording, and the closing pool brightens when it scrolls into view.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do take every colour from the custom properties on `:root` and give each new token a light and dark value through `light-dark()`.",
+      "Do keep agent purple, you indigo and needs-you orange tied to agent, person and help-needed states, matching `design/DESIGN.md`.",
+      "Do make buttons as keys: a lamp dot, 10px corners, 48px height, hairline border, and the indigo fill only for the primary action.",
+      "Do set headlines in Archivo at 110% to 116% width, 760 to 800 weight, with negative tracking.",
+      "Do keep JetBrains Mono for tool calls, commands, YAML and terminal output.",
+      "Do keep at least 8px of inner padding in any bordered or filled container.",
+      "Do give every moving element a reduced-motion path and every video a visible Pause/Play control.",
+      "Do show the real product (renders of the app, screen recordings, captured screens) and mark each shipping raster's origin in its sidecar JSON."
+    ],
+    "donts": [
+      "Don't use the state colours as decoration, gradients or section tints.",
+      "Don't set prose, labels or buttons in JetBrains Mono.",
+      "Don't add hard offset shadows. Lifted objects use the long, soft, negatively spread shadows listed above with a hairline edge.",
+      "Don't use front-of-house theatre imagery (curtains, masks, velvet, marquee bulbs).",
+      "Don't put a small uppercase label above a section heading. Condensed caps are kept for diagram column labels and the Beta tag."
+    ]
+  }
+}

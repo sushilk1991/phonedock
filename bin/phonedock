@@ -1,0 +1,20 @@
+#!/bin/sh
+# phonedock launcher: resolve symlinks (e.g. /opt/homebrew/bin/phonedock → repo/bin/phonedock) and run the CLI.
+set -e
+self="$0"
+while [ -L "$self" ]; do
+  target=$(readlink "$self")
+  case "$target" in
+    /*) self="$target" ;;
+    *) self="$(dirname "$self")/$target" ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd -P)
+node_bin="${PHONEDOCK_NODE:-node}"
+if ! command -v "$node_bin" >/dev/null 2>&1; then
+  for c in "$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && node_bin="$c" && break; done
+fi
+if [ -f "$root/dist/cli/phonedock.mjs" ] && [ ! -f "$root/src/cli/main.ts" ]; then
+  exec "$node_bin" "$root/dist/cli/phonedock.mjs" "$@"
+fi
+exec "$node_bin" --no-warnings=ExperimentalWarning "$root/src/cli/main.ts" "$@"

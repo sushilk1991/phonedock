@@ -1,0 +1,26 @@
+# PhoneDock flow, saved by `phonedock flow save` from pdtest-flow-pixel (Android 16 (API 36)) at 2026-11-04 14:05:04 UTC.
+# Run it:  phonedock test <this file> --device <id>     Format: docs/API.md#flows
+#
+# Left out of this flow:
+# - 1 failed wait (timed out)
+version: 1
+name: Greet Ada and turn on notifications
+appId: dev.phonedock.sample
+platform: android
+minOS: "16"
+recordedOn:
+  device: pdtest-flow-pixel
+  model: pixel_9
+  os: Android 16 (API 36)
+  screen: 1080x2424
+  at: 2026-11-04T14:05:04.257Z
+steps:
+  - launch: dev.phonedock.sample
+  # assertion added by flow save: edit or remove it
+  - assert_visible: PhoneDock Sample
+  - fill: { field: Your name, value: Ada }
+  - tap: Greet
+  - wait_for: { visible: "Hello, Ada!" }
+  - tap: { text: Notifications, type: Switch }
+  # assertion added by flow save: edit or remove it
+  - assert_visible: Notifications on

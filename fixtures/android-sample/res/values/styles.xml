@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material theme (no AndroidX). The title is a TextView in the layout: with targetSdk 35+ (edge-to-edge)
+         the framework action bar overlaps the content, so the app pads the content by the system-bar insets itself. -->
+    <style name="SampleTheme" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

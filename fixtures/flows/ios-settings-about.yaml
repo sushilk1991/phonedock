@@ -1,0 +1,20 @@
+# PhoneDock flow, saved by `phonedock flow save` from pdtest-flow-iphone (26.5) at 2026-11-04 13:46:30 UTC.
+# Run it:  phonedock test <this file> --device <id>     Format: docs/API.md#flows
+version: 1
+name: "Settings: General > About shows the iOS version"
+appId: com.apple.Preferences
+platform: ios
+minOS: "26.5"
+recordedOn:
+  device: pdtest-flow-iphone
+  model: iPhone 17 Pro
+  os: "26.5"
+  screen: 1206x2622
+  at: 2026-11-04T13:46:30.937Z
+steps:
+  - launch: com.apple.Preferences
+  # assertion added by flow save: edit or remove it
+  - assert_visible: Settings
+  - tap: General
+  - tap: About
+  - assert_visible: iOS Version
