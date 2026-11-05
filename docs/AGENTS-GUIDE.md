@@ -119,7 +119,7 @@ Optional env: `PHONEDOCK_PORT` / `PHONEDOCK_HOME` (point at a non-default daemon
 | Sequencing | `batch` (several tool calls in one round trip), `request_human` (hand the device to a person and wait) |
 | Regression tests | `save_flow` (your session → a flow file: YAML steps + assertions), `run_flow` (run flow files: PASS/FAIL per step, artifacts on failure) |
 | Performance | `start_trace`, `stop_trace` (iOS: xctrace hangs + main-thread hot spots; Android: perfetto + janky frames / frame-time percentiles; compares with the previous run) |
-| Apps/system | `list_apps`, `install_app`, `uninstall_app`, `launch_app`, `terminate_app`, `open_url`, `shell` (runs inside the device), `get_logs`, `set_location`, `set_appearance` (dark/light), `rotate`, `clipboard` (get / set the device clipboard's text), `push_file`, `pull_file`, `push_notification`, `wait` (plain sleep) |
+| Apps/system | `list_apps`, `install_app`, `uninstall_app`, `launch_app`, `terminate_app`, `open_url`, `shell` (runs inside the device), `get_logs`, `set_location`, `set_appearance` (dark/light), `device_settings` (text size, contrast, bold text, reduce motion), `rotate`, `clipboard` (get / set the device clipboard's text), `push_file`, `pull_file`, `push_notification`, `wait` (plain sleep) |
 | Debug/state | `list_crashes`, `get_crash`, `record_screen` (start/stop/status → .mp4), `app_data` (save/restore/list an app's data container) |
 | Physical | `discover_devices` (iPhones), `connect_device`, `discover_android_phones`, `pair_android_phone` |
 

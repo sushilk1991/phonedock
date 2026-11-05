@@ -17,12 +17,25 @@ export type Capability =
   | 'tap' | 'longPress' | 'swipe' | 'type' | 'key'
   | 'install' | 'apps' | 'launch' | 'openUrl'
   | 'shell' | 'files' | 'logs' | 'location' | 'push' | 'rotate' | 'clipboard' | 'root' | 'window'
-  | 'record' | 'crashes' | 'appData' | 'doubleTap' | 'pinch' | 'appearance'
+  | 'record' | 'crashes' | 'appData' | 'doubleTap' | 'pinch' | 'appearance' | 'settings'
   | 'trace'    // performance trace of one app (startTrace/stopTrace)
   | 'video';   // live H.264 video (Backend.video, GET /v1/devices/:id/video)
 
 /** System-wide light/dark appearance (iOS "Dark Appearance", Android night mode). */
 export type Appearance = 'dark' | 'light';
+
+export type { TextSizeInput, SettingsInput } from './device-settings.ts';
+import type { SettingsInput } from './device-settings.ts';
+export type SettingKey = keyof SettingsInput;
+export interface DeviceSettings {
+  appearance?: Appearance | 'unknown'; textSize?: number;
+  textSizeNative?: { category?: string; font_scale?: number };
+  boldText?: boolean; increaseContrast?: boolean; reduceMotion?: boolean;
+  reduceTransparency?: boolean; colorFilter?: 'none' | 'grayscale' | 'invert';
+}
+export interface SettingsRead { settings: DeviceSettings; supported: SettingKey[] }
+export interface SettingsResult extends SettingsRead { ok: boolean; previous: DeviceSettings; changed: SettingKey[] }
+
 
 export interface Bounds { x: number; y: number; width: number; height: number }
 
@@ -502,6 +515,9 @@ export interface Backend {
   /** System-wide dark/light appearance. Android backends without these get `cmd uimode night` via shell(). */
   getAppearance?(nativeId: string): Promise<Appearance | 'unknown'>;
   setAppearance?(nativeId: string, mode: Appearance): Promise<void>;
+  getSettings?(nativeId: string): Promise<SettingsRead>;
+  setSettings?(nativeId: string, settings: SettingsInput): Promise<void>;
+  resetSettings?(nativeId: string): Promise<void>;
   /** The device clipboard's (pasteboard's) plain text; null when it is empty or holds no text. Backends with these
    *  list the 'clipboard' capability. The text can be secret: never log it or put it in an error. */
   clipboardGet?(nativeId: string): Promise<string | null>;

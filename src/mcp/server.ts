@@ -23,7 +23,7 @@ import { promptWarning, registerExtraTools } from './tools-extra.ts';
 import { registerFlowTools } from './tools-flow.ts';
 import { registerTraceTools } from './tools-trace.ts';
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const DEFAULT_MAX_SIZE = 1024;
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
@@ -145,6 +145,7 @@ const TOOL_META: Record<string, [string, Hints]> = {
   install_app: ['Install app', { destructiveHint: false, openWorldHint: true }], uninstall_app: ['Uninstall app', DESTRUCTIVE],
   launch_app: ['Launch app', SAFE], terminate_app: ['Terminate app', { ...SAFE, idempotentHint: true }],
   open_url: ['Open URL', { destructiveHint: false, openWorldHint: true }], shell: ['Run shell command on device', DESTRUCTIVE],
+  device_settings: ['Read or change device display settings', { ...SAFE, idempotentHint: true }],
   set_appearance: ['Set dark / light appearance', { ...SAFE, idempotentHint: true }], set_location: ['Set GPS location', { ...SAFE, idempotentHint: true }],
   connect_device: ['Connect phone over Wi-Fi', { destructiveHint: false, openWorldHint: true }],
   fill: ['Fill text field', SAFE], wait_for: ['Wait for screen state', SAFE], batch: ['Run several steps', SAFE],
@@ -810,6 +811,21 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const r = await c.shell(d.id, a.command);
     const body = `exit ${r.code}\n${r.stdout ?? ''}${r.stderr ? `\n[stderr]\n${r.stderr}` : ''}`;
     return { content: [text(body.length > 60_000 ? body.slice(0, 60_000) + '\n…(truncated)' : body)], isError: r.code !== 0 };
+  });
+
+  tool('device_settings', 'Read or set display and accessibility settings. iOS simulator supports appearance, Dynamic Type text size, and increase contrast where the runtime exposes them. Other controls depend on backend support; the response lists supported keys. Text size accepts a scale, default, smallest, largest, or an iOS category.', {
+    device: deviceParam, appearance: z.enum(['dark', 'light']).optional(),
+    textSize: z.union([z.number().positive(), z.string()]).optional(), boldText: z.boolean().optional(),
+    increaseContrast: z.boolean().optional(), reduceMotion: z.boolean().optional(), reduceTransparency: z.boolean().optional(),
+    colorFilter: z.enum(['none', 'grayscale', 'invert']).optional(), reset: z.boolean().optional(),
+    return_screenshot: observeParam, settle_ms: settleParam,
+  }, async a => {
+    const d = await target(a.device);
+    const { device: _device, return_screenshot, settle_ms, reset, ...patch } = a;
+    const values = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    if (reset && Object.keys(values).length) throw new Error('reset cannot be combined with setting values');
+    const result = reset ? await c.resetSettings(d.id) : Object.keys(values).length ? await c.setSettings(d.id, values as import('../core/types.ts').SettingsInput) : await c.settings(d.id);
+    return act(d, JSON.stringify(result), return_screenshot, settle_ms, 1000);
   });
 
   tool('set_appearance', 'Switch the device between dark and light appearance (Dark Mode), system-wide: iOS simulator via simctl, Android via night mode. Faster and more reliable than finding the switch in Settings (the iOS simulator Settings app has no Display & Brightness: its switch is Settings › Developer › Dark Appearance; on Android it is Settings › Display › Dark theme). Returns what the device reports afterwards.', {

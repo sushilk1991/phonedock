@@ -1,11 +1,13 @@
 // Shared adb operations for the Android backends (emulator + physical). Every adb call is
 // `adb -s <serial> …` – never a bare adb that could hit whatever device happens to be attached.
+import { parseAndroidSettingNumber } from '../core/device-settings.ts';
+import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { run, runBuffer, sleep, type RunOptions } from '../core/exec.ts';
-import { androidSdkRoot, toolEnv, which } from '../core/paths.ts';
+import { androidSdkRoot, stateDir, toolEnv, which } from '../core/paths.ts';
 import { closeUiHelper, helperEnabled, helperInput, helperInputStarted, helperLabels, helperUiDump, UI_QUIET_MS, UI_QUIET_TIMEOUT_MS } from './android-helper.ts';
 import { chooseWindow, parseHelperWindows } from './android-windows.ts';
 import { startsWithStartCode } from '../core/video.ts';
@@ -65,8 +67,90 @@ export function shQuote(s: string): string { return `'${s.replace(/'/g, `'\\''`)
 
 export const ANDROID_CAPS: Capability[] = [
   'screenshot', 'stream', 'uiTree', 'tap', 'longPress', 'swipe', 'type', 'key', 'install', 'apps', 'launch',
-  'openUrl', 'shell', 'files', 'logs', 'rotate', 'window', 'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'trace', 'video',
+  'openUrl', 'shell', 'files', 'logs', 'rotate', 'window', 'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'settings', 'trace', 'video',
 ];
+
+// Read the same overlay that Android Settings uses, including vendor overrides.
+async function fontRange(serial: string): Promise<[number, number] | undefined> {
+  const out = await adb(serial, ['shell', 'cmd', 'overlay', 'lookup', 'com.android.settings', 'com.android.settings:array/entryvalues_font_size'], { allowFail: true });
+  const values = out.stdout.trim().split(/\s+/).map(parseAndroidSettingNumber).filter((n): n is number => n !== undefined && n > 0);
+  if (out.code === 0 && values.length > 1) return [Math.min(...values), Math.max(...values)];
+  // Some vendor builds hide the overlay: fall back to AOSP's range (Android 14 added non-linear scaling up to 200%).
+  const sdk = Number((await adb(serial, ['shell', 'getprop', 'ro.build.version.sdk'], { allowFail: true })).stdout.trim());
+  return Number.isFinite(sdk) && sdk > 0 ? [0.85, sdk >= 34 ? 2 : 1.3] : undefined;
+}
+const animationKeys = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'] as const;
+function animationFile(serial: string): string {
+  return join(stateDir(), `settings-animation-${createHash('sha256').update(serial).digest('hex')}.json`);
+}
+async function setting(serial: string, namespace: string, key: string): Promise<string> {
+  return (await adb(serial, ['shell', 'settings', 'get', namespace, key])).stdout.trim();
+}
+async function putSetting(serial: string, namespace: string, key: string, value: string) {
+  const r = await adb(serial, ['shell', 'settings', 'put', namespace, key, value]);
+  if (/exception|error|permission denial/i.test(r.stdout + r.stderr)) throw new PhoneDockError('Couldn’t change the Android setting', 'exec_failed', 500, undefined, (r.stdout + r.stderr).trim());
+}
+export async function getSettings(serial: string): Promise<import('../core/types.ts').SettingsRead> {
+  const [range, sdk, night, scale, weight, contrast, ...animation] = await Promise.all([
+    fontRange(serial), adb(serial, ['shell', 'getprop', 'ro.build.version.sdk']).then(r => r.stdout.trim()),
+    adb(serial, ['shell', 'cmd', 'uimode', 'night']).then(r => r.stdout.trim()),
+    setting(serial, 'system', 'font_scale'), setting(serial, 'secure', 'font_weight_adjustment'),
+    setting(serial, 'secure', 'high_text_contrast_enabled'),
+    ...animationKeys.map(k => setting(serial, 'global', k)),
+  ]);
+  const settings: import('../core/types.ts').DeviceSettings = {};
+  const supported: import('../core/types.ts').SettingKey[] = [];
+  const appearance = /night mode:\s*yes/i.test(night) ? 'dark' : /night mode:\s*no/i.test(night) ? 'light' : undefined;
+  if (appearance) { settings.appearance = appearance; supported.push('appearance'); }
+  const n = scale === 'null' ? 1 : parseAndroidSettingNumber(scale);
+  if (range && n !== undefined && n > 0) { settings.textSize = n; settings.textSizeNative = { font_scale: n }; supported.push('textSize'); }
+  if (Number(sdk) >= 31) { settings.boldText = Number(weight) > 0; supported.push('boldText'); }
+  settings.increaseContrast = contrast === '1'; supported.push('increaseContrast');
+  settings.reduceMotion = animation.every(v => v !== 'null' && Number(v) === 0); supported.push('reduceMotion');
+  return { settings, supported };
+}
+export async function setSettings(serial: string, patch: import('../core/types.ts').SettingsInput, identity = serial): Promise<void> {
+  let size: number | undefined;
+  if (patch.textSize !== undefined) {
+    const range = await fontRange(serial);
+    if (!range) throw new PhoneDockError('This device does not report its font-size range', 'not_supported', 501);
+    const input = patch.textSize;
+    if (typeof input === 'string' && !['default', 'smallest', 'largest'].includes(input)) throw new PhoneDockError('iOS text categories are not supported on Android', 'bad_request', 400);
+    size = typeof input === 'number' ? Math.max(range[0], Math.min(range[1], input)) : input === 'smallest' ? range[0] : input === 'largest' ? range[1] : 1;
+  }
+  if (patch.appearance !== undefined) await adb(serial, ['shell', 'cmd', 'uimode', 'night', patch.appearance === 'dark' ? 'yes' : 'no']);
+  if (size !== undefined) await putSetting(serial, 'system', 'font_scale', String(size));
+  if (patch.boldText !== undefined) await putSetting(serial, 'secure', 'font_weight_adjustment', patch.boldText ? '300' : '0');
+  if (patch.increaseContrast !== undefined) await putSetting(serial, 'secure', 'high_text_contrast_enabled', patch.increaseContrast ? '1' : '0');
+  if (patch.reduceMotion !== undefined) {
+    const file = animationFile(identity);
+    if (patch.reduceMotion) {
+      if (!existsSync(file)) {
+        const previous = await Promise.all(animationKeys.map(k => setting(serial, 'global', k)));
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, JSON.stringify(previous), { flag: 'wx', mode: 0o600 });
+      }
+      for (const key of animationKeys) await putSetting(serial, 'global', key, '0');
+    } else if (existsSync(file)) {
+      const previous: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (!Array.isArray(previous) || previous.length !== 3 || previous.some(v => typeof v !== 'string' || (v !== 'null' && !/^\d+(?:\.\d+)?$/.test(v)))) throw new Error('Saved animation scales are invalid');
+      for (let i = 0; i < animationKeys.length; i++) {
+        if (previous[i] === 'null') await adb(serial, ['shell', 'settings', 'delete', 'global', animationKeys[i]]);
+        else await putSetting(serial, 'global', animationKeys[i], previous[i]);
+      }
+      rmSync(file);
+    } else {
+      const current = await Promise.all(animationKeys.map(k => setting(serial, 'global', k)));
+      if (current.every(v => v !== 'null' && Number(v) === 0)) for (const key of animationKeys) await putSetting(serial, 'global', key, '1');
+    }
+  }
+
+}
+export async function resetSettings(serial: string, identity = serial): Promise<void> {
+  const { supported } = await getSettings(serial);
+  const defaults = { appearance: 'light', textSize: 'default', boldText: false, increaseContrast: false, reduceMotion: false } as const;
+  await setSettings(serial, Object.fromEntries(Object.entries(defaults).filter(([k]) => supported.includes(k as import('../core/types.ts').SettingKey))), identity);
+}
 
 const KEYMAP: Record<string, string> = {
   home: 'KEYCODE_HOME', back: 'KEYCODE_BACK', enter: 'KEYCODE_ENTER', delete: 'KEYCODE_DEL', backspace: 'KEYCODE_DEL',

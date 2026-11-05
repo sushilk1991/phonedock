@@ -351,6 +351,10 @@ struct InfoTab: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     overview.padding(.horizontal, Theme.Space.l)
+                    if device.can("settings") || device.backend == "ios-device" {
+                        sectionDivider
+                        DeviceSettingsView(device: device).id(device.id)
+                    }
                     if device.can("snapshot") {
                         sectionDivider
                         snapshots

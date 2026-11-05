@@ -52,6 +52,8 @@ Pass `device` explicitly whenever more than one device is in play.
 - Find out the current values first (`set_appearance` reports what it was; the CLI's `appearance <id>` shows it).
 - `set_appearance appearance="dark"`, then `screenshot`; `rotate orientation="landscape"`, then `get_ui` or
   `screenshot` (coordinates change after rotating); back to `portrait` and the original appearance at the end.
+- Text size: `device_settings textSize="largest"` (the biggest accessibility size), screenshot the same screens,
+  then `textSize="default"`. Add `increaseContrast=true` (and `boldText=true` on Android) for a contrast pass.
 - Look for clipped text, low contrast, wrong colours and layouts that don't adapt.
 
 ## The same flow on Android and iOS

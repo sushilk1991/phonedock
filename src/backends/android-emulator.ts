@@ -582,6 +582,9 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     c.unref();
   },
 
+  async getSettings(id) { return A.getSettings(await requireSerial(id)); },
+  async setSettings(id, patch) { await A.setSettings(await requireSerial(id), patch, `android-emulator:${id}`); },
+  async resetSettings(id) { await A.resetSettings(await requireSerial(id), `android-emulator:${id}`); },
   async screenshot(name) { return emulatorScreenshot(await requireSerial(name)); },
   async screenInfo(name) { return A.screenInfo(await requireSerial(name)); },
   stream(name, opts) {

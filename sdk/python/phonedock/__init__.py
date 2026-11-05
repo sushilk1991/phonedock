@@ -17,7 +17,7 @@ import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 __all__ = ["PhoneDock", "PhoneDockApiError", "phonedock_home", "read_daemon_info"]
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 DEFAULT_PORT = 47420
 
@@ -605,6 +605,15 @@ class PhoneDock:
 
     def shell(self, device_id: str, command: str) -> Dict[str, Any]:
         return self._request("POST", self._dev(device_id, "/shell"), {"command": command})
+
+    def settings(self, device_id: str) -> Dict[str, Any]:
+        return self._request("GET", self._dev(device_id, "/settings"))
+
+    def set_settings(self, device_id: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", self._dev(device_id, "/settings"), settings)
+
+    def reset_settings(self, device_id: str) -> Dict[str, Any]:
+        return self._request("POST", self._dev(device_id, "/settings/reset"), {})
 
     def appearance(self, device_id: str) -> Dict[str, Any]:
         """Current system appearance: {"appearance": "dark" | "light" | "unknown"}."""

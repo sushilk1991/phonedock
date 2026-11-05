@@ -229,6 +229,9 @@ export const backend: Backend & {
     if (!scrcpy) throw new PhoneDockError('The tool needed to open the device window is missing', 'scrcpy_missing', 501, ['Install scrcpy and try again.'], 'Install scrcpy with brew install scrcpy.');
     spawn(scrcpy, ['-s', serial], { detached: true, stdio: 'ignore', env: { ...toolEnv(), ADB: A.adbPath() } }).unref();
   },
+  async getSettings(id) { return A.getSettings(await requireOnline(id)); },
+  async setSettings(id, patch) { await A.setSettings(await requireOnline(id), patch); },
+  async resetSettings(id) { await A.resetSettings(await requireOnline(id)); },
   async screenshot(s) { return A.screenshot(await requireOnline(s)); },
   async screenInfo(s) { return A.screenInfo(await requireOnline(s)); },
   // `s` is the hardware serial; adb needs the live transport (over Wi-Fi it differs), found when the stream starts

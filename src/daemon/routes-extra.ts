@@ -3,6 +3,7 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { validateSettingsInput } from '../core/device-settings.ts';
 import { sleep } from '../core/exec.ts';
 import { stateDir } from '../core/paths.ts';
 import { PhoneDockError, type Appearance, type Backend, type ElementMatch, type HandoffState, type PromptButton, type SystemPrompt, type UiElement, type UiTree } from '../core/types.ts';
@@ -488,6 +489,32 @@ r.post('/v1/devices/:id/appearance', async (c) => {
   const now = await appearanceOf(d, platform).catch(() => 'unknown' as const);
   return { ok: true, appearance: now, previous, changed: previous !== now };
 });
+
+// ── device settings ──────────────────────────────────────────────────────────
+function settingsBackend(d: Dev) {
+  if (!d.b.getSettings || !d.b.setSettings || !d.b.resetSettings) throw notSupported(d.b.id === 'ios-device' ? 'device settings (iOS does not allow these changes on a real iPhone)' : 'device settings', d.b.id);
+  return d.b;
+}
+r.get('/v1/devices/:id/settings', async c => {
+  const d = dev(c); return settingsBackend(d).getSettings!(d.nid);
+});
+async function changeSettings(c: Ctx, reset: boolean) {
+  const d = dev(c); checkLease(d.id, c.owner);
+  const b = settingsBackend(d);
+  let patch: import('../core/device-settings.ts').SettingsInput = {};
+  if (!reset) { try { patch = validateSettingsInput(await c.body()); } catch (e) { throw badRequest((e as Error).message); } }
+  const before = await b.getSettings!(d.nid);
+  const unsupported = Object.keys(patch).filter(k => !before.supported.includes(k as import('../core/types.ts').SettingKey));
+  if (unsupported.length) throw notSupported(`device settings: ${unsupported.join(', ')}`, b.id);
+  if (reset) await b.resetSettings!(d.nid); else await b.setSettings!(d.nid, patch);
+  logAction(d.id, c.owner, { action: 'settings', ...(reset ? { reset: true } : { settings: patch }) });
+  uiCache.delete(d.id);
+  const after = await b.getSettings!(d.nid);
+  const changed = after.supported.filter(k => JSON.stringify(before.settings[k]) !== JSON.stringify(after.settings[k]));
+  return { ok: true, ...after, previous: before.settings, changed };
+}
+r.post('/v1/devices/:id/settings', c => changeSettings(c, false));
+r.post('/v1/devices/:id/settings/reset', c => changeSettings(c, true));
 
 // ── clipboard ───────────────────────────────────────────────────────────────
 // Plain text only. Clipboard text can be secret (one-time codes, copied passwords): the Activity log and SSE get its

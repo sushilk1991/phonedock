@@ -21,6 +21,7 @@
 // This module is pure: parse / validate / write flows, turn an action log + screen observations into a flow
 // (`flowFromLog`), and export to Maestro. The runner is src/core/flow-runner.ts; the daemon side is
 // src/daemon/observe.ts (observations) and src/daemon/routes-flow.ts (POST /v1/devices/:id/flow).
+import { validateSettingsInput, type SettingsInput } from './device-settings.ts';
 import { YAML_COMMENT, YamlError, parse as parseYaml, stringify as stringifyYaml } from './yaml.ts';
 
 export type MatchMode = 'contains' | 'exact' | 'regex';
@@ -48,6 +49,7 @@ export type Step = StepBase & (
   | { kind: 'swipe'; direction?: Direction; distance?: number; from?: Point; to?: Point; durationMs?: number }
   | { kind: 'wait_for'; until: 'visible' | 'gone' | 'idle'; sel?: Selector; stableMs?: number }
   | { kind: 'set_appearance'; mode: 'dark' | 'light' }
+  | { kind: 'settings'; settings: SettingsInput }
   | { kind: 'rotate'; orientation: 'portrait' | 'landscape' }
   | { kind: 'open_url'; url: string }
   | { kind: 'gesture'; gesture: string }
@@ -88,7 +90,7 @@ export class FlowError extends Error {
 }
 
 export const COMMANDS: StepKind[] = ['launch', 'terminate', 'tap', 'long_press', 'double_tap', 'fill', 'type', 'key', 'back', 'home',
-  'hide_keyboard', 'scroll_to', 'swipe', 'wait_for', 'set_appearance', 'rotate', 'open_url', 'gesture', 'alert', 'sleep',
+  'hide_keyboard', 'scroll_to', 'swipe', 'wait_for', 'set_appearance', 'settings', 'rotate', 'open_url', 'gesture', 'alert', 'sleep',
   'assert_visible', 'assert_not_visible', 'assert_text', 'screenshot'];
 const ALIASES: Record<string, StepKind> = {
   launch_app: 'launch', stop_app: 'terminate', terminate_app: 'terminate', go_back: 'back', press_key: 'key', go_home: 'home',
@@ -278,6 +280,7 @@ export function parseStep(raw: unknown): Step {
       if (o.idle !== undefined) return { ...base, kind, until: 'idle', ...(typeof o.idle === 'number' ? { stableMs: o.idle } : stable !== undefined ? { stableMs: stable } : {}) };
       throw new Error('wait_for needs visible, gone or idle');
     }
+    case 'settings': return { ...base, kind, settings: validateSettingsInput(arg) };
     case 'set_appearance': { const m = str(arg)?.toLowerCase(); if (m !== 'dark' && m !== 'light') throw new Error('set_appearance is dark or light'); return { ...base, kind, mode: m }; }
     case 'rotate': { const m = str(arg)?.toLowerCase(); if (m !== 'portrait' && m !== 'landscape') throw new Error('rotate is portrait or landscape'); return { ...base, kind, orientation: m }; }
     case 'open_url': { const u = str(arg); if (!u) throw new Error('open_url needs a URL'); return { ...base, kind, url: u }; }
@@ -358,6 +361,7 @@ export function stepOut(s: Step): unknown {
       else body = s.distance !== undefined || s.durationMs !== undefined ? { direction: s.direction, ...(s.distance !== undefined ? { distance: s.distance } : {}), ...(s.durationMs !== undefined ? { duration: s.durationMs } : {}) } : s.direction;
       break;
     case 'wait_for': body = s.until === 'idle' ? (s.stableMs !== undefined ? { idle: s.stableMs } : 'idle') : { [s.until]: selectorOut(s.sel!), ...(s.stableMs !== undefined ? { stable: s.stableMs } : {}) }; break;
+    case 'settings': body = s.settings; break;
     case 'set_appearance': body = s.mode; break;
     case 'rotate': body = s.orientation; break;
     case 'open_url': body = s.url; break;
@@ -417,6 +421,7 @@ export function describeStep(s: Step): string {
     case 'scroll_to': return `scroll_to ${sel(s.sel)}${s.direction && s.direction !== 'down' ? ` (${s.direction})` : ''}`;
     case 'swipe': return s.from && s.to ? `swipe ${pointText(s.from)} → ${pointText(s.to)}${frag}` : `swipe ${s.direction}`;
     case 'wait_for': return s.until === 'idle' ? 'wait_for idle' : `wait_for ${s.until} ${sel(s.sel)}`;
+    case 'settings': return `settings ${JSON.stringify(s.settings)}`;
     case 'set_appearance': return `set_appearance ${s.mode}`;
     case 'rotate': return `rotate ${s.orientation}`;
     case 'open_url': return `open_url ${s.url}`;
@@ -930,6 +935,7 @@ export function toMaestro(f: Flow): { text: string; unsupported: string[] } {
         const sel = maestroSel(s.sel!, notes); if (sel === undefined) { no(s, notes.pop()!); break; }
         cmd(s, { extendedWaitUntil: { [s.until === 'visible' ? 'visible' : 'notVisible']: sel, timeout: s.timeoutMs ?? 10000 } }, notes); break;
       }
+      case 'settings': no(s, 'no portable Maestro device settings command'); break;
       case 'set_appearance': no(s, 'Maestro has setDarkMode in recent versions; add it by hand if yours does'); break;
       case 'rotate': cmd(s, { setOrientation: s.orientation === 'portrait' ? 'PORTRAIT' : 'LANDSCAPE_LEFT' }, notes); break;
       case 'open_url': cmd(s, { openLink: s.url }, notes); break;

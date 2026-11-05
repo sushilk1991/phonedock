@@ -14,7 +14,7 @@ import {
 
 /** The part of PhoneDockClient the runner uses (tests pass a fake). */
 export type FlowClient = Pick<PhoneDockClient, 'owner' | 'device' | 'lease' | 'releaseLease' | 'launch' | 'terminate' | 'openUrl' | 'setAppearance'
-  | 'rotate' | 'systemGesture' | 'handleAlert' | 'find' | 'waitFor' | 'fill' | 'tap' | 'longPress' | 'doubleTap' | 'swipe' | 'swipeDirection'
+  | 'setSettings' | 'rotate' | 'systemGesture' | 'handleAlert' | 'find' | 'waitFor' | 'fill' | 'tap' | 'longPress' | 'doubleTap' | 'swipe' | 'swipeDirection'
   | 'type' | 'key' | 'goBack' | 'hideKeyboard' | 'scrollTo' | 'screenshot' | 'uiText' | 'ui' | 'logs'>
   & Partial<Pick<PhoneDockClient, 'apps'>>;
 
@@ -308,6 +308,7 @@ class Ctx {
         catch (e) { if (errInfo(e).code === 'wait_timeout') throw new StepFailure(`Expected ${describeSelector(s.sel)} to go away within ${dur(to)}, but it is still there.\nScreen now: ${screenNow(e) ?? '?'}`); throw e; }
         return;
       }
+      case 'settings': await c.setSettings(id, s.settings); await this.settle(); return;
       case 'set_appearance': await c.setAppearance(id, s.mode); await this.settle(); return;
       case 'rotate': {
         await c.rotate(id, s.orientation);

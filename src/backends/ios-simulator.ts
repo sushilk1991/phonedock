@@ -7,6 +7,7 @@
 // natural (portrait) orientation, so a landscape stream is turned upright with ffmpeg; simctl screenshots are upright.
 // pinch is not offered: AXe has no multi-touch. hideKeyboard is not offered: there is no reliable dismissal
 // (HID keyboard events make the simulator assume a hardware keyboard and hide the software one, stickily).
+import { iosTextCategory, iosTextScale } from '../core/device-settings.ts';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, cpSync, renameSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -30,7 +31,7 @@ const CAPS: Capability[] = [
   'boot', 'shutdown', 'delete', 'clone', 'snapshot', 'screenshot', 'stream', 'uiTree', 'ocr',
   'tap', 'longPress', 'swipe', 'type', 'key', 'install', 'apps', 'launch', 'openUrl',
   'shell', 'files', 'logs', 'location', 'push', 'clipboard', 'window',
-  'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'rotate', 'trace',
+  'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'settings', 'rotate', 'trace',
 ];
 
 interface ManagedEntry { name: string; createdAt: string; spec?: Partial<DeviceSpec>; clonedFrom?: string }
@@ -1295,6 +1296,28 @@ export const backend: Backend = {
       .sort((a, b) => Number(a.system) - Number(b.system) || a.id.localeCompare(b.id));
   },
 
+  async getSettings(udid) {
+    await requireBooted(udid);
+    const [appearance, category, contrast] = await Promise.all(['appearance', 'content_size', 'increase_contrast'].map(async key => (await simctl(['ui', udid, key])).stdout.trim().toLowerCase()));
+    const settings: import('../core/types.ts').DeviceSettings = {};
+    const supported: import('../core/types.ts').SettingKey[] = [];
+    if (appearance === 'light' || appearance === 'dark') { settings.appearance = appearance; supported.push('appearance'); }
+    const scale = iosTextScale(category);
+    if (scale !== undefined) { settings.textSize = scale; settings.textSizeNative = { category }; supported.push('textSize'); }
+    if (contrast === 'enabled' || contrast === 'disabled') { settings.increaseContrast = contrast === 'enabled'; supported.push('increaseContrast'); }
+    return { settings, supported };
+  },
+  async setSettings(udid, patch) {
+    await requireBooted(udid);
+    if (patch.appearance !== undefined) await simctl(['ui', udid, 'appearance', patch.appearance]);
+    if (patch.textSize !== undefined) await simctl(['ui', udid, 'content_size', iosTextCategory(patch.textSize)]);
+    if (patch.increaseContrast !== undefined) await simctl(['ui', udid, 'increase_contrast', patch.increaseContrast ? 'enabled' : 'disabled']);
+  },
+  async resetSettings(udid) {
+    const { supported } = await backend.getSettings!(udid);
+    const defaults = { appearance: 'light', textSize: 'default', increaseContrast: false } as const;
+    await backend.setSettings!(udid, Object.fromEntries(Object.entries(defaults).filter(([k]) => supported.includes(k as import('../core/types.ts').SettingKey))));
+  },
   async getAppearance(udid) {
     await requireBooted(udid);
     const out = (await simctl(['ui', udid, 'appearance'])).stdout.trim().toLowerCase();

@@ -46,6 +46,7 @@ Apps:       apps <id> [--system] | install <id> <path|url> | launch|terminate|un
 System:     shell <id> -- <cmd…> | push <id> <local> <remote> | pull <id> <remote> [local]
             logs <id> [-n N] [--filter F] | location <id> <lat> <lon> | rotate <id> portrait|landscape
             notify <id> <appId> '<json payload>' | appearance <id> [dark|light]   (no mode: show the current one)
+            settings <id> [key=value ...] | settings <id> --reset
             clipboard <id> [--get | --set TEXT]   (prints the text as is; --set with no TEXT reads it from stdin)
 Multi-agent: lease <id> [--ttl S] [--force] | release <id> [--pool]
             acquire [--platform P] [--backend B] [--ttl S]
@@ -636,6 +637,19 @@ export async function run(argv: string[]): Promise<number> {
     }
     case 'terminate': case 'kill': { const d = await dev(); need(p, 3, '<appId>'); out(await c.terminate(d.id, p[2]), () => `Terminated ${p[2]}`); return 0; }
     case 'open-url': case 'open': { const d = await dev(); need(p, 3, '<url>'); out(await c.openUrl(d.id, p[2]), () => `Opened ${p[2]}`); return 0; }
+    case 'settings': {
+      need(p, 2, 'settings <id> [key=value ...]');
+      const d = await c.resolveDevice(p[1]);
+      if (a.flags.reset) { if (p.length > 2) usage('--reset cannot be combined with settings'); out(await c.resetSettings(d.id)); return 0; }
+      if (p.length === 2) { out(await c.settings(d.id)); return 0; }
+      const patch: Record<string, unknown> = {};
+      for (const arg of p.slice(2)) {
+        const i = arg.indexOf('='); if (i < 1) usage('settings expects key=value');
+        const key = arg.slice(0, i), value = arg.slice(i + 1);
+        patch[key] = value === 'true' ? true : value === 'false' ? false : key === 'textSize' && value.trim() && Number.isFinite(Number(value)) ? Number(value) : value;
+      }
+      out(await c.setSettings(d.id, patch)); return 0;
+    }
     case 'appearance': case 'dark-mode': {
       const d = await dev();
       const mode = p[2]?.toLowerCase();

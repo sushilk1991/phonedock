@@ -37,6 +37,9 @@ PhoneDock shows what's ready and what's missing, with the command that fixes it.
 - **Take over and hand back** at any time. While you hold a device, agents wait.
 - **Hand off** the steps only a person should do — Face ID, sign-ins, CAPTCHAs, payments. The agent asks, you
   act, it carries on. If you're in another app, a notification asks you, with Take Over, Done and Can't Do It.
+- **Test with different settings**: switch Dark Mode, text size (up to the largest accessibility size) and
+  Increase Contrast on simulators and Android, plus Bold Text and Reduce Motion on Android, from the app or in one
+  agent call.
 - **Inspect** the UI tree, logs (coloured by level, for one app or all), crashes, installed apps and every action
   an agent took.
 - **Record** the screen to an `.mp4`, or save a screenshot. What you capture in the app goes where macOS saves

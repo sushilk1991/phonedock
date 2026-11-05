@@ -277,3 +277,11 @@ steps:
   assert.match(text, /^- back$/m);
   assert.equal(unsupported.length, 2);
 });
+
+test('settings flow validates, round trips and exports as an unsupported Maestro comment', () => {
+  const flow = parseFlow('steps:\n  - settings: { textSize: largest, increaseContrast: true }\n');
+  assert.deepEqual(flow.steps[0], { kind: 'settings', settings: { textSize: 'largest', increaseContrast: true } });
+  assert.deepEqual(parseStep(stepOut(flow.steps[0])), flow.steps[0]);
+  assert.match(toMaestro(flow).text, /no portable Maestro device settings command/);
+  assert.throws(() => parseFlow('steps:\n  - settings: { boldText: nope }\n'), /boldText must be a boolean/);
+});

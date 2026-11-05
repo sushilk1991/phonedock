@@ -10,7 +10,7 @@ import type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, Appearance, TapSelector,
-  Delivery, Expect, ExpectReport, UiWindow, UiWindowRole,
+  Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
 } from '../core/types.ts';
 
@@ -18,7 +18,7 @@ export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, Appearance, TapSelector,
-  Delivery, Expect, ExpectReport, UiWindow, UiWindowRole,
+  Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
 };
 
@@ -763,6 +763,9 @@ export class PhoneDockClient {
   terminate(id: string, appId: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, `/apps/${enc(appId)}/terminate`), { body: {} }); }
   openUrl(id: string, url: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/open-url'), { body: { url } }); }
   shell(id: string, command: string): Promise<ExecResult> { return this.request('POST', this.dev(id, '/shell'), { body: { command } }); }
+  settings(id: string): Promise<SettingsRead> { return this.request('GET', this.dev(id, '/settings')); }
+  setSettings(id: string, settings: SettingsInput): Promise<SettingsResult> { return this.request('POST', this.dev(id, '/settings'), { body: settings }); }
+  resetSettings(id: string): Promise<SettingsResult> { return this.request('POST', this.dev(id, '/settings/reset')); }
   /** System-wide appearance: iOS simulator `simctl ui appearance`, Android `cmd uimode night`. */
   appearance(id: string): Promise<{ appearance: Appearance | 'unknown' }> { return this.request('GET', this.dev(id, '/appearance')); }
   /** Switch dark/light; resolves with what the device reports afterwards (`previous` = before). */
