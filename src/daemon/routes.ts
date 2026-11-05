@@ -27,7 +27,7 @@ import { inputRoute } from './delivery.ts';
 import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTENT_TYPE, VIDEO_MSG, type VideoSink } from '../core/video.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;
