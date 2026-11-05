@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Programmatic app icon: an indigo squircle with a glass dock cradle holding a dark phone; the agent sparkle lives on
-/// the phone's screen. Sizes up to 32 px use a simplified render (no highlight or rim, bigger phone and sparkle) so it
-/// stays legible. Compiled on its own by scripts/build-app.sh, so it must not depend on other app files.
+/// Programmatic app icon: an indigo squircle holding two live phones, a dimmed one behind and a bright one in front
+/// with the agent sparkle on its screen ("one place where your agents use your devices"). Sizes up to 40 px use a
+/// simplified render (no rim, highlight or island; bigger phones and sparkle) so it stays legible.
+/// Compiled on its own by scripts/build-app.sh, so it must not depend on other app files.
 enum AppIcon {
     private static let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
@@ -21,32 +22,74 @@ enum AppIcon {
         RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: r).cgPath
     }
 
-    /// A four-point star centred in `r`, `r.width` wide.
-    private static func sparkle(in r: CGRect) -> CGPath {
-        let cx = r.midX, cy = r.midY, a = r.width / 2, k = a * 0.16
+    /// A four-point star centred on `c` with arm length `a`.
+    private static func sparkle(_ c: CGPoint, _ a: CGFloat) -> CGPath {
+        let k = a * 0.16
         let p = CGMutablePath()
-        p.move(to: CGPoint(x: cx, y: cy + a))
-        p.addQuadCurve(to: CGPoint(x: cx + a, y: cy), control: CGPoint(x: cx + k, y: cy + k))
-        p.addQuadCurve(to: CGPoint(x: cx, y: cy - a), control: CGPoint(x: cx + k, y: cy - k))
-        p.addQuadCurve(to: CGPoint(x: cx - a, y: cy), control: CGPoint(x: cx - k, y: cy - k))
-        p.addQuadCurve(to: CGPoint(x: cx, y: cy + a), control: CGPoint(x: cx - k, y: cy + k))
+        p.move(to: CGPoint(x: c.x, y: c.y - a))
+        p.addQuadCurve(to: CGPoint(x: c.x + a, y: c.y), control: CGPoint(x: c.x + k, y: c.y - k))
+        p.addQuadCurve(to: CGPoint(x: c.x, y: c.y + a), control: CGPoint(x: c.x + k, y: c.y + k))
+        p.addQuadCurve(to: CGPoint(x: c.x - a, y: c.y), control: CGPoint(x: c.x - k, y: c.y + k))
+        p.addQuadCurve(to: CGPoint(x: c.x, y: c.y - a), control: CGPoint(x: c.x - k, y: c.y - k))
         p.closeSubpath()
         return p
     }
 
+    /// Draws a phone (black body, metal rim, gradient screen, island) and returns its screen rect. y-down context.
+    private static func phone(_ ctx: CGContext, _ r: CGRect, u: CGFloat, small: Bool,
+                              screen: (CGColor, CGColor), shadow: CGFloat) -> CGRect {
+        let radius = r.width * 0.22
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: 14 * u), blur: 40 * u, color: CGColor(gray: 0, alpha: shadow))
+        ctx.addPath(continuous(r, radius: radius))
+        ctx.setFillColor(color(0x0D0C14))
+        ctx.fillPath()
+        ctx.restoreGState()
+        if !small {
+            ctx.saveGState()
+            ctx.addPath(continuous(r, radius: radius))
+            ctx.clip()
+            ctx.drawLinearGradient(gradient([color(0x8A88A0), color(0x2C2B38)]),
+                                   start: CGPoint(x: r.midX, y: r.minY), end: CGPoint(x: r.midX, y: r.maxY), options: [])
+            ctx.restoreGState()
+            let body = r.insetBy(dx: 6 * u, dy: 6 * u)
+            ctx.addPath(continuous(body, radius: radius - 6 * u))
+            ctx.setFillColor(color(0x0D0C14))
+            ctx.fillPath()
+        }
+        let inset = r.width * (small ? 0.09 : 0.065)
+        let scr = r.insetBy(dx: inset, dy: inset)
+        ctx.saveGState()
+        ctx.addPath(continuous(scr, radius: max(0, radius - inset)))
+        ctx.clip()
+        ctx.drawLinearGradient(gradient([screen.0, screen.1]),
+                               start: CGPoint(x: scr.midX, y: scr.minY), end: CGPoint(x: scr.midX, y: scr.maxY), options: [])
+        ctx.restoreGState()
+        if !small {
+            let iw = scr.width * 0.30, ih = scr.width * 0.085
+            let island = CGRect(x: scr.midX - iw / 2, y: scr.minY + scr.width * 0.06, width: iw, height: ih)
+            ctx.addPath(CGPath(roundedRect: island, cornerWidth: ih / 2, cornerHeight: ih / 2, transform: nil))
+            ctx.setFillColor(color(0x0D0C14))
+            ctx.fillPath()
+        }
+        return scr
+    }
+
     static func cgImage(size: Int) -> CGImage? {
         let s = CGFloat(size)
-        let small = size <= 32
+        let small = size <= 40
         guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        let u = s / 1024   // design units: a 1024 canvas
-        // CoreGraphics is y-up: rect.minY is the bottom edge.
+        // Draw y-down, on a 1024-unit canvas.
+        ctx.translateBy(x: 0, y: s)
+        ctx.scaleBy(x: 1, y: -1)
+        let u = s / 1024
         let rect = CGRect(x: 100 * u, y: 100 * u, width: 824 * u, height: 824 * u)
         let squircle = continuous(rect, radius: 185 * u)
 
         // Drop shadow under the squircle.
         ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: -12 * u), blur: 30 * u, color: CGColor(gray: 0, alpha: small ? 0.25 : 0.35))
+        ctx.setShadow(offset: CGSize(width: 0, height: 12 * u), blur: 30 * u, color: CGColor(gray: 0, alpha: small ? 0.2 : 0.32))
         ctx.addPath(squircle)
         ctx.setFillColor(color(0x2B2280))
         ctx.fillPath()
@@ -57,74 +100,32 @@ enum AppIcon {
         ctx.clip()
 
         // Background: indigo, top to bottom, plus a soft top-left highlight.
-        ctx.drawLinearGradient(gradient([color(0x5B4FE9), color(0x2B2280)]),
-                               start: CGPoint(x: rect.midX, y: rect.maxY), end: CGPoint(x: rect.midX, y: rect.minY), options: [])
+        ctx.drawLinearGradient(gradient([color(0x6A5CF5), color(0x3A2DB8), color(0x24196E)], [0, 0.55, 1]),
+                               start: CGPoint(x: rect.midX, y: rect.minY), end: CGPoint(x: rect.midX, y: rect.maxY), options: [])
         if !small {
-            let c = CGPoint(x: rect.minX + rect.width * 0.22, y: rect.maxY - rect.height * 0.16)
-            ctx.drawRadialGradient(gradient([CGColor(gray: 1, alpha: 0.14), CGColor(gray: 1, alpha: 0)]),
-                                   startCenter: c, startRadius: 0, endCenter: c, endRadius: rect.width * 0.75, options: [])
+            let c = CGPoint(x: rect.minX + rect.width * 0.25, y: rect.minY + rect.height * 0.12)
+            ctx.drawRadialGradient(gradient([CGColor(gray: 1, alpha: 0.16), CGColor(gray: 1, alpha: 0)]),
+                                   startCenter: c, startRadius: 0, endCenter: c, endRadius: rect.width * 0.8, options: [])
         }
 
-        // Geometry: the cradle sits 18% up; the phone's bottom 6% hides behind its lip.
-        let dockW = rect.width * 0.62, dockH = rect.height * (small ? 0.10 : 0.09)
-        let dock = CGRect(x: rect.midX - dockW / 2, y: rect.minY + rect.height * (small ? 0.08 : 0.18), width: dockW, height: dockH)
-        let pw = rect.width * (small ? 0.44 : 0.34)
-        let ph = pw * (small ? 1.75 : 2.05)
-        let phone = CGRect(x: rect.midX - pw / 2, y: dock.maxY - ph * 0.06, width: pw, height: ph)
-        let phoneRadius = pw * 0.22
-
-        // Phone: soft shadow, rim, body.
+        // Two phones: a dimmed one behind (up and left), the live one in front with the agent sparkle.
+        let pw = (small ? 330 : 290) * u, ph = pw * (small ? 1.8 : 1.98)
+        let shift = (small ? 34 : 40) * u
+        let back = CGRect(x: 512 * u - pw * 0.98, y: 512 * u - ph / 2 - shift, width: pw, height: ph)
         ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: -10 * u), blur: 36 * u, color: CGColor(gray: 0, alpha: 0.45))
-        ctx.addPath(continuous(phone, radius: phoneRadius))
-        ctx.setFillColor(color(0x0E0E12))
-        ctx.fillPath()
+        ctx.setAlpha(small ? 0.7 : 0.55)
+        _ = phone(ctx, back, u: u, small: small, screen: (color(0xB9B2FF), color(0x8D83F2)), shadow: 0.3)
         ctx.restoreGState()
-        let rim = small ? 0 : s * 0.012
-        if rim > 0 {
-            ctx.saveGState()
-            ctx.addPath(continuous(phone, radius: phoneRadius))
-            ctx.clip()
-            ctx.drawLinearGradient(gradient([color(0x6E6E80), color(0x2A2A33)]),
-                                   start: CGPoint(x: phone.midX, y: phone.maxY), end: CGPoint(x: phone.midX, y: phone.minY), options: [])
-            ctx.restoreGState()
-            let body = phone.insetBy(dx: rim, dy: rim)
-            ctx.addPath(continuous(body, radius: phoneRadius - rim))
-            ctx.setFillColor(color(0x0E0E12))
-            ctx.fillPath()
-        }
-
-        // Screen: dark indigo (a white screen blows out at small sizes) with the agent sparkle.
-        let inset = pw * 0.06
-        let screen = phone.insetBy(dx: inset, dy: inset)
+        let front = CGRect(x: 512 * u - pw * 0.08, y: 512 * u - ph / 2 + shift, width: pw, height: ph)
+        let scr = phone(ctx, front, u: u, small: small, screen: (color(0xFFFFFF), color(0xE4E0FF)), shadow: 0.45)
+        let c = CGPoint(x: scr.midX, y: scr.midY + scr.height * 0.03)
+        let a = scr.width * (small ? 0.36 : 0.30)
         ctx.saveGState()
-        ctx.addPath(continuous(screen, radius: max(0, phoneRadius - inset)))
+        ctx.addPath(sparkle(c, a))
         ctx.clip()
-        ctx.drawLinearGradient(gradient([color(0x1A1640), color(0x3A2FA0)]),
-                               start: CGPoint(x: screen.midX, y: screen.maxY), end: CGPoint(x: screen.midX, y: screen.minY), options: [])
-        let sw = screen.width * (small ? 0.5 : 0.4)
-        let visibleMid = (screen.maxY + dock.maxY) / 2   // centre on the part of the screen above the cradle
-        let star = CGRect(x: screen.midX - sw / 2, y: visibleMid - sw / 2, width: sw, height: sw)
-        ctx.addPath(sparkle(in: star))
-        ctx.clip()
-        ctx.drawLinearGradient(gradient([CGColor(gray: 1, alpha: 1), color(0xC9C3FF)]),
-                               start: CGPoint(x: star.midX, y: star.maxY), end: CGPoint(x: star.midX, y: star.minY), options: [])
+        ctx.drawLinearGradient(gradient([color(0x6A5CF5), color(0x3A2DB8)]),
+                               start: CGPoint(x: c.x, y: c.y - a), end: CGPoint(x: c.x, y: c.y + a), options: [])
         ctx.restoreGState()
-
-        // Cradle: frosted glass slab over the phone's foot, with a bright top edge.
-        let cradle = continuous(dock, radius: dockH * 0.32)
-        ctx.addPath(cradle)
-        ctx.setFillColor(CGColor(gray: 1, alpha: small ? 0.30 : 0.16))
-        ctx.fillPath()
-        if !small {
-            ctx.saveGState()
-            ctx.addPath(cradle)
-            ctx.clip()
-            let edge = max(1, 2 * u)
-            ctx.setFillColor(CGColor(gray: 1, alpha: 0.35))
-            ctx.fill(CGRect(x: dock.minX, y: dock.maxY - edge, width: dock.width, height: edge))
-            ctx.restoreGState()
-        }
 
         ctx.restoreGState()
         return ctx.makeImage()

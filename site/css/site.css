@@ -303,15 +303,11 @@ strong { font-weight: 650; }
 .call::before { content: counter(call); font-size: 0.8125rem; font-weight: 700; font-stretch: 80%; color: var(--agent-ink); font-variant-numeric: tabular-nums; }
 .call .mono { font-size: 0.9375rem; }
 
-/* Handoff: a mood plate (a hand at a face-scan prompt) behind the heading, then the steps and the real recording */
+/* Handoff: the heading, then the steps and the real recording */
 .handoff { padding-top: 0; background: var(--ground-deep); border-block: 1px solid var(--line); overflow: hidden; }
-.handoff-top { position: relative; isolation: isolate; display: flex; align-items: flex-end; min-height: clamp(380px, 42vw, 620px); padding-bottom: clamp(40px, 5vw, 72px); margin-bottom: clamp(8px, 1vw, 16px); }
-.handoff-mood { position: absolute; z-index: -1; top: 0; right: 0; width: min(76%, 1240px); height: 100%; object-fit: cover; object-position: 30% 50%;
-  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 42%); mask-image: linear-gradient(90deg, transparent 0%, #000 42%); }
-.handoff-top::after { content: ""; position: absolute; z-index: -1; inset: 0; background: linear-gradient(180deg, transparent 50%, var(--ground-deep) 100%); pointer-events: none; }
+.handoff-top { position: relative; display: flex; align-items: flex-end; padding-top: clamp(72px, 9vw, 128px); padding-bottom: clamp(32px, 4vw, 56px); margin-bottom: clamp(8px, 1vw, 16px); }
 .handoff-top .wrap { width: 100%; }
 .handoff-top .sec-head { margin-bottom: 0; max-width: 40rem; }
-.handoff-top h2 { text-shadow: 0 2px 30px rgb(0 0 0 / 0.6); }
 /* The three steps run across as the recording's timeline, and the real recording below them gets the full width. */
 .handoff-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: clamp(32px, 4vw, 52px); }
 .steps-cue { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: clamp(20px, 3vw, 44px); }
@@ -339,15 +335,14 @@ strong { font-weight: 650; }
 .clip-hold .i-play, .clip-hold[data-paused] .i-pause { display: none; }
 .clip-hold[data-paused] .i-play { display: block; }
 
-/* Devices: the real PhoneDock window is the subject, on a defocused, scrimmed AI picture of phones on stands
-   (mood only: its screens are blurred past reading). Then the four kinds of device. */
+/* Devices: the real PhoneDock window (recorded with four devices in the sidebar) on a dark stage with a soft
+   indigo glow. Then the four kinds of device. */
 .fleet { margin: 0; }
 .fleet-stage {
   position: relative; isolation: isolate; overflow: hidden; display: grid; justify-items: center;
   padding: clamp(48px, 8vw, 112px) clamp(16px, 5vw, 72px) clamp(28px, 4vw, 56px);
-  border-radius: 18px; background: #07070b; box-shadow: 0 0 0 1px var(--line);
+  border-radius: 18px; background: radial-gradient(70% 60% at 50% 0%, rgb(106 92 245 / 0.28), transparent 72%), #07070b; box-shadow: 0 0 0 1px var(--line);
 }
-.fleet-mood { position: absolute; inset: 0; z-index: -2; width: 100%; height: 100%; object-fit: cover; object-position: 50% 40%; }
 .fleet-stage::after { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
   background: linear-gradient(180deg, rgb(7 7 11 / 0.2) 0%, rgb(7 7 11 / 0.5) 45%, rgb(7 7 11 / 0.9) 100%); }
 .fleet-app { display: block; width: min(100%, 908px); height: auto; border-radius: 12px; box-shadow: 0 0 0 1px rgb(255 255 255 / 0.12), 0 0 0 7px rgb(10 10 15 / 0.55), 0 48px 90px -30px rgb(0 0 0 / 0.85); }
@@ -361,6 +356,10 @@ strong { font-weight: 650; }
 .agents-lede .mono { font-size: 0.9em; }
 
 /* Use cases: four real runs side by side, each with its prompt, the recording and the agent's answer */
+/* The launch video: the real recordings, cut with a voice-over; native controls, so it plays with sound. */
+.film { background: var(--ground); padding-bottom: 40px; }
+.film-frame { margin: 0; }
+.film-frame video { aspect-ratio: 16 / 9; background: #07070b; }
 .uses { background: var(--ground); }
 .runs { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: clamp(20px, 2.6vw, 40px); row-gap: 56px; }
 .run { display: grid; grid-row: span 4; grid-template-rows: subgrid; row-gap: 14px; align-content: start; }
@@ -494,7 +493,6 @@ strong { font-weight: 650; }
   .pencil { right: 146px; }
   .nav-links { display: none; }
   .nav-end { margin-left: auto !important; }
-  .handoff-mood { width: 100%; -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 30%); mask-image: linear-gradient(90deg, transparent 0%, #000 30%); }
   .plain-grid { grid-template-columns: 1fr 1fr; }
   .plain-title { grid-column: 1 / -1; }
   .runs { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 64px; }
@@ -539,9 +537,7 @@ strong { font-weight: 650; }
   .runs::-webkit-scrollbar { display: none; }
   .run { scroll-snap-align: start; }
   .run .phone { --pw: 220px; }
-  .handoff-top { min-height: 0; padding-top: min(58vw, 340px); }
-  .handoff-mood { height: min(72vw, 420px); width: 100%; object-position: 40% 50%; -webkit-mask-image: none; mask-image: none; }
-  .handoff-top::after { background: linear-gradient(180deg, transparent 30%, var(--ground-deep) min(72vw, 420px)); }
+  .handoff-top { padding-top: 56px; }
   .targets { grid-template-columns: 1fr 1fr; column-gap: 16px; }
   .pl-name { font-size: 1.0625rem; }
   .fleet-stage { border-radius: 14px; }
