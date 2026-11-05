@@ -51,7 +51,7 @@ PhoneDock shows what's ready and what's missing, with the command that fixes it.
 | Android emulator | ✅ | Android SDK emulator, Google APIs and Play Store images |
 | iOS simulator | ✅ | Simulator-built apps only |
 | Android phone | ✅ | USB, or Wi-Fi with wireless debugging |
-| iPhone on iOS 27 or later | **Beta** | USB or Wi-Fi with no app on the phone: screen, input and UI tree. [Setup](docs/IPHONE-WIFI.md) |
+| iPhone on iOS 27 or later | ✅ | USB or Wi-Fi with no app on the phone: live video, input and UI tree. [Setup](docs/IPHONE-WIFI.md) |
 | iPhone on iOS 26 or earlier | **Beta** | Needs WebDriverAgent on the phone. [Setup](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent) |
 
 Generic OS images (QEMU) and Corellium cloud devices are experimental; see
@@ -150,9 +150,10 @@ Ask your agent to test a flow once, save it, and run it on every PR.
 ## Limitations
 
 - App Store apps can't run in the iOS simulator; use a real iPhone for those.
-- iPhone support is Beta. On iOS 27 or later, only one app can show the phone's screen at a time, so close Xcode's
-  device window or iPhone Mirroring first. On older iOS, WebDriverAgent must be rebuilt every 7 days with a free
-  Apple ID.
+- On a real iPhone, only one app can show the phone's screen at a time, so close Xcode's device window or iPhone
+  Mirroring first. iOS doesn't let PhoneDock switch light/dark mode, rotate the phone, read app logs or tell which app
+  is in front ([details](docs/IPHONE-WIFI.md)).
+- iPhones on iOS 26 or earlier are Beta: WebDriverAgent must be rebuilt every 7 days with a free Apple ID.
 - Restarting the PhoneDock service clears leases. Devices keep running.
 - On Android, PhoneDock reads the screen's elements through UiAutomation, which allows one client at a time. While
   you run your own UiAutomator or Espresso tests on the same device, set `PHONEDOCK_ANDROID_HELPER=0`.

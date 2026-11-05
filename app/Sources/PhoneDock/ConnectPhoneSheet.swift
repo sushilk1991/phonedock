@@ -173,7 +173,6 @@ struct ConnectPhoneSheet: View {
                 Text("iPhones on iOS 27 or later connect directly, over USB or Wi-Fi.")
                     .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                BetaBadge()
             }
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 step(1, "Turn on Developer Mode", "Settings › Privacy & Security › Developer Mode")
@@ -265,9 +264,12 @@ struct ConnectPhoneSheet: View {
         DisclosureRow(title: "Older iPhone?", detail: "iOS 26 or earlier", isExpanded: $showOlder, anchor: "Older iPhone") {
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 wifiProblem
-                Text("Older iPhones need WebDriverAgent running on the phone. Set it up once over USB.")
-                    .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
+                    Text("Older iPhones need WebDriverAgent running on the phone. Set it up once over USB.")
+                        .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    BetaBadge()
+                }
                 HStack(spacing: Theme.Space.s) {
                     TextField("IP address or WebDriverAgent URL", text: $wdaHost)
                         .onSubmit(connectWda)
@@ -387,7 +389,7 @@ struct ConnectPhoneSheet: View {
     }
 }
 
-/// "Beta" label for real iPhones (DECISIONS #8).
+/// "Beta" label for iPhones on iOS 26 and older, through WebDriverAgent (DECISIONS #8).
 struct BetaBadge: View {
     var label = "Beta"
     var body: some View {

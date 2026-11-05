@@ -430,7 +430,7 @@ struct InfoTab: View {
             if device.pdIsBeta {
                 GridRow {
                     label("Support")
-                    BetaBadge().help("iPhone support is in beta")
+                    BetaBadge().help("iPhones on iOS 26 and earlier connect through WebDriverAgent, which is in beta")
                 }
             }
             row("Hardware", hardware)

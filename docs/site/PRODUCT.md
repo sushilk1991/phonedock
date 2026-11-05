@@ -24,7 +24,7 @@ test the apps they build, including in CI.
 ## Product Purpose
 
 PhoneDock is an open-source Mac app plus a local service that gives coding agents real phones: Android emulators,
-iOS simulators, real Android phones over Wi-Fi, and real iPhones (beta, iOS 27, over Wi-Fi with no app on the phone).
+iOS simulators, real Android phones over Wi-Fi, and real iPhones (iOS 27 or later, over Wi-Fi or USB with no app on the phone).
 The person watches every device live in a native Mac app and can step in at any moment.
 
 ## Positioning
@@ -45,7 +45,7 @@ handoff request flow for mobile; never claim none exists. Coverage of the four t
 ## Capabilities and Constraints
 
 - macOS only (macOS 15 or later). iPhone simulators need Xcode; Android needs the Android SDK.
-- Real iPhone support is beta. On iOS 27+, one app at a time can show an iPhone's screen.
+- On a real iPhone, one app at a time can show the phone's screen. iPhones on iOS 26 and older (WebDriverAgent) are beta.
 - Local: the service listens on 127.0.0.1, no telemetry. The agent's model provider still sees what the agent sends it
   (screenshots, UI text). Say so plainly.
 - Apache-2.0. Repo: https://github.com/sushilk1991/phonedock. Download: the latest GitHub release (`.dmg`, signed and
@@ -56,8 +56,8 @@ handoff request flow for mobile; never claim none exists. Coverage of the four t
 - Name: PhoneDock. Accent indigo `#5856D6` (light) / `#5E5CE6` (dark), from the app's AccentColor asset.
 - App icon: indigo squircle, glass dock cradle holding a dark phone with the agent sparkle on its screen
   (`app/Sources/PhoneDock/AppIcon.swift`).
-- In-app control language: agent = purple + sparkles, you = indigo + person, needs you = orange + raised hand. Real
-  iPhones are labelled Beta.
+- In-app control language: agent = purple + sparkles, you = indigo + person, needs you = orange + raised hand. iPhones
+  on iOS 26 and older (WebDriverAgent) are labelled Beta; iOS 27+ iPhones are not.
 - Voice: plain, specific, sentence case, no hype, no exclamation marks, no "only/first" claims.
 
 ## Evidence on Hand

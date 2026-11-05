@@ -703,8 +703,10 @@ export const backend: Backend & {
   videoHevc(nativeId: string): HevcVideoFeed;
 } = {
   id: ID,
-  displayName: 'iPhone and iPad (beta)',
-  stage: 'beta',
+  displayName: 'iPhone and iPad',
+  // Stable on iOS 27+ (native: no WebDriverAgent). iPhones on iOS 26 and older go through WebDriverAgent, which is
+  // still beta: the app marks those per device from osVersion.
+  stage: 'stable',
   platform: 'ios',
   kind: 'physical',
   capabilities: CAPS,

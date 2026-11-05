@@ -8,7 +8,7 @@ test('backends declare their maturity stage', async () => {
   const stage = Object.fromEntries(backends.map((b) => [b.id, b.stage ?? 'stable']));
   assert.equal(stage['android-emulator'], 'stable');
   assert.equal(stage['ios-simulator'], 'stable');
-  assert.equal(stage['ios-device'], 'beta');
+  assert.equal(stage['ios-device'], 'stable');  // iOS 27+; the app marks iOS 26 and older (WebDriverAgent) Beta per device
   assert.equal(stage['qemu'], 'experimental');
   assert.equal(stage['corellium'], 'experimental');
   for (const b of backends) assert.ok(['stable', 'beta', 'experimental'].includes(b.stage ?? 'stable'), `${b.id}: ${b.stage}`);

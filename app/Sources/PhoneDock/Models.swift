@@ -205,7 +205,7 @@ struct BackendInfo: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
-    /// The name without the "(beta)" the CLI shows ("iPhone and iPad (beta)"); the app shows a badge instead.
+    /// The name without a "(beta)" or "(experimental)" suffix the CLI shows; the app shows a badge instead.
     var plainName: String {
         guard let stage, stage != "stable", displayName.hasSuffix(" (\(stage))") else { return displayName }
         return String(displayName.dropLast(stage.count + 3))

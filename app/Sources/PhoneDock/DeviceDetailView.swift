@@ -22,8 +22,15 @@ extension Device {
         return v
     }
 
-    /// A real iPhone: supported, but labelled Beta wherever it appears (DECISIONS #8).
-    var pdIsBeta: Bool { backend == "ios-device" }
+    /// A real iPhone on iOS 26 or older, which goes through WebDriverAgent: labelled Beta wherever it appears
+    /// (DECISIONS #8). iOS 27+ connects natively and is stable. An iPhone whose iOS version isn't known yet counts as
+    /// older, so the label errs on the side of Beta.
+    var pdIsBeta: Bool {
+        guard backend == "ios-device" else { return false }
+        guard let v = osVersion?.trimmingCharacters(in: .whitespaces),
+              let major = Int(v.prefix { $0.isNumber }) else { return true }
+        return major < 27
+    }
 
     /// Window subtitle: model, then OS ("Pixel 9 · Android 16").
     var pdWindowSubtitle: String { [pdFriendlyModel, pdFriendlyOS].compactMap { $0 }.joined(separator: " · ") }

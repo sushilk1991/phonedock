@@ -24,7 +24,7 @@ third-party pieces. **NOT POSSIBLE** comes with the alternative architecture.
 | Real iOS VM: Apple PCC VRE / vphone-cli | Apple's Private Cloud Compute research VM; community tool boots patched iOS | Virtualization.framework | **EXPERIMENTAL / research-only**, not integrated |
 | Real iOS in QEMU (xnu-qemu-arm64) | iOS 12 kernel to a bash shell, no UI | TCG | **NOT POSSIBLE** for apps or UI |
 | Physical Android | Any device over USB/Wi-Fi debugging | n/a | **WORKS** (`android-device`: adb + scrcpy) |
-| Physical iPhone | Any device paired with the Mac | n/a | **BETA** (`ios-device`: iOS 27+ through Apple's CoreDevice services, no WebDriverAgent; older iOS through WebDriverAgent) |
+| Physical iPhone | Any device paired with the Mac | n/a | **WORKS** on iOS 27+ (`ios-device`: Apple's CoreDevice services, no WebDriverAgent); **BETA** on older iOS (through WebDriverAgent) |
 | Cloud device farms | Real devices or emulators behind an API | n/a | Corellium implemented; others listed below |
 
 ## Details

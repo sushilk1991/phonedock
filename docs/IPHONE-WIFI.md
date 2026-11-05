@@ -1,6 +1,7 @@
 # Real iPhones (USB or Wi-Fi)
 
-iPhone support is **Beta**. How PhoneDock connects depends on the iOS version:
+How PhoneDock connects depends on the iOS version. iOS 27 and later is supported; the WebDriverAgent path for iOS 26
+and older is **Beta**.
 
 | iOS | How | You need |
 |---|---|---|

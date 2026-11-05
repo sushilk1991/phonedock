@@ -296,7 +296,7 @@
             <li>Android emulator</li>
             <li>iOS simulator</li>
             <li>Android phone</li>
-            <li>iPhone <span class="beta">Beta</span></li>
+            <li>iPhone</li>
           </ul>
         </div>
         <figcaption class="visually-hidden">Claude Code, Codex, Cursor and Pi connect to PhoneDock, which runs Android emulators, iOS simulators, Android phones and iPhones.</figcaption>
@@ -397,8 +397,8 @@
           <p>Over USB, or over Wi-Fi with the pairing code from Wireless debugging.</p>
         </li>
         <li>
-          <p class="pl-name">iPhone <span class="beta">Beta</span></p>
-          <p>iOS 27 or later, over Wi-Fi. Nothing to install on the phone.</p>
+          <p class="pl-name">iPhone</p>
+          <p>iOS 27 or later, over Wi-Fi or USB, with live video at up to 60 fps. Nothing to install on the phone.</p>
         </li>
       </ul>
 
@@ -514,8 +514,8 @@
         <h3>What it can’t do yet</h3>
         <ul class="limits">
           <li>Mac only: Apple silicon, macOS 15 or later.</li>
-          <li>Real iPhone support is in beta. On iOS 26 and older you also need WebDriverAgent on the phone.</li>
-          <li>On iOS 27 only one app can show an iPhone’s screen at a time, so close Xcode’s device window or iPhone Mirroring first.</li>
+          <li>iPhones on iOS 27 or later connect directly. Older iPhones (iOS 26 and earlier) work in beta, through WebDriverAgent on the phone.</li>
+          <li>Only one app can show an iPhone’s screen at a time, so close Xcode’s device window or iPhone Mirroring first. iOS doesn’t let PhoneDock switch dark mode, rotate the phone or read app logs.</li>
           <li>Simulators need Xcode, and emulators need the Android SDK.</li>
           <li>App Store apps don’t run in the iOS simulator. Use a real iPhone for those.</li>
         </ul>
@@ -541,7 +541,7 @@
         </details>
         <details>
           <summary>What does a real iPhone need?</summary>
-          <p>iOS 27 or later, paired with your Mac, with Developer Mode and UI Automation turned on. Nothing gets installed on the phone, and USB or Wi-Fi both work. It’s still in beta, and older iOS versions need WebDriverAgent. The <a href="https://github.com/sushilk1991/phonedock/blob/main/docs/IPHONE-WIFI.md">iPhone guide</a> has the steps.</p>
+          <p>iOS 27 or later, paired with your Mac, with Developer Mode and UI Automation turned on. Nothing gets installed on the phone, and USB or Wi-Fi both work. iPhones on iOS 26 and older work in beta, through WebDriverAgent. The <a href="https://github.com/sushilk1991/phonedock/blob/main/docs/IPHONE-WIFI.md">iPhone guide</a> has the steps.</p>
         </details>
         <details>
           <summary>Can several agents share the devices?</summary>
