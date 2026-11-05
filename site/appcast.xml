@@ -8,5 +8,15 @@
     <link>https://sushilk1991.github.io/phonedock/</link>
     <description>Updates for PhoneDock for Mac</description>
     <language>en</language>
+    <item>
+      <title>PhoneDock 0.2.0</title>
+      <pubDate>Thu, 05 Nov 2026 09:07:03 GMT</pubDate>
+      <sparkle:version>2000</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+      <sparkle:releaseNotesLink>https://github.com/sushilk1991/phonedock/releases/tag/v0.2.0</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/sushilk1991/phonedock/releases/download/v0.2.0/PhoneDock-0.2.0.zip" length="48736741" type="application/octet-stream" sparkle:edSignature="l9XcJO/TRJ6nmSzO0uH+zEA8YtWXbel5BAO0GOP12vRQXvjJY0HO9S1cL1QWOkNKyxxKXr9ZpgEA2fKiBhkBDQ=="/>
+    </item>
   </channel>
 </rss>
