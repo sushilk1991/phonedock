@@ -413,7 +413,7 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 | GET | /v1/devices/:id/apps | `?system=1` | `AppInfo[]`, without system apps unless `system=1` (all backends, iOS simulator included). Android fills `name` with the app's label (see *Android notes*); it is absent until known |
 | POST | /v1/devices/:id/apps | `{ path }` (local .apk/.app/.ipa/.zip path on the Mac) or `{ url }` (daemon downloads it first) | `{ ok, app? }` |
 | DELETE | /v1/devices/:id/apps/:appId | – | `{ ok }` |
-| POST | /v1/devices/:id/apps/:appId/launch | `{ verify?: true, expect? }` | `{ ok, inFront?, foreground?, relaunched?, delivery, retrySafe, expect? }` (added; `expect` is checked after the in-front check): after launching, polls the foreground app for up to 3 s. `inFront` = the app is in front, `foreground` = the app id that is (`null` = home screen). On iOS, when the home screen is still up after 1 s (a launch right after Home), it launches once more: `relaunched: true`. All three are absent when the backend can't read the foreground app or `verify: false` |
+| POST | /v1/devices/:id/apps/:appId/launch | `{ verify?: true, expect? }` | `{ ok, inFront?, foreground?, relaunched?, appNotes?, delivery, retrySafe, expect? }` (added; `expect` is checked after the in-front check): after launching, polls the foreground app for up to 3 s. `inFront` = the app is in front, `foreground` = the app id that is (`null` = home screen). On iOS, when the home screen is still up after 1 s (a launch right after Home), it launches once more: `relaunched: true`. All three are absent when the backend can't read the foreground app or `verify: false`. `appNotes: { updatedAt, sizeBytes }` (added) when agents saved notes for this app (see *App notes*) |
 | POST | /v1/devices/:id/apps/:appId/terminate | – | `{ ok }` |
 | POST | /v1/devices/:id/open-url | `{ url }` | `{ ok }` |
 | POST | /v1/devices/:id/shell | `{ command }` | `ExecResult` |
@@ -684,7 +684,7 @@ before → after. This is not a profiler UI; the summary points to the files for
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| POST | /v1/devices/:id/trace/start | `{ appId, template?, timeLimitSec?: 60, launch?: false }` | `{ ok, active, traceId, appId, tool, template, instruments, process: { pid?, name? } \| null, launched, startedAt, timeLimitSec, dir }` once recording has begun. `409 trace_active` when the device already has one |
+| POST | /v1/devices/:id/trace/start | `{ appId, template?, timeLimitSec?: 60, launch?: false }` | `{ ok, active, traceId, appId, tool, template, instruments, process: { pid?, name? } \| null, launched, startedAt, timeLimitSec, dir, appNotes? }` once recording has begun (`appNotes` added, as on launch: see *App notes*). `409 trace_active` when the device already has one |
 | POST | /v1/devices/:id/trace/stop | `{ compareTo?: traceId \| "none", top?: 5, triageChars?: 1200 }` | `{ ok, traceId, text, summary }` (below). `409 not_tracing`; `404 not_found` for an unknown `compareTo` (checked before the trace is stopped) |
 | GET | /v1/devices/:id/trace | – | `{ active, traceId?, appId?, template?, startedAt?, timeLimitSec?, owner?, ready?, dir?, finished? }`; `finished: { traceId, appId, endedAt, reason }` = a trace the time limit ended that no stop has collected yet |
 | GET | /v1/devices/:id/traces?limit=20 | – | Earlier traces, newest first (max 200): `[{ traceId, appId, template, startedAt, metrics, files }]` |
@@ -754,6 +754,35 @@ what a platform doesn't measure is `null` / `[]`. With the default `top` / `tria
 `vs <traceId>: hangs 1 → 0 (-1) · …`; `Metrics: {…}` (one JSON line); the triage excerpt; notes; file paths.
 CLI: `phonedock trace start|stop|status|ls|run` (`trace run <id> --app X --flow f.yaml` = start, run the flow,
 stop). MCP: `start_trace`, `stop_trace`.
+
+## App notes
+
+What agents learned about one app (how to reach key screens, stable labels and ids, quirks, steps that needed a
+person), kept between runs and shared by every client of the daemon: one Markdown file per app,
+`<state>/app-notes/<appId>.md`. Not tied to a device, so no lease. MCP: `app_notes`; CLI: `phonedock app-notes`.
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | /v1/app-notes | – | `[{ appId, path, updatedAt, sizeBytes }]`, newest first (`[]` before the first save) |
+| GET | /v1/app-notes/:appId | – | `{ appId, path, notes, updatedAt, sizeBytes }`; `{ appId, path, notes: null }` when the app has none yet |
+| PUT | /v1/app-notes/:appId | `{ notes }` (Markdown, not empty, at most 32 KB of UTF-8) | `{ ok, appId, path, updatedAt, sizeBytes, created }`: replaces the notes; `created` = there were none |
+| DELETE | /v1/app-notes/:appId | – | `{ ok, appId, path, deleted }`; `deleted: false` when there were none (not an error) |
+
+* **`appId`** is a bundle id or package name: 1–200 characters of `A-Z a-z 0-9 . _ -`, starting with a letter or
+  digit, without `..`. It becomes a file name, so anything else is `400 bad_request` before the disk is touched.
+  Clients should check it too: URL parsing turns a `.` or `..` path segment into another route before the daemon
+  sees it. The SDKs do.
+* **Files:** the folder is created 0700 on the first save (and set to 0700 if it already existed with other
+  permissions); each file is 0600. A save writes a temp file in the same folder and renames it over the old one, so
+  a reader never sees half a file; of two concurrent saves, the last wins. `updatedAt` is the file's modification
+  time. A symlink or folder named like a notes file is ignored. Reads never create anything.
+* **Errors:** `400 bad_request` (a bad `appId`; `notes` missing, empty or not a string), `413 too_large` (over 32 KB).
+* **Hints:** `apps/:appId/launch` and `trace/start` return `appNotes: { updatedAt, sizeBytes }` when the app has
+  notes (one `lstat`), so a client can point the agent at them; the field is absent otherwise. MCP `launch_app` and
+  `start_trace` then add `PhoneDock has notes for <appId>: app_notes action=read app_id=<appId>`; CLI `launch` adds
+  `phonedock app-notes show <appId>`.
+* Agents write them for agents. They should describe the app, never the person: no secrets or personal data (the
+  skill and the tool description say so). The daemon stores them as given and doesn't inspect them.
 
 ## Performance metrics
 

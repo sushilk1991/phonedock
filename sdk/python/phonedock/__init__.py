@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -17,7 +18,7 @@ import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 __all__ = ["PhoneDock", "PhoneDockApiError", "phonedock_home", "read_daemon_info"]
-__version__ = "0.2.4"
+__version__ = "0.2.5"
 
 DEFAULT_PORT = 47420
 
@@ -65,6 +66,17 @@ def read_daemon_info(home: Optional[str] = None) -> Optional[Dict[str, Any]]:
 
 def _q(s: str) -> str:
     return urllib.parse.quote(s, safe="")
+
+
+_APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
+
+
+def _notes_path(app_id: str) -> str:
+    # Checked here as well as by the daemon: a "." or ".." path segment would be resolved into another route first.
+    if not isinstance(app_id, str) or not _APP_ID.fullmatch(app_id) or ".." in app_id:
+        raise PhoneDockApiError("Invalid app id: use a bundle ID or package name", "bad_request", 400,
+                                ["Pass the app's bundle ID (iOS) or package name (Android), e.g. com.apple.Preferences."])
+    return f"/v1/app-notes/{_q(app_id)}"
 
 
 class PhoneDock:
@@ -576,6 +588,23 @@ class PhoneDock:
 
     def import_app_data(self, device_id: str, app_id: str, name: str) -> Dict[str, Any]:
         return self._request("POST", self._dev(device_id, f"/apps/{_q(app_id)}/data/import"), {"name": name})
+
+    # ── app notes (per app, shared by every agent on this Mac) ──────────────
+    def app_notes_list(self) -> List[Dict[str, Any]]:
+        """Every app with notes, newest first: [{appId, path, updatedAt, sizeBytes}]."""
+        return self._request("GET", "/v1/app-notes")
+
+    def app_notes(self, app_id: str) -> Dict[str, Any]:
+        """One app's notes: {appId, path, notes, updatedAt, sizeBytes}; notes is None when there are none yet."""
+        return self._request("GET", _notes_path(app_id))
+
+    def save_app_notes(self, app_id: str, notes: str) -> Dict[str, Any]:
+        """Replace one app's notes (Markdown, at most 32 KB): {ok, appId, path, updatedAt, sizeBytes, created}."""
+        return self._request("PUT", _notes_path(app_id), {"notes": notes})
+
+    def delete_app_notes(self, app_id: str) -> Dict[str, Any]:
+        """{ok, appId, path, deleted}; deleted is False when there were none."""
+        return self._request("DELETE", _notes_path(app_id))
 
     def key(self, device_id: str, key: str, expect: Expect = None) -> Dict[str, Any]:
         return self.input(device_id, {"action": "key", "key": key}, expect)

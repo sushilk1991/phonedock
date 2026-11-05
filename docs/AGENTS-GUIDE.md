@@ -121,6 +121,7 @@ Optional env: `PHONEDOCK_PORT` / `PHONEDOCK_HOME` (point at a non-default daemon
 | Performance | `start_trace`, `stop_trace` (iOS: xctrace hangs + main-thread hot spots; Android: perfetto + janky frames / frame-time percentiles; compares with the previous run) |
 | Apps/system | `list_apps`, `install_app`, `uninstall_app`, `launch_app`, `terminate_app`, `open_url`, `shell` (runs inside the device), `get_logs`, `set_location`, `set_appearance` (dark/light), `device_settings` (text size, contrast, bold text, reduce motion), `rotate`, `clipboard` (get / set the device clipboard's text), `push_file`, `pull_file`, `push_notification`, `wait` (plain sleep) |
 | Debug/state | `list_crashes`, `get_crash`, `record_screen` (start/stop/status → .mp4), `app_data` (save/restore/list an app's data container) |
+| App notes | `app_notes` (read / save / list / delete what agents learned about an app, shared by every agent on this Mac; `launch_app` says when an app has some) |
 | Physical | `discover_devices` (iPhones), `connect_device`, `discover_android_phones`, `pair_android_phone` |
 
 ### Connecting an Android phone over Wi-Fi
@@ -403,6 +404,7 @@ phonedock handoff request pdtest-a "Approve Face ID" --wait          # handoff l
 phonedock crashes pdtest-a --since 15m ; phonedock crashes pdtest-a <crashId> [--full]
 phonedock record pdtest-a start --max 120 ; phonedock record pdtest-a stop
 phonedock appdata pdtest-a save com.example.app logged-in             # restore | ls
+phonedock app-notes show com.example.app ; phonedock app-notes save com.example.app --file notes.md   # list | rm | path
 phonedock screenshot pdtest-a -o shot.png --max-size 1024
 phonedock shell pdtest-a -- getprop ro.build.version.release
 phonedock flow save pdtest-a -o flows/sign-in.yaml --assert "Welcome"   # the latest session → a flow file

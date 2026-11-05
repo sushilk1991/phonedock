@@ -58,7 +58,7 @@ may show them as `mcp__phonedock__get_ui` or similar). No MCP tools? Use the CLI
    says `Verified: …`, `Not verified: the screen did not change …` (the input probably missed) or
    `Not verified: the screen changed, but "Welcome" never appeared` (it did something else: read the screen).
 6. **Finish:** `release_device` for devices you acquired. Leases also end when your session ends, or after 10
-   minutes without a call from you.
+   minutes without a call from you. Learned something about the app? Save it (next section).
 
 **Screenshots.** `get_ui` is cheaper and gives refs; use `screenshot` when the tree is empty or ambiguous (games,
 maps, canvases, some web views) or when the question is visual (layout, colours, dark mode, truncation). Any action
@@ -69,6 +69,19 @@ full-resolution file and returns no image: use it for evidence.
 side 1024 px), the same space `get_ui` reports in `@(x,y)`. A screenshot with another `max_size` doesn't change
 that space; its result says how to convert. `coordinate_space: "device"` takes full-resolution pixels instead.
 After `rotate`, read the screen again before using coordinates.
+
+## Learn an app once: `app_notes`
+
+Agents on this Mac share notes per app, so the next run starts from what earlier runs learned.
+- **Before** driving an app: `app_notes action="read" app_id="com.example.app"` (`launch_app` says when notes
+  exist). Trust them, but verify on screen: apps change between versions.
+- **After** a task in an app that had none, or when you learned something non-obvious or found them wrong:
+  `app_notes action="save" app_id=… notes="…"` with the whole updated text (it replaces the old; edit, don't
+  append). Under ~60 lines, headed with the app version and date. Cover how to reach key screens (taps by visible
+  label), stable labels and element ids, quirks (onboarding, permission prompts, popups, slow screens, gestures that
+  work or don't) and steps that needed a person. Template: [recipes](references/recipes.md#learn-an-app-once).
+- **Never save secrets or personal data:** no passwords, codes, account names, emails, phone numbers, contacts, or
+  message or post contents. Notes describe the app, not the person, stay on this Mac and are read by every agent.
 
 ## Turns are the slow part: batch
 

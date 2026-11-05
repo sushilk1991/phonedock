@@ -10,6 +10,7 @@ import { metrics } from './metrics.ts';
 import './routes-extra.ts'; // v0.2 routes (registers onto `router`; must load after routes.ts)
 import './routes-flow.ts'; // POST /v1/devices/:id/flow (flow save)
 import './routes-trace.ts'; // performance traces (same)
+import './routes-notes.ts'; // app notes (same)
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
 
 const port = DEFAULT_PORT;

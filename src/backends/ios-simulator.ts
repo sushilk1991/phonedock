@@ -46,7 +46,7 @@ interface SimDevice {
   udid: string; name: string; state: string; isAvailable?: boolean; deviceTypeIdentifier?: string;
   dataPath?: string; logPath?: string; lastBootedAt?: string; availabilityError?: string;
 }
-interface SimRuntime {
+export interface SimRuntime {
   identifier: string; version: string; buildversion?: string; name: string; platform?: string;
   isAvailable?: boolean; bundlePath?: string; runtimeRoot?: string; supportedDeviceTypes?: { identifier: string; name: string; productFamily?: string }[];
 }
@@ -684,13 +684,31 @@ async function openWindow(udid: string): Promise<void> {
 
 // ── profiles / images resolution for create() ──────────────────────────────
 
-async function resolveRuntime(image?: string): Promise<SimRuntime> {
+/** Does this runtime run the device type a create asked for? (Same matching as resolveDeviceType.) Unknown → yes. */
+function runtimeSupports(rt: SimRuntime, profile: string): boolean {
+  if (!rt.supportedDeviceTypes?.length) return true;
+  const p = profile.toLowerCase();
+  return rt.supportedDeviceTypes.some((t) => t.identifier === profile || t.name.toLowerCase() === p || t.identifier.toLowerCase().endsWith(p.replace(/\s+/g, '-')));
+}
+
+/** The runtimes a create without an image tries, best first: newest version first, and within a version the general
+ *  runtime before a device-specific one. Xcode 27.2 also installs "iOS 27.2" for iPhone Duo only
+ *  (SimRuntime.iOS-27-2-iPhone19-4); taken first, every new simulator was a two-screen Duo whose screenshots fail.
+ *  With a profile, only runtimes that run it. */
+export function runtimeOrder(rts: SimRuntime[], profile?: string): SimRuntime[] {
+  const iphones = (r: SimRuntime) => r.supportedDeviceTypes?.filter((t) => t.productFamily === 'iPhone').length ?? 0;
+  return rts.filter((r) => !profile || runtimeSupports(r, profile))
+    .sort((a, b) => cmpVer(b.version, a.version) || iphones(b) - iphones(a));
+}
+
+async function resolveRuntime(image?: string, profile?: string): Promise<SimRuntime> {
   const rts = (await runtimes(true)).filter((r) => r.isAvailable !== false && isIosRuntime(r.identifier));
   if (!rts.length) throw new PhoneDockError('No iOS simulator runtime installed', 'no_image', 400, ['Install an iOS simulator runtime.'], 'xcodebuild -downloadPlatform iOS');
   if (!image) {
-    // newest first that works: not known to be broken (disk image state, a failed create), and a probe create succeeds
+    // best first that works: not known to be broken (disk image state, a failed create), and a probe create succeeds
     const bad = await unusableRuntimes(rts);
-    const sorted = [...rts].sort((a, b) => cmpVer(b.version, a.version));
+    const sorted = runtimeOrder(rts, profile);
+    if (!sorted.length) return runtimeOrder(rts)[0];   // no runtime runs that profile: resolveDeviceType says so
     for (const r of sorted) if (!bad.has(r.identifier) && await runtimeUsable(r)) return r;
     return sorted[0];
   }
@@ -1060,7 +1078,7 @@ export const backend: Backend = {
     if (!spec.name) throw new PhoneDockError('A simulator name is required', 'bad_request', 400);
     const existing = (await rawDevices()).find((d) => d.dev.name === spec.name && isIosRuntime(d.runtime));
     if (existing) throw new PhoneDockError(`A simulator named "${spec.name}" already exists`, 'conflict', 409, undefined, `Simulator ID: ${existing.dev.udid}`);
-    const rt = await resolveRuntime(spec.image);
+    const rt = await resolveRuntime(spec.image, spec.profile);
     const dt = await resolveDeviceType(spec.profile, rt);
     const ignored = (['cpus', 'ramMB', 'storageMB', 'width', 'height', 'dpi', 'network'] as const).filter((k) => spec[k] !== undefined);
     onProgress?.(`Creating ${dt.name} with ${rt.name}${ignored.length ? ` (ignored: ${ignored.join(', ')} – not configurable on iOS simulators)` : ''}`);

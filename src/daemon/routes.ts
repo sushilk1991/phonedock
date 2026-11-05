@@ -6,6 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { randomBytes } from 'node:crypto';
 import { sleep } from '../core/exec.ts';
 import { stateDir } from '../core/paths.ts';
+import { appNotesInfo } from '../core/app-notes.ts';
 import { PhoneDockError, type Backend, type BootOptions, type Device, type DeviceSpec, type InputAction, type ScreenInfo, type SystemPrompt, type UiTree } from '../core/types.ts';
 import { describePrompt, detectPrompt } from '../core/prompts.ts';
 import {
@@ -27,7 +28,7 @@ import { inputRoute } from './delivery.ts';
 import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTENT_TYPE, VIDEO_MSG, type VideoSink } from '../core/video.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 
-export const VERSION = '0.2.4';
+export const VERSION = '0.2.5';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;
@@ -642,7 +643,9 @@ r.post('/v1/devices/:id/apps/:appId/launch', inputRoute(async (c) => {
   logAction(id, c.owner, { action: 'launch', appId });
   const front = body.verify === false || !b.foregroundApp ? {} : await confirmInFront(b, nid, appId);
   const expect = exp ? await finishExpect({ id, b, nid }, exp) : undefined;
-  return { ok: true, ...front, ...(expect ? { expect } : {}) };
+  // agents' notes for this app (src/core/app-notes.ts): one stat, so clients can point the agent at them
+  const notes = appNotesInfo(appId);
+  return { ok: true, ...front, ...(expect ? { expect } : {}), ...(notes ? { appNotes: { updatedAt: notes.updatedAt, sizeBytes: notes.sizeBytes } } : {}) };
 }));
 /** After a launch: is the app in front? A launch right after Home (iOS) can leave the home screen showing while the
  *  app starts behind it (blind run 4: "Launched" over the home screen): then launch once more. Polls ≤3 s. */

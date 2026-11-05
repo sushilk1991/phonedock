@@ -10,6 +10,7 @@ export type { FlowClient, FlowResult, StepResult, SuiteResult, RunOptions } from
 export type {
   ClientOptions, Job, BackendInfo, HealthInfo, DaemonInfo, ScreenshotResult, ActionRecord, PhoneDockEvent, WaitOptions,
   FindOptions, FindResult, WaitForOptions, WaitForResult, FillOptions, FillResult, FocusResult, CrashText, RecordingStatus, RecordingResult, AppDataEntry,
+  AppNotesInfo, AppNotesRead, AppNotesHint,
   TraceStartOptions, TraceStartResult, TraceStopOptions, TraceStopResult, TraceStatus, TraceListEntry,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   ScrollToOptions, ScrollToResult, SaveFlowOptions, SaveFlowResult, SystemGesture, GestureResult, BackResult, PromptResult, AlertActionInput, AlertResult,

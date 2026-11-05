@@ -13,6 +13,7 @@ import type {
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
 } from '../core/types.ts';
+import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 
 export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
@@ -95,6 +96,7 @@ export interface TraceStartOptions { appId: string; template?: string; timeLimit
 export interface TraceStartResult {
   ok: true; active: true; traceId: string; appId: string; tool: 'xctrace' | 'perfetto'; template: string; instruments: string[];
   process: { pid?: number; name?: string } | null; launched: boolean; startedAt: string; timeLimitSec: number; dir: string;
+  appNotes?: AppNotesHint;
 }
 /** stopTrace: `top` hot spots kept (default 5, max 25), `triageChars` of triage markdown (default 1200),
  *  `compareTo` an earlier traceId ("none" = no comparison; default: the previous trace of the same app + template). */
@@ -107,6 +109,11 @@ export interface TraceStatus {
 }
 export type TraceListEntry = Pick<TraceSummary, 'traceId' | 'appId' | 'template' | 'startedAt' | 'metrics' | 'files'>;
 export interface AppDataEntry { name: string; path: string; savedAt: string; sizeBytes: number; files: number }
+export type { AppNotesInfo };
+/** GET /v1/app-notes/:appId: `notes: null` (and no updatedAt/sizeBytes) when the app has none yet. */
+export interface AppNotesRead { appId: string; path: string; notes: string | null; updatedAt?: string; sizeBytes?: number }
+/** Set on a launch / trace start result when the app has notes. */
+export interface AppNotesHint { updatedAt: string; sizeBytes: number }
 /** scrollTo: `direction` is where to look (default 'down' = reveal what is below); x,y = device-pixel point to swipe around. */
 export interface ScrollToOptions extends Omit<FindOptions, 'index' | 'limit'> {
   direction?: 'up' | 'down' | 'left' | 'right'; maxScrolls?: number; x?: number; y?: number; durationMs?: number; distance?: number;
@@ -276,6 +283,16 @@ export function daemonLogFile(home = phonedockHome()): string { return join(home
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const enc = encodeURIComponent;
+
+/** An app id for the app-notes routes, checked here as well as by the daemon: `new URL()` would turn "." or ".." in
+ *  the path into another route before the daemon could refuse it. Throws bad_request (nothing is sent). */
+export function checkAppId(appId: string): string {
+  try { return validateAppId(appId); } catch (e) {
+    const x = e as { message: string; code?: string; status?: number; hints?: string[]; detail?: string };
+    throw new PhoneDockApiError(x.message, x.code ?? 'bad_request', x.status ?? 400, x.hints ?? [], x.detail);
+  }
+}
+const notesRoute = (appId: string) => `/v1/app-notes/${enc(checkAppId(appId))}`;
 
 function isConnError(e: unknown): boolean {
   const err = e as { cause?: { code?: string }; code?: string; name?: string };
@@ -734,6 +751,21 @@ export class PhoneDockClient {
     return this.request('POST', this.dev(id, `/apps/${enc(appId)}/data/import`), { body: { name } });
   }
 
+  // ── app notes (per app, not per device; shared by every agent on this Mac) ──
+  /** Every app with notes, newest first. */
+  listAppNotes(): Promise<AppNotesInfo[]> { return this.request('GET', '/v1/app-notes'); }
+  // async: a bad app id is a rejected promise like any other API error, not a synchronous throw
+  /** One app's notes (Markdown); `notes: null` when there are none yet. */
+  async appNotes(appId: string): Promise<AppNotesRead> { return this.request('GET', notesRoute(appId)); }
+  /** Replace one app's notes (at most 32 KB; written atomically). `created`: there were none before. */
+  async saveAppNotes(appId: string, notes: string): Promise<AppNotesInfo & { ok: true; created: boolean }> {
+    return this.request('PUT', notesRoute(appId), { body: { notes } });
+  }
+  /** `deleted: false` when there were none. */
+  async deleteAppNotes(appId: string): Promise<{ ok: true; appId: string; path: string; deleted: boolean }> {
+    return this.request('DELETE', notesRoute(appId));
+  }
+
   // ── leases / pool ──────────────────────────────────────────────────────
   lease(id: string, opts: { ttlSec?: number; force?: boolean; owner?: string } = {}): Promise<Lease> {
     return this.request('POST', this.dev(id, '/lease'), { body: { owner: opts.owner ?? this.owner, ttlSec: opts.ttlSec, force: opts.force } });
@@ -756,8 +788,9 @@ export class PhoneDockClient {
     return this.request('POST', this.dev(id, '/apps'), { body });
   }
   uninstall(id: string, appId: string): Promise<{ ok: boolean }> { return this.request('DELETE', this.dev(id, `/apps/${enc(appId)}`)); }
-  /** `inFront`: the app is in the foreground afterwards (absent when the backend can't tell); `foreground`: what is. */
-  launch(id: string, appId: string, opts: InputOptions = {}): Promise<{ ok: boolean; inFront?: boolean; foreground?: string | null; relaunched?: boolean } & InputDelivery> {
+  /** `inFront`: the app is in the foreground afterwards (absent when the backend can't tell); `foreground`: what is.
+   *  `appNotes`: agents saved notes for this app (read them with appNotes()). */
+  launch(id: string, appId: string, opts: InputOptions = {}): Promise<{ ok: boolean; inFront?: boolean; foreground?: string | null; relaunched?: boolean; appNotes?: AppNotesHint } & InputDelivery> {
     return this.request('POST', this.dev(id, `/apps/${enc(appId)}/launch`), { body: opts.expect !== undefined ? { expect: opts.expect } : {}, input: true });
   }
   terminate(id: string, appId: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, `/apps/${enc(appId)}/terminate`), { body: {} }); }

@@ -1,5 +1,6 @@
 // Performance trace routes (see docs/API.md "Performance traces"). Registered onto the shared router; imported by
 // main.ts after routes.ts. The lifecycle lives in trace.ts.
+import { appNotesInfo } from '../core/app-notes.ts';
 import { PhoneDockError } from '../core/types.ts';
 import { checkLease, getDevice } from './core.ts';
 import { badRequest } from './http.ts';
@@ -15,7 +16,9 @@ r.post('/v1/devices/:id/trace/start', async (c) => {
   const d = await getDevice(id);
   if (d.state !== 'running') throw new PhoneDockError('The device is not running', 'device_not_running', 409, ['Boot it first, open the app, then start the trace.'], `${d.name} is ${d.state}`);
   const template = typeof body.template === 'string' && body.template.trim() ? body.template.trim() : undefined;
-  return beginTrace(d, b, nid, { appId, template, timeLimitSec: clampTimeLimit(body.timeLimitSec), launch: body.launch === true || body.launch === 'true' }, c.owner);
+  const started = await beginTrace(d, b, nid, { appId, template, timeLimitSec: clampTimeLimit(body.timeLimitSec), launch: body.launch === true || body.launch === 'true' }, c.owner);
+  const notes = appNotesInfo(appId);   // as on launch: the agent is about to drive this app
+  return notes ? { ...started, appNotes: { updatedAt: notes.updatedAt, sizeBytes: notes.sizeBytes } } : started;
 });
 
 r.post('/v1/devices/:id/trace/stop', async (c) => {

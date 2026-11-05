@@ -5,12 +5,15 @@ import { pathToFileURL } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { PhoneDockClient, PhoneDockApiError, jobErrorText, matchName, tapMeta, readDaemonInfo, resolveDaemonEntry, daemonLogFile, phonedockHome } from '../sdk/client.ts';
+import { PhoneDockClient, PhoneDockApiError, checkAppId, jobErrorText, matchName, tapMeta, readDaemonInfo, resolveDaemonEntry, daemonLogFile, phonedockHome } from '../sdk/client.ts';
 import type { Device, Job, DeviceSpec, Expect, ExpectReport, InputAction, OsImage, ElementMatch, Handoff, HandoffState, SystemGesture, SystemPrompt } from '../sdk/client.ts';
 import { parseArgs, str, num, bool, table, type ParsedArgs } from './args.ts';
 import { localTime } from '../backends/ios-common.ts';
+import { appNotesDir, appNotesPath } from '../core/app-notes.ts';
 import { FLOW_HELP, flowCmd, testCmd } from './flow-cmds.ts';
 import { TRACE_USAGE, traceCmd } from './trace-cmds.ts';
+
+const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | rm <appId> | path [appId]';
 
 const HELP = `phonedock – device runtime for AI agents
 
@@ -62,6 +65,8 @@ Perf:       ${TRACE_USAGE}
               Instruments (iOS) / perfetto + frame stats (Android) around a flow; stop prints a summary that
               compares with the previous trace of the same app. Default limit 60 s, max 600.
 App data:   appdata <id> save|restore|ls <appId> [name]
+App notes:  ${NOTES_USAGE}
+              What agents learned about an app, shared by every agent on this Mac. save reads --file or stdin.
 ${FLOW_HELP}
 Misc:       jobs [jobId] | watch | mcp [--http PORT] | help
 
@@ -572,6 +577,36 @@ export async function run(argv: string[]): Promise<number> {
       if (sub === 'restore' || sub === 'import') { const r = await c.importAppData(d.id, appId, name); out(r, () => `restored ${appId} data "${name}"`); return 0; }
       usage('appdata <id> save|restore|ls <appId> [name]');
     }
+    case 'app-notes': case 'notes': {
+      const sub = p[1] ?? 'list'; const appId = p[2];
+      if (sub === 'list' || sub === 'ls') {
+        const l = await c.listAppNotes();
+        out(l, () => l.length ? table(l.map((n) => ({ app: n.appId, updated: localTime(n.updatedAt), bytes: n.sizeBytes })), ['app', 'updated', 'bytes']) : 'No app notes yet.');
+        return 0;
+      }
+      if (sub === 'path') { const path = appId ? appNotesPath(checkAppId(appId)) : appNotesDir(); out({ path }, () => path); return 0; }
+      if (!appId) usage(`app-notes ${sub} needs an app id (bundle ID or package name): ${NOTES_USAGE}`);
+      if (sub === 'show' || sub === 'read' || sub === 'cat') {
+        const r = await c.appNotes(appId);
+        if (JSON_OUT) { out(r); return 0; }
+        if (r.notes === null) { process.stderr.write(`No notes yet for ${appId}. After a task, save what you learned: phonedock app-notes save ${appId} --file notes.md\n`); return 0; }
+        process.stdout.write(r.notes.endsWith('\n') ? r.notes : `${r.notes}\n`);   // as saved, so it pipes into a file
+        return 0;
+      }
+      if (sub === 'save' || sub === 'set') {
+        const file = str(a.flags, 'file');
+        if (!file && process.stdin.isTTY) usage('app-notes save <appId> needs --file FILE, or the notes piped in on stdin');
+        const r = await c.saveAppNotes(appId, file ? readFileSync(resolve(file), 'utf8') : await readStdin());
+        out(r, () => `Saved ${r.created ? 'new ' : ''}notes for ${appId} (${r.sizeBytes} bytes) → ${r.path}`);
+        return 0;
+      }
+      if (sub === 'rm' || sub === 'delete') {
+        const r = await c.deleteAppNotes(appId);
+        out(r, () => (r.deleted ? `Deleted the notes for ${appId}` : `No notes for ${appId}: nothing to delete`));
+        return 0;
+      }
+      usage(NOTES_USAGE);
+    }
     case 'handoff': case 'handoffs': {
       const sub = p[1] ?? 'ls';
       const fmt = (h: Handoff) => `${h.id}  ${h.state.padEnd(9)} ${h.deviceId}  "${h.reason}"  by ${h.requestedBy}${h.note ? `  note="${h.note}"` : ''}`
@@ -633,7 +668,8 @@ export async function run(argv: string[]): Promise<number> {
     case 'launch': {
       const d = await dev(); need(p, 3, '<appId>');
       const r = await c.launch(d.id, p[2], { expect: expectFlag(a.flags) });
-      out(r, () => withExpect(r, `Launched ${p[2]}${r.inFront === false ? ` (not in front: ${r.foreground ?? 'home screen'})` : ''}`)); return expectCode(r);
+      const notes = r.appNotes ? `\nPhoneDock has notes for ${p[2]}: phonedock app-notes show ${p[2]}` : '';
+      out(r, () => withExpect(r, `Launched ${p[2]}${r.inFront === false ? ` (not in front: ${r.foreground ?? 'home screen'})` : ''}${notes}`)); return expectCode(r);
     }
     case 'terminate': case 'kill': { const d = await dev(); need(p, 3, '<appId>'); out(await c.terminate(d.id, p[2]), () => `Terminated ${p[2]}`); return 0; }
     case 'open-url': case 'open': { const d = await dev(); need(p, 3, '<url>'); out(await c.openUrl(d.id, p[2]), () => `Opened ${p[2]}`); return 0; }

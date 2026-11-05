@@ -17,7 +17,7 @@ export function promptWarning(p: SystemPrompt): string {
 }
 
 const expandHome = (p: string) => (p === '~' ? homedir() : p.startsWith('~/') ? homedir() + p.slice(1) : p);
-const fmtBytes = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+export const fmtBytes = (n: number) => (n >= 1 << 20 ? `${(n / (1 << 20)).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
 const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 /** ISO → "2026-11-04 19:20:13 +0530" in the Mac's time zone (crash reports print local times too). */
 export function localTime(iso: string | undefined): string {

@@ -71,7 +71,12 @@ Raw input in one call (device pixels): `phonedock input <id> '[{"action":"tap","
 | Evidence | `screenshot <id> -o file.png` · `record <id> start --max 120` … `record <id> stop` |
 | Performance | `trace start <id> --app <appId> [--template T] [--time-limit 60] [--launch]` … `trace stop <id>` (summary, compared with the last run) · `trace run <id> --app <appId> --flow f.yaml` · `trace ls <id>` |
 | Reset | `snapshot save <id> clean` · `snapshot restore <id> clean` · `appdata <id> save <appId> logged-in` |
+| App notes | `app-notes show <appId>` · `app-notes save <appId> --file notes.md` (or pipe it in) · `app-notes list` · `app-notes rm <appId>` · `app-notes path [appId]` |
 | Inside the device | `shell <id> -- <command…>` (runs on the device, not the Mac) |
+
+**App notes** are what earlier agents learned about an app (see "Learn an app once" in SKILL.md). `launch` prints
+`PhoneDock has notes for <appId>: phonedock app-notes show <appId>` when there are some: read them first. `show`
+prints the Markdown as saved; `save` replaces it with the whole updated text.
 
 ## When a person must act
 

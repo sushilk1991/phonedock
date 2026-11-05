@@ -3,6 +3,7 @@
 // taps) → stop_trace → read the summary → change the code, rebuild, reinstall → repeat and compare.
 import { z } from 'zod';
 import type { ToolKit } from './server.ts';
+import { notesHint } from './tools-notes.ts';
 
 export function registerTraceTools(k: ToolKit): void {
   const { tool, c, target, text } = k;
@@ -18,7 +19,7 @@ export function registerTraceTools(k: ToolKit): void {
     const r = await c.startTrace(d.id, { appId: a.app_id, template: a.template, timeLimitSec: a.time_limit_sec, launch: a.launch });
     const extra = r.instruments.length ? ` + ${r.instruments.join(', ')}` : '';
     const proc = r.process?.pid ? ` (pid ${r.process.pid})` : '';
-    return { content: [text(`Tracing ${r.appId}${proc} on ${d.name}: ${r.tool} "${r.template}"${extra}, trace ${r.traceId}, stops by itself after ${r.timeLimitSec} s.${r.launched ? ' The app was launched for it.' : ''}\nNow drive the flow you want to measure (batch / run_flow / taps), then call stop_trace${a.device ? ` (device="${a.device}")` : ''} for the summary.`)] };
+    return { content: [text(`Tracing ${r.appId}${proc} on ${d.name}: ${r.tool} "${r.template}"${extra}, trace ${r.traceId}, stops by itself after ${r.timeLimitSec} s.${r.launched ? ' The app was launched for it.' : ''}\nNow drive the flow you want to measure (batch / run_flow / taps), then call stop_trace${a.device ? ` (device="${a.device}")` : ''} for the summary.${r.appNotes ? `\n${notesHint(r.appId)}` : ''}`)] };
   });
 
   tool('stop_trace', 'Stop the performance trace started with start_trace, check the trace file opens, and return a compact summary (same keys every run): duration; iOS: hangs by severity with the longest, main-thread CPU time, the heaviest main-thread functions (self time) and the heaviest functions in the app\'s own code, plus the capped `xctrace triage --style hangs` report; Android: frames rendered, janky frames and %, p50/p90/p95/p99 frame times. It also compares with the previous trace of the same app and template on this device ("hangs 2 → 0 (−2)"). The Metrics line is one JSON object: diff it between runs. File paths (the .trace / .perfetto-trace, summary.json) are included for deeper digging with `xcrun xctrace show` / `xctrace help` or ui.perfetto.dev. Also returns a trace that already hit its time limit.', {

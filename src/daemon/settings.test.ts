@@ -7,6 +7,7 @@ import { PhoneDockError, type Backend, type SettingsInput } from '../core/types.
 import type { Ctx } from './http.ts';
 
 process.env.PHONEDOCK_HOME = mkdtempSync(join(tmpdir(), 'pd-settings-'));
+delete process.env.PHONEDOCK_DEVICE_FILTER;   // core.ts reads it on import; agents here often run with it set
 const core = await import('./core.ts');
 const { router } = await import('./routes.ts');
 await import('./routes-extra.ts');

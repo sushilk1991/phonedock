@@ -108,6 +108,31 @@ On a real iPhone, trace only development builds the user asked you to measure.
 CLI: `phonedock trace start <id> --app <id>` … `phonedock trace stop <id>`, or
 `phonedock trace run <id> --app <id> --flow flow.yaml`.
 
+## Learn an app once
+
+1. Before the first step in an app: `app_notes action="read" app_id=…`. No notes yet: work as usual and note what
+   cost you time.
+2. Follow the notes, checking each step on screen. A label moved or a step no longer works: fix it as you go.
+3. Done: save the whole updated text (`app_notes action="save"` replaces it). Rewrite in place, drop what's stale,
+   and keep it under about 60 lines. A redesigned app: replace the notes, or `action="delete"` them.
+
+A shape that works:
+
+```markdown
+# <App name> (<app id>) <version> · <platform and OS> · checked <date>
+## Reach
+- <Screen>: tap "<label>" → tap "<label>" (or open_url <deep link>)
+## Selectors
+- <what>: text "<label>" or element_id <id>; for look-alikes, the element_type or index that picks the right one
+## Quirks
+- Onboarding, permission prompts, popups; slow screens (what to wait_for); gestures that work or don't
+## Needs a person
+- <step> (why)
+```
+
+Write about the app, never the person using it: no secrets, account names, contacts or message contents, not even as
+examples. CLI: `phonedock app-notes show <appId>`, `phonedock app-notes save <appId> --file notes.md`.
+
 ## Multi-agent etiquette
 
 - `acquire_device` before input when others may share the Mac; `release_device` when done.
