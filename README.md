@@ -43,9 +43,9 @@ Real recordings at real speed, with the waits trimmed. Nobody touches the phones
   </tr>
 </table>
 
-## Everything your agent needs on a phone
+## One window for every phone
 
-<img src="docs/media/launch/2-bento.png" alt="What PhoneDock does: live video at 60 fps, the agent's request for help, real iPhones and Android phones next to simulators and emulators, the Activity list, flows saved as tests, free and open source">
+<img src="docs/media/launch/2-bento.png" alt="One window for every phone: a real iPhone live at 60 fps, the Activity list of every step the agent and you took, real phones and virtual ones, and the Take Over button">
 
 - **Watch live** at up to 60 fps while an agent works, in the app or in a separate window.
 - **Real phones and virtual ones.** iPhones on iOS 27 or later connect over USB or Wi-Fi with nothing installed on
