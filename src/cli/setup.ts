@@ -40,7 +40,7 @@ const PI_DESCRIPTION = 'Android and iOS phones, emulators and simulators: create
 const MANIFEST = '.phonedock-skill.json';
 export const TRY_PROMPT_IOS = 'Use PhoneDock to create an iPhone simulator, open Settings and turn on Dark Mode.';
 export const TRY_PROMPT_ANDROID = 'Use PhoneDock to create an Android phone, open Settings and turn on Dark Mode.';
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 
 export type Exec = (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
 

@@ -132,6 +132,7 @@ final class AppModel {
 
     func connect() async {
         connection = .connecting("Looking for daemon…")
+        await replaceOutdatedDaemon()
         if await tryAttach() { return }
         connection = .connecting("Starting daemon…")
         do { try DaemonLocator.launch() } catch {
@@ -153,6 +154,15 @@ final class AppModel {
             if !connection.isConnected, await tryAttach() { return }
             if !connection.isConnected { scheduleRetry() }
         }
+    }
+
+    /// After an update Sparkle relaunches the app, but the daemon the old version started keeps running the old
+    /// code. Stop it so `connect` launches this version's; if it won't stop, attach to it as before.
+    private func replaceOutdatedDaemon() async {
+        guard let f = DaemonLocator.readDaemonFile(), let pid = f.pid,
+              DaemonLocator.isOutdatedBundledDaemon(pid: pid, version: f.version) else { return }
+        connection = .connecting("Restarting daemon for PhoneDock \(UpdateController.shared.currentVersion)…")
+        if !(await DaemonLocator.stop(pid: pid)) { NSLog("PhoneDock: outdated daemon (pid \(pid), \(f.version ?? "?")) didn't stop") }
     }
 
     private func tryAttach() async -> Bool {

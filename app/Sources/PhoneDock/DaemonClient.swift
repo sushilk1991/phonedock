@@ -298,6 +298,40 @@ enum DaemonLocator {
         return .other(nil)
     }
 
+    /// The command line a process was started with (KERN_PROCARGS2). Unlike `processPath`, it survives the executable
+    /// being moved or deleted, which is what an in-place update does to a running daemon.
+    static func processArguments(_ pid: pid_t) -> [String]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard pid > 0, sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+        // Layout: argc, the exec path, NUL padding, then argc NUL-terminated arguments (then the environment).
+        let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+        var i = MemoryLayout<Int32>.size
+        while i < size, buf[i] != 0 { i += 1 }
+        while i < size, buf[i] == 0 { i += 1 }
+        var args: [String] = []
+        while args.count < argc, i < size {
+            let start = i
+            while i < size, buf[i] != 0 { i += 1 }
+            args.append(String(decoding: buf[start..<i], as: UTF8.self))
+            i += 1
+        }
+        return args
+    }
+
+    /// A daemon that runs this bundle's code (started by this app or by the CLI inside it) but reports another
+    /// version: the bundle was replaced under it by an update. Its code is gone from disk and it lacks the new routes,
+    /// so the app replaces it rather than attach. Daemons from a terminal, a repo or another copy are left alone.
+    static func isOutdatedBundledDaemon(pid: Int, version: String?) -> Bool {
+        guard isBundled, let version, !version.isEmpty,
+              let mine = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, version != mine,
+              let resources = Bundle.main.resourceURL?.standardizedFileURL.path,
+              let args = processArguments(pid_t(pid)) else { return false }
+        return args.contains { $0.hasPrefix(resources + "/") }
+    }
+
     /// SIGTERM the daemon and wait (up to ~6 s) for it to exit.
     static func stop(pid: Int) async -> Bool {
         guard pid > 0, kill(pid_t(pid), SIGTERM) == 0 else { return false }

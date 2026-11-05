@@ -144,7 +144,11 @@ Use throwaway copies and a throwaway key. Never use /Applications/PhoneDock.app 
    ```
 4. **Open the old copy** with `open /tmp/pd-old/PhoneDock.app`. About 8 seconds after launch the sidebar shows
    "PhoneDock 0.1.1-test · Update". Click Update. The app downloads, quits, and reopens as 0.1.1-test; About PhoneDock
-   and Settings › General › Updates show build 1001.
+   and Settings › General › Updates show build 1001. The daemon the old copy started is replaced by the new version's
+   (`curl -s http://127.0.0.1:<port>/v1/health` reports the new version).
+   Launch with `open`, never by running `Contents/MacOS/PhoneDock` from a terminal. Started that way, the terminal is
+   the responsible process, macOS App Management hides write access to the bundle, and Sparkle asks for an admin
+   password, which real users never see.
 5. **Tamper test:** flip one byte in the middle of the zip, keep the appcast, start again from a fresh old copy, and
    click Update. The sidebar says "Couldn’t verify the update", and the old copy stays on 0.1.0.
 6. **Clean up:** quit the copies, then run `defaults delete dev.phonedock.pdtest.app` and
@@ -152,4 +156,4 @@ Use throwaway copies and a throwaway key. Never use /Applications/PhoneDock.app 
 
 Copies that aren't Developer ID signed are checked for the same identifier and a valid signature only. The team check
 needs real Developer ID builds, so check it on the first real release: update a copy of the previous release from the
-live feed.
+live feed. (Done for 0.2.2 → 0.2.3 on 2026-11-05: no password prompt, about 3 s from Update to the relaunched app.)

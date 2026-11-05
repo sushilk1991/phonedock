@@ -23,7 +23,7 @@ import { promptWarning, registerExtraTools } from './tools-extra.ts';
 import { registerFlowTools } from './tools-flow.ts';
 import { registerTraceTools } from './tools-trace.ts';
 
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 const DEFAULT_MAX_SIZE = 1024;
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
