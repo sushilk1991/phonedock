@@ -34,7 +34,12 @@ unknown_command, pair_timeout, pair_failed, usbmuxd_unavailable, internal.
 
 Hardware status (2026-11-03, iPhone17,2 on iOS 27.0, Wi-Fi paired, native transport): connect, status, screenshot,
 apps and ui were run read-only on a real phone. Input (tap/swipe/type/key/button/pinch), launch/terminate/open_url,
-rotate, clipboard, appearance, DDI mounting, the usb/wifi userspace transports and pair_wifi are UNTESTED on hardware.
+rotate, appearance, DDI mounting, the usb/wifi userspace transports and pair_wifi are UNTESTED on hardware.
+Clipboard (2026-11-05, same phone, LOCKED, Wi-Fi): clipboard_get answers in ~1.6-2 s, but a locked phone returns no
+items (metadata changeCount 69, items []), so the daemon reports device_locked when the phone is locked and no text
+came back. Unlocked (2026-11-05, same phone): clipboard_set ~0.2 s and clipboard_get ~0.1 s after the first call,
+set → get → restore verified. DeviceInfoService getlockstate is "not
+implemented" on iOS 27.0, so lockstate() can't detect the lock; `devicectl device info lockState` can.
 The pure helpers (coordinates, gestures, text, rotation, NSKeyedArchive + AX tree parsing) and the protocol are
 unit-tested.
 Test-only knobs: PD_IOS_NATIVE_FAKE=WxH[@scale] swaps the device for an in-memory fake that records HID reports;
@@ -298,6 +303,53 @@ def num(args: dict[str, Any], key: str, default: Optional[float] = None, *, lo: 
     if hi is not None and v > hi:
         raise bad_request(f"argument {key} must be <= {hi}, got {v:g}")
     return v
+
+
+CLIP_TEXT_UTIS = ("public.utf8-plain-text", "public.plain-text", "public.text")
+# Primary type of each item only. An allResolved pull loads every representation and can stall the phone's pasteboard
+# daemon (for every client) for ~64 s when an app advertises a type it can't produce (Notes: public.rtf).
+CLIP_POLICY: dict[str, Any] = {"promiseSecondary": {}}
+
+
+def _clip_url(raw: bytes) -> Optional[str]:
+    """public.url data: UTF-8 text, or a binary plist holding the URL string."""
+    if raw.startswith(b"bplist"):
+        import plistlib
+        try:
+            obj = plistlib.loads(raw)
+        except Exception:
+            return None
+        cands = [obj] if isinstance(obj, str) else (obj.get("$objects") or []) if isinstance(obj, dict) else []
+        return next((o for o in cands if isinstance(o, str) and re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", o)), None)
+    try:
+        return raw.decode("utf-8").rstrip("\x00") or None
+    except UnicodeDecodeError:
+        return None
+
+
+def clip_text(snapshot: dict[str, Any]) -> Optional[str]:
+    """Plain text of a pasteboard snapshot (PULL_REPLY): the first item's text, else a copied link (public.url, as
+    "Copy Link" puts it), from data carried inline. None when it holds neither (empty, an image, rich text only)."""
+    pb = snapshot.get("pasteboard")
+    items = (pb if isinstance(pb, dict) else snapshot).get("items") or []
+
+    def inline(item: Any, uti: str) -> Optional[bytes]:
+        d = ((item or {}).get("data") or {}).get(uti) if isinstance(item, dict) else None
+        raw = d.get("data") if isinstance(d, dict) else None
+        return raw.encode("utf-8") if isinstance(raw, str) else bytes(raw) if isinstance(raw, (bytes, bytearray)) else None
+
+    for item in items:
+        for uti in CLIP_TEXT_UTIS:
+            raw = inline(item, uti)
+            if raw:
+                with contextlib.suppress(UnicodeDecodeError):
+                    return raw.decode("utf-8")
+    for item in items:
+        raw = inline(item, "public.url")
+        url = _clip_url(raw) if raw else None
+        if url:
+            return url
+    return None
 
 
 def text_arg(args: dict[str, Any], key: str, *, allow_empty: bool = False) -> str:
@@ -1490,7 +1542,7 @@ class RealApi:
     async def clipboard_get(self) -> Optional[str]:
         from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
         async with PasteboardService(self.rsd) as pb:
-            return await asyncio.wait_for(pb.get_text(), 15)
+            return clip_text(await asyncio.wait_for(pb.get(data_policy=CLIP_POLICY), 15))
 
     async def clipboard_set(self, text: str) -> None:
         from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService

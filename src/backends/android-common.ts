@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { run, runBuffer, sleep, type RunOptions } from '../core/exec.ts';
 import { androidSdkRoot, toolEnv, which } from '../core/paths.ts';
-import { closeUiHelper, helperEnabled, helperInput, helperLabels, helperUiDump, UI_QUIET_MS, UI_QUIET_TIMEOUT_MS } from './android-helper.ts';
+import { closeUiHelper, helperEnabled, helperInput, helperInputStarted, helperLabels, helperUiDump, UI_QUIET_MS, UI_QUIET_TIMEOUT_MS } from './android-helper.ts';
 import { chooseWindow, parseHelperWindows } from './android-windows.ts';
+import { startsWithStartCode } from '../core/video.ts';
 import {
   PhoneDockError,
-  type AppInfo, type Bounds, type Capability, type CrashReport, type ExecResult, type FrameStream, type KeyName,
+  type AppInfo, type Bounds, type Capability, type CrashReport, type ExecResult, type KeyName,
   type Orientation, type ScreenInfo, type UiElement, type UiTree,
 } from '../core/types.ts';
 
@@ -64,7 +65,7 @@ export function shQuote(s: string): string { return `'${s.replace(/'/g, `'\\''`)
 
 export const ANDROID_CAPS: Capability[] = [
   'screenshot', 'stream', 'uiTree', 'tap', 'longPress', 'swipe', 'type', 'key', 'install', 'apps', 'launch',
-  'openUrl', 'shell', 'files', 'logs', 'rotate', 'window', 'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'trace',
+  'openUrl', 'shell', 'files', 'logs', 'rotate', 'window', 'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'trace', 'video',
 ];
 
 const KEYMAP: Record<string, string> = {
@@ -244,11 +245,12 @@ export const orientationOf = (width: number, height: number): Orientation => (wi
 // The screen as it is turned right now (= the size of a screenshot), per serial. Read with `wm size` + the display
 // rotation; kept up to date by screenshots and the live stream, so Device.screen follows rotation without an adb
 // call per device listing.
-interface ScreenState { info: ScreenInfo; rotation: number; at: number; pending?: boolean; fixed?: Orientation }
+export interface ScreenState { info: ScreenInfo; rotation: number; at: number; pending?: boolean; fixed?: Orientation }
 const screens = new Map<string, ScreenState>();
 const screenReads = new Map<string, Promise<ScreenState | undefined>>();
 
-async function readScreen(serial: string): Promise<ScreenState> {
+/** Reads the screen size, density and rotation (and remembers them). */
+export async function readScreen(serial: string): Promise<ScreenState> {
   const r = await adb(serial, ['shell', `wm size; wm density; ${ROTATION_GREP}`], { allowFail: true });
   const o = r.stdout;
   const size = /Override size:\s*(\d+)x(\d+)/.exec(o) ?? /Physical size:\s*(\d+)x(\d+)/.exec(o);
@@ -269,6 +271,8 @@ export async function screenInfo(serial: string): Promise<ScreenInfo> { return (
 
 /** The last known screen, without waiting on adb (the daemon reads it with screenInfo() once a device runs). */
 export function knownScreen(serial: string): ScreenInfo | undefined { return screens.get(serial)?.info; }
+/** The last screen read (size and rotation) and when, without waiting on adb. */
+export function knownScreenState(serial: string): ScreenState | undefined { return screens.get(serial); }
 
 /** A screenshot shows the screen as it is now: when its size disagrees with what we know, read the screen again. */
 export function noteScreenshot(serial: string, png: Buffer) {
@@ -350,14 +354,24 @@ const KEY_TYPEABLE = /^[\x20-\x7e\n]*$/;
 export async function typeText(serial: string, text: string) {
   if (!text) return;
   if (!KEY_TYPEABLE.test(text)) {
-    // Non-ASCII: try the clipboard + paste path (Android 12+ `cmd clipboard` is not universal).
-    const r = await adb(serial, ['shell', `cmd clipboard set-primary-clip ${shQuote(text)} 2>&1 || echo __NOCLIP__`], { allowFail: true });
-    if (r.code === 0 && !/__NOCLIP__|Unknown|No shell command|Exception|usage/i.test(r.stdout)) {
+    // Non-ASCII (emoji, accents, other scripts) has no key events: put it on the clipboard and paste. The helper sets
+    // the clipboard itself, as the shell user (as scrcpy does), so this works on builds without `cmd clipboard`
+    // (vivo's Android 15 has none); `cmd clipboard` is the fallback when the helper can't run.
+    const viaHelper = await helperInputStarted(serial, `clip ${Buffer.from(text, 'utf8').toString('base64')}`, 10_000);
+    let onClipboard = viaHelper?.delivery === 'sent';
+    let why = viaHelper ? `helper: ${viaHelper.detail ?? viaHelper.delivery}` : 'helper: not running';
+    if (!onClipboard) {
+      const r = await adb(serial, ['shell', `cmd clipboard set-primary-clip ${shQuote(text)} 2>&1 || echo __NOCLIP__`], { allowFail: true });
+      onClipboard = r.code === 0 && !/__NOCLIP__|Unknown|No shell command|Exception|usage/i.test(r.stdout);
+      if (!onClipboard) why += `; cmd clipboard: ${(r.stdout + ' ' + r.stderr).trim()}`;
+    }
+    if (onClipboard) {
       await sendInput(serial, 'key KEYCODE_PASTE', () => adbInput(serial, ['shell', 'input', 'keyevent', 'KEYCODE_PASTE'], 'paste'), 'paste');
       return;
     }
-    throw new PhoneDockError('Typing non-ASCII text is not supported on this device', 'not_supported', 501,
-      ['Use ASCII text instead.'], `Clipboard input failed: ${r.stdout} ${r.stderr}\nInstall ADBKeyboard (com.android.adbkeyboard) and use am broadcast -a ADB_INPUT_TEXT --es msg … via /shell`, 'not_sent');
+    throw new PhoneDockError('Couldn’t type this text on this device', 'not_supported', 501,
+      ['Characters outside plain ASCII go in by pasting, and the clipboard couldn’t be set.', 'Type it without emoji or accents.'],
+      `Clipboard input failed. ${why}`, 'not_sent');
   }
   // ASCII: key events from the virtual keyboard map, all in one helper call; it stops at the first key that may not
   // have gone in (then delivery is unknown: never retyped blindly).
@@ -592,37 +606,11 @@ export async function getprop(serial: string, prop: string, timeoutMs = 5000): P
   return r.code === 0 ? r.stdout.trim() : '';
 }
 
-// ── Live stream: screenrecord (h264) → ffmpeg → JPEG frames ─────────────────────
-// screenrecord only encodes when the screen changes, so a still screen sends one frame and then nothing. Two
-// things used to hold that frame back until the *next* change (forever, on a static screen): ffmpeg's raw-h264
-// parser only ends an access unit when it sees the next start code, and the threaded MJPEG encoder keeps one
-// frame queued. `H264Flusher` appends an access unit delimiter once the input goes quiet, and the encoder runs
-// with `-threads 1`, so every frame comes out as soon as it arrives (first frame ≈0.1 s after screenrecord starts).
+// ── Live stream helpers (the stream itself: android-video.ts) ───────────────────
+/** An access unit delimiter: written after each access unit fed to ffmpeg, its raw-h264 parser ends the picture at
+ *  once instead of waiting for the next one (a still screen's only frame would otherwise never come out). */
 export const H264_AUD = Buffer.from([0, 0, 0, 1, 9, 0xf0]);
-export function startsWithStartCode(b: Buffer): boolean {
-  return b.length >= 3 && b[0] === 0 && b[1] === 0 && (b[2] === 1 || (b[2] === 0 && b.length >= 4 && b[3] === 1));
-}
-/** Forwards h264 chunks and writes an AUD after `idleMs` of silence. screenrecord writes each encoder buffer in one
- *  write, so a quiet gap means an access unit is complete. If the next chunk does not start with a start code the
- *  AUD landed inside a NAL unit (a write was split and delayed): `onSplit` lets the caller restart the encoder. */
-export class H264Flusher {
-  private timer: NodeJS.Timeout | undefined;
-  private flushed = false;
-  private write: (b: Buffer) => void;
-  private idleMs: number;
-  private onSplit: () => void;
-  constructor(write: (b: Buffer) => void, idleMs = 12, onSplit: () => void = () => {}) {
-    this.write = write; this.idleMs = idleMs; this.onSplit = onSplit;
-  }
-  push(chunk: Buffer) {
-    if (this.timer) clearTimeout(this.timer);
-    if (this.flushed && !startsWithStartCode(chunk)) this.onSplit();
-    this.flushed = false;
-    this.write(chunk);
-    this.timer = setTimeout(() => { this.timer = undefined; this.flushed = true; this.write(H264_AUD); }, this.idleMs);
-  }
-  stop() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
-}
+export { startsWithStartCode };
 
 /** "display state changed, now has orientation ROTATION_1, size (2424, 1080)" (Android 14+) or "orientation changed,
  *  now 1" (older): screenrecord saw the display turn. It keeps recording at its old size, letterboxed. */
@@ -630,167 +618,6 @@ export function parseDisplayChange(line: string): { rotation: number; width?: nu
   const m = /display state changed[^\n]*?ROTATION_(\d)(?:[^\n]*?size \((\d+), (\d+)\))?/.exec(line) ?? /orientation changed, now (?:ROTATION_)?(\d)/.exec(line);
   if (!m) return undefined;
   return { rotation: +m[1], ...(m[2] && m[3] ? { width: +m[2], height: +m[3] } : {}) };
-}
-
-export function adbFrameStream(serial: string, opts: { maxSize?: number; fps?: number; capture?: () => Promise<Buffer> } = {}): FrameStream {
-  const frameCbs: ((j: Buffer, s?: ScreenInfo) => void)[] = []; const endCbs: ((e?: Error) => void)[] = [];
-  let stopped = false; let rec: ChildProcess | undefined; let ff: ChildProcess | undefined; let flusher: H264Flusher | undefined;
-  let watcher: ChildProcess | undefined;
-  let gotFrame = false; let pollMode = false; let lastEmit = 0; let frameCount = 0; let failures = 0;
-  let gen = 0;                                    // pipeline generation: a restart makes older pipelines' output stale
-  let pipe: ScreenState | undefined;              // the screen the running screenrecord was started for
-  // The display is off: screenrecord can't start ("INVALID_LAYER_STACK"). Not a failure: wait for the wake (logcat
-  // says "Waking up from …"), then retry quickly until the panel is on; every 2 s otherwise.
-  let asleep = false; let wakeUntil = 0; let retry: NodeJS.Timeout | undefined;
-  const fps = Math.max(1, Math.min(opts.fps ?? 15, 60));
-  const maxSize = Math.max(160, Math.min(opts.maxSize ?? 720, 4096));
-  const emit = (j: Buffer, s?: ScreenInfo) => {
-    const now = Date.now();
-    if (now - lastEmit < 1000 / fps - 5) return;
-    lastEmit = now; gotFrame = true;
-    for (const cb of frameCbs) { try { cb(j, s); } catch { /* ignore */ } }
-  };
-  const end = (e?: Error) => { if (stopped) return; stopped = true; kill(); for (const cb of endCbs) cb(e); };
-  const killPipeline = () => { if (retry) clearTimeout(retry); retry = undefined; flusher?.stop(); flusher = undefined; try { rec?.kill('SIGKILL'); } catch { /* */ } try { ff?.kill('SIGKILL'); } catch { /* */ } rec = ff = undefined; };
-  const kill = () => { killPipeline(); try { watcher?.kill('SIGKILL'); } catch { /* */ } watcher = undefined; };
-
-  const ffmpeg = ffmpegPath();
-  const scaled = (si: ScreenInfo) => {
-    const s = Math.max(si.width, si.height) / maxSize;
-    const k = s > 1 ? s : 1;
-    const even = (n: number) => Math.max(2, Math.round(n / k / 2) * 2);
-    return { w: even(si.width), h: even(si.height) };
-  };
-
-  /** Start screenrecord again at the screen's new size. The last frame stays on screen meanwhile (~0.3 s). */
-  const restartPipeline = () => {
-    if (stopped || pollMode || !ffmpeg) return;
-    gen++; killPipeline(); failures = 0;
-    void startPipeline();
-  };
-
-  // screenrecord logs when the display turns (and then letterboxes): restart at the new size. PowerManagerService
-  // logs the wake: restart at once instead of waiting for the next retry.
-  const watchRotation = () => {
-    if (stopped || watcher) return;
-    const w = spawn(adbPath(), ['-s', serial, 'logcat', '-T', '1', '-v', 'brief', '-s', 'ScreenRecord:D', 'PowerManagerService:I'], { env: toolEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
-    watcher = w;
-    let buf = '';
-    w.stdout!.on('data', (d: Buffer) => {
-      buf += d.toString();
-      const lines = buf.split('\n'); buf = lines.pop() ?? '';
-      for (const l of lines) {
-        if (/Waking up from/i.test(l)) { wakeUntil = Date.now() + 3000; if (asleep) restartPipeline(); continue; }
-        const c = parseDisplayChange(l);
-        if (!c || !pipe || !rec) continue;
-        const sizeChanged = c.width !== undefined && (c.width !== pipe.info.width || c.height !== pipe.info.height);
-        if (c.rotation !== pipe.rotation || sizeChanged) restartPipeline();
-      }
-    });
-    w.on('error', () => { /* no logcat: rotations are then picked up by restart() and screenrecord's own exits */ });
-    w.on('exit', () => { if (watcher === w) watcher = undefined; });
-  };
-
-  const startPipeline = async () => {
-    if (stopped) return;
-    if (!ffmpeg) { void pollLoop(); return; }
-    const my = gen;
-    let st: ScreenState;
-    try { st = await readScreen(serial); } catch (e) { end(e as Error); return; }
-    if (stopped || my !== gen || pollMode) return;
-    pipe = st;
-    const si = st.info;
-    const { w, h } = scaled(si);
-    const env = toolEnv();
-    rec = spawn(adbPath(), ['-s', serial, 'exec-out', 'screenrecord', '--output-format=h264', '--size', `${w}x${h}`, '--bit-rate', '6000000', '-'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
-    ff = spawn(ffmpeg, ['-loglevel', 'error', '-probesize', '32', '-analyzeduration', '0', '-flags', 'low_delay',
-      '-f', 'h264', '-i', '-', '-fps_mode', 'passthrough', '-threads', '1', '-f', 'image2pipe', '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-q:v', '7', '-'], { env, stdio: ['pipe', 'pipe', 'ignore'] });
-    const myRec = rec; const myFf = ff;
-    watchRotation();
-    // A split write got an AUD in the middle of a NAL unit: the picture is corrupt until the next IDR (screenrecord
-    // sends one every ~10 s), so restart the encoder, which begins with a fresh IDR.
-    const myFlusher = new H264Flusher((b) => { if (!myFf.stdin!.destroyed) myFf.stdin!.write(b); }, 12, () => { if (rec === myRec) { try { myRec.kill('SIGKILL'); } catch { /* */ } } });
-    flusher = myFlusher;
-    // exec-out has no separate stderr: an error message arrives as the first (and only) output
-    let head = '';
-    myRec.stdout!.on('data', (d: Buffer) => { if (head.length < 512) head += d.subarray(0, 512).toString('latin1'); myFlusher.push(d); });
-    myFf.stdin!.on('error', () => { /* ignore EPIPE */ });
-    let buf: Buffer = Buffer.alloc(0);
-    myFf.stdout!.on('data', (d: Buffer) => {
-      if (my !== gen) return;   // a restarted pipeline's leftovers were drawn for the old screen
-      buf = buf.length ? Buffer.concat([buf, d]) : d;
-      for (;;) {
-        const s = buf.indexOf(Buffer.from([0xff, 0xd8]));
-        if (s < 0) { buf = Buffer.alloc(0); break; }
-        const e = buf.indexOf(Buffer.from([0xff, 0xd9]), s + 2);
-        if (e < 0) { if (s > 0) buf = buf.subarray(s); break; }
-        frameCount++; asleep = false;
-        emit(Buffer.from(buf.subarray(s, e + 2)), si);
-        buf = buf.subarray(e + 2);
-      }
-    });
-    const framesAtStart = frameCount;
-    myRec.on('exit', () => {
-      myFlusher.stop();
-      try { myFf.stdin!.end(); } catch { /* */ }
-      setTimeout(() => { try { myFf.kill('SIGKILL'); } catch { /* */ } }, 1500);
-      if (stopped || pollMode || rec !== myRec) return;
-      const again = (ms: number) => { retry = setTimeout(() => { retry = undefined; if (!stopped && !pollMode && rec === myRec) void startPipeline(); }, ms); };
-      if (frameCount === framesAtStart && /INVALID_LAYER_STACK|display state/i.test(head)) {
-        asleep = true; failures = 0;
-        again(Date.now() < wakeUntil ? 250 : 2000);
-        return;
-      }
-      // screenrecord stops after 3 minutes (on older Android also on rotation) – restart it. If it died without
-      // producing a frame (encoder busy / unsupported size), retry a few times, then fall back to screencap polling.
-      if (frameCount === framesAtStart) failures++; else failures = 0;
-      if (failures >= 4) { void pollLoop(); return; }
-      again(failures ? 1000 * failures : 300);
-    });
-  };
-
-  const capture = opts.capture ?? (() => screenshot(serial));
-  const pollLoop = async () => {
-    pollMode = true; kill();
-    let lastPng: Buffer | undefined;
-    while (!stopped) {
-      const t0 = Date.now();
-      try {
-        const png = await capture();
-        if (stopped) break;
-        // Same pixels → same PNG bytes: skip the conversion and keep the current frame (and its ETag).
-        if (!lastPng || !lastPng.equals(png)) {
-          const j = await pngToJpeg(png, maxSize, 70);
-          if (stopped) break;
-          lastPng = png;
-          const sz = pngSize(png);
-          lastEmit = 0; emit(j, sz ? { width: sz.width, height: sz.height, scale: 1, orientation: orientationOf(sz.width, sz.height) } : undefined);
-        }
-      } catch (e) {
-        if (!stopped) { await sleep(1000); }
-      }
-      await sleep(Math.max(0, 1000 / fps - (Date.now() - t0)));
-    }
-  };
-
-  void startPipeline();
-  // If screenrecord yields nothing (secure surfaces, unsupported encoder), fall back to polling. A still screen
-  // no longer looks like this: the flusher makes its first frame arrive within a few hundred milliseconds.
-  const noFrameTimer = setTimeout(() => { if (!stopped && !gotFrame && !pollMode && !asleep && failures === 0) void pollLoop(); }, 10_000);
-  noFrameTimer.unref?.();
-
-  return {
-    onFrame(cb) { frameCbs.push(cb); },
-    onEnd(cb) { endCbs.push(cb); },
-    stop() { if (stopped) return; stopped = true; kill(); for (const cb of endCbs) cb(); },
-    restart() {
-      if (stopped || pollMode) return;
-      // Only when the screen really changed: the logcat watcher has usually restarted already.
-      void readScreen(serial).then((st) => {
-        if (!pipe || st.rotation !== pipe.rotation || st.info.width !== pipe.info.width || st.info.height !== pipe.info.height) restartPipeline();
-      }, () => undefined);
-    },
-  };
 }
 
 /** PNG → JPEG (optionally downscaled so the longest side ≤ maxSize). Uses ffmpeg, falls back to sips. */

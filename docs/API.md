@@ -26,7 +26,7 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | GET | /v1/health | – | `{ ok, version, pid, uptimeSec }` |
-| GET | /v1/backends | – | `[{ id, displayName, stage, platform, kind, capabilities, availability: {ok, reason, hints, version} }]`; `stage` is `stable`, `beta` or `experimental` (show a badge unless `stable`; older services omit it, which means `stable`) ; `?debug=1` → `{ backends, failures, streams }` (modules that failed to load; live streams with `viewers`, `hasFrame`, `ageMs`, `firstFrameMs`, `fallbackCaptures`) |
+| GET | /v1/backends | – | `[{ id, displayName, stage, platform, kind, capabilities, availability: {ok, reason, hints, version} }]`; `stage` is `stable`, `beta` or `experimental` (show a badge unless `stable`; older services omit it, which means `stable`) ; `?debug=1` → `{ backends, failures, streams, screenSources }` (modules that failed to load; live streams with `kind`, `viewers`, `hasFrame`, `ageMs`, `firstFrameMs`, `fallbackCaptures`; see *Live video*) |
 | GET | /v1/backends/:backend/images | – | `OsImage[]` = `[{ id, backend, platform, name, version?, installed, usable?, profiles?, sizeMB?, notes? }]`. `usable: false` = installed but can't create devices on this Mac, with `notes` saying why. iOS simulator: the runtime's disk image isn't `Ready` (`simctl runtime list`), creating a simulator on that runtime build failed with "runtime is not available" (remembered until a create on it succeeds), or a throwaway probe create fails. Creating a device without `image` skips such runtimes. `profiles` lists the HardwareProfile ids it can run (absent = all) |
 | POST | /v1/backends/:backend/images/install | `{ image }` | `Job` (long-running; poll `/v1/jobs/:id`) |
 | GET | /v1/backends/:backend/profiles | – | `HardwareProfile[]` |
@@ -70,6 +70,7 @@ their screen size across shutdowns, so a stopped one still has `screen` (in port
 | GET | /v1/devices/:id/screenshot | `?format=png|jpeg&maxSize=1024&quality=70` | image bytes. Headers: `X-Device-Width`, `X-Device-Height` (full-res px), `X-Image-Width`, `X-Image-Height`, `X-Scale` (= device px / image px) |
 | GET | /v1/devices/:id/stream | `?maxSize=720&fps=15&token=` | `multipart/x-mixed-replace; boundary=frame` MJPEG |
 | GET | /v1/devices/:id/frame | `?maxSize=720`, optional `If-None-Match` | latest JPEG frame from the live stream (starts the stream if needed; falls back to screenshot). Responses include `ETag`; a matching validator returns 304 with no body. `X-Frame-Source` is `stream` or `screenshot`. Stream frames carry `X-Device-Width`/`X-Device-Height`: the screen size the frame shows, which changes the moment the device turns (use it, not an earlier `Device.screen`, to map clicks on that frame). Until the stream's first frame (a new stream gets 250 ms), the screenshot fallback is shared by concurrent requests and refreshed at most once a second, so polls in between get the same `ETag` (and 304). |
+| GET | /v1/devices/:id/video | `?maxSize=1280` (160–4096) | `application/vnd.phonedock.video`: the screen as H.264 or HEVC straight from the device's encoder, framed (see *Live video*). Devices that have it list `video` in their capabilities (Android emulators and phones: H.264; iPhones on iOS 27+: HEVC); `501 not_supported` elsewhere |
 | GET | /v1/devices/:id/ui | `?format=json|text&ocrFallback=1&partialOcr=1` | json: `UiTree` + `prompt: SystemPrompt \| null` (see *System prompts*); text: compact outline, one element per line: `e12 Button "Sign in" @(540,1210) [w×h]`, plus a `# prompt: …` line after the header when a prompt is on screen. See *Partial trees* below |
 | POST | /v1/devices/:id/find | `{ text?, id?, type?, match?: 'contains'\|'exact'\|'regex', index?, limit?: 20, ocrFallback?: true }` (≥1 of text/id/type) | `{ source, total, index, match: ElementMatch \| null, matches: ElementMatch[], screen, capturedAt, ocrTried, ocrError?, summary?, scrollable? }` (`ocrError`: why the OCR fallback could not run). With no match: `summary`, and `scrollable` = can anything on this screen scroll (`true`/`false`; `null` = unknown: iOS, OCR, webviews), so a client only suggests scrolling when it can help |
 | GET | /v1/devices/:id/focus | `?waitMs=0` (≤10000; polls until a field is focused or a keyboard is up) | `{ known, ok, focused: ElementMatch \| null, keyboard, elapsedMs, reason? }`. `known: false` (with `reason`) when the device can't tell: the iOS simulator's tree has no focus flag, so with a hardware keyboard (no on-screen keyboard) focus is unknown, not absent |
@@ -77,6 +78,54 @@ their screen size across shutdowns, so a stopped one still has `screen` (in port
 | POST | /v1/devices/:id/appearance | `{ appearance: 'dark'\|'light' }` (`mode` also accepted) | `{ ok, appearance, previous, changed }`. System-wide Dark Mode: iOS simulator `simctl ui appearance`, Android `cmd uimode night yes\|no`. Needs the lease like other input; `501` on backends without it (capability `appearance`) |
 | POST | /v1/devices/:id/wait | `{ until: 'visible'\|'gone', text?, id?, type?, match?, timeoutMs?: 10000, intervalMs?: 300, stableMs?: 0 }` | `{ ok, until, elapsedMs, polls, source, match?, matches? }` – `408 wait_timeout` otherwise |
 | POST | /v1/devices/:id/wait | `{ until: 'idle', timeoutMs?, intervalMs?: 200, stableMs?: 1000 }` | `{ ok, until, elapsedMs, frames, changes, stableMs, changedRegion }` – screen unchanged for `stableMs` |
+
+### Live video
+
+`GET /v1/devices/:id/video` streams the screen as video at the device's own frame rate (up to 60 fps), for a viewer
+that decodes H.264 or HEVC (the Mac app decodes both in hardware). It is one long response: a sequence of messages, each a
+16-byte header and a payload.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | u8 | type: 1 `screen`, 2 `config`, 3 `frame`, 4 `state`, 5 `reset`, 6 `ping`, 7 `still` |
+| 1 | u8 | flags: `frame` 1 = key frame, 2 = replay (decode, don't show); `config` the codec (0 H.264, 1 HEVC) |
+| 2 | u8 | version (1) |
+| 3 | u8 | reserved (0) |
+| 4 | u32 BE | payload length |
+| 8 | u64 BE | timestamp, µs since the Unix epoch: `frame` when the Mac got it, `still` when it was taken, `ping` and the error `state` when sent, else 0 |
+
+| Type | Payload |
+|---|---|
+| `screen` | JSON `{ width, height, videoWidth, videoHeight, rotation, orientation, density, codedWidth?, codedHeight? }`: the screen in screenshot pixels (map clicks with it) and the video's size. Sent first and whenever the screen turns or the video changes size. `codedWidth`/`codedHeight` (iPhones): the decoded picture is larger than the video (padded, e.g. 1328x2896 for 1320x2868) and its SPS doesn't say so; show only its top-left `videoWidth` x `videoHeight` |
+| `config` | the codec's parameter sets (H.264 SPS + PPS, HEVC VPS + SPS + PPS), Annex B. Before the first frame and whenever they change (a new encoder, an iPhone turning) |
+| `frame` | one access unit (one picture), Annex B, without parameter sets |
+| `state` | JSON `{ state: 'live' \| 'asleep' }`: `asleep` while the display is off (no frames come; show the screen black). Last, before the server ends the stream for good: `{ state: 'error', code, message }` (the device can't stream; fall back to `/frame`) |
+| `reset` | empty: throw away the decoder's state; a `config` and a key frame follow |
+| `ping` | empty, after a second without anything else: the connection is alive on a still screen |
+| `still` | a PNG of the screen, when a new viewer has no frame 250 ms after it connected (the device's encoder is still starting); show it until the first frame |
+
+* **Joining.** A viewer gets `screen`, `state`, `config`, then the last key frame and every frame since, all but the
+  last marked replay, so it shows the current picture at once, also on a still screen (the encoder sends nothing
+  while the screen doesn't change). The daemon keeps that run short: after 1.5 s of stillness with a long run since
+  the key frame, it starts a fresh encoder whose first picture is a key frame (the switch is seamless: the new one
+  takes over at its first picture).
+* **One capture per device**, shared by every `/video` viewer of that size and by `/frame` and `/stream` (which
+  transcode it to JPEG; the transcoder only runs while they have viewers). It stops 5 s after its last viewer leaves,
+  so a viewer that comes back within that time starts with no delay.
+* **Slow viewers** never make the daemon buffer without bound: a viewer more than a couple of MB behind skips
+  frames until it has caught up, then gets `reset` and starts again from the last key frame. Frames are never
+  throttled otherwise.
+* **Android:** `adb exec-out screenrecord --output-format=h264`, its longer side the largest `maxSize` its viewers
+  asked for (8 Mbit/s above 1000 px, 6 below), `--time-limit 0` on Android 14 and later (older ones get a new
+  encoder before the 3-minute limit, seamlessly). A rotation restarts it at the new size (`screen`, then a new
+  `config` and a key frame; viewers keep the last picture meanwhile, about half a second). screenrecord stops while
+  the display is off: `state: asleep`, and it starts again by itself when the display comes back.
+* `GET /v1/backends?debug=1`: `streams` entries have `kind: 'jpeg' | 'video'` (video ones also `frames`,
+  `cachedFrames`, `cachedBytes`, `dropped`, `resyncs`); `screenSources` lists the Android captures (`encoders`
+  started, `handovers`, `restarts`, `repairs` of split pictures, `frames`, cache size).
+* The Mac app uses `/video` for devices with the `video` capability and falls back to polling `/frame` when it gets
+  404/501, the stream ends with an error, or three connections in a row bring no frame (`PHONEDOCK_VIDEO=0` in the
+  app's environment: JPEG frames only).
 
 **Matching** (`/find`, `/wait`, `/fill`, MCP `tap text=`): case-insensitive over text, label, value, placeholder and id
 (`match` = contains, exact or regex); `type` matches the role ("Button", "TextField", …). One `/ui` read, so refs in
@@ -87,7 +136,9 @@ id?, value?, placeholder?, bounds, center, clickable?, enabled?, focused?, check
 under the software keyboard. `coveredBy` (added; iOS): a bar floating over the content at the bottom (the search field
 of iOS 26 Settings with its glass, a tab bar) covers the element's centre, e.g. `the floating "Search" field`; `center`
 is then the middle of its part above the bar, and `visible` is false when less than 12 px of it shows. When the tree is missing or empty, or a text query matches nothing, the daemon OCRs a
-screenshot (`source: 'ocr'`, no refs, `type` ignored).
+screenshot (`source: 'ocr'`, no refs, `type` ignored). OCR reads whole lines: when the text matches only part of a
+line (`"Terms"` in `"I agree to the Terms and Privacy Policy"`), `center` is the middle of the matched words and
+`bounds` stays the line's. A match on the whole line taps the line's centre.
 
 **Placeholders.** `UiElement.placeholder` is a text field's hint (Android `hint`, shown while the field is empty).
 When it is set, `text`/`value` hold only what was typed, so an empty field has no `text`; the text outline shows
@@ -128,8 +179,8 @@ a blinking caret or a status-bar clock tick doesn't count; a spinner, video or a
 ## Input & control
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | /v1/devices/:id/input | `InputAction` or `{ actions: InputAction[] }`, plus optional `expect` (see *expect*) | `{ ok, resolved?, delivery, retrySafe, expect? }` (`tap` with `ref` resolves to the tap point of the element from the last `/ui`/`/find`, above a floating bar that covers its centre: then `resolved.coveredBy`, and `resolved.hidden: true` when nothing of it shows above the bar. Android: when the on-screen keyboard is up and its window covers the point of an element tap (`ref`, or `x`,`y` with `label`), it is hidden first and `resolved.keyboardHidden: true` (in landscape Gboard covers the whole app). A bare `x`,`y` is tapped as is, keyboard or not. `tap` with `x`,`y` takes an optional `label`, the name of what was aimed at, plus optional `selector: { text?, id?, type?, match?, index? }` (the find query that chose the point) and `element: { type?, id?, editable? }`; all three only appear in the activity log, and `flow save` turns `selector` into `tap: <text>`) |
-| POST | /v1/devices/:id/fill | `{ value, text? \| id? \| type? \| ref? \| x?,y?, match?, index?, clear?: true, submit?: false, secret?: false, focusTimeoutMs?: 2000, expect? }` | `{ ok, via, element, label?, tapped, focused, keyboard, cleared, clearMethod, previousValue, finalValue, finalLength, verified, secret, submitted, warnings[], elapsedMs, delivery, retrySafe, expect? }` |
+| POST | /v1/devices/:id/input | `InputAction` or `{ actions: InputAction[] }`, plus optional `expect` (see *expect*) | `{ ok, resolved?, delivery, retrySafe, expect? }` (`tap` with `ref` resolves to the tap point of the element from the last `/ui`/`/find`, found again on a fresh read of the screen first (see *Tap by ref*; `resolved.moved`, `resolved.refCheck`, or `409 stale_ref` with nothing tapped), above a floating bar that covers its centre: then `resolved.coveredBy`, and `resolved.hidden: true` when nothing of it shows above the bar. Android: when the on-screen keyboard is up and its window covers the point of an element tap (`ref`, or `x`,`y` with `label`), it is hidden first and `resolved.keyboardHidden: true` (in landscape Gboard covers the whole app). A bare `x`,`y` is tapped as is, keyboard or not. `tap` with `x`,`y` takes an optional `label`, the name of what was aimed at, plus optional `selector: { text?, id?, type?, match?, index? }` (the find query that chose the point) and `element: { type?, id?, editable? }`; all three only appear in the activity log, and `flow save` turns `selector` into `tap: <text>`) |
+| POST | /v1/devices/:id/fill | `{ value, text? \| id? \| type? \| ref? \| x?,y?, match?, index?, clear?: true, submit?: false, secret?: false, focusTimeoutMs?: 2000, expect? }` | `{ ok, via, element, label?, tapped, moved?, refCheck?, focused, keyboard, cleared, clearMethod, previousValue, finalValue, finalLength, verified, secret, submitted, warnings[], elapsedMs, delivery, retrySafe, expect? }` (`moved`, `refCheck`: added, `ref` fills, as for `tap {ref}`) |
 | POST | /v1/devices/:id/keyboard/hide | – | `{ ok }` |
 | GET | /v1/devices/:id/actions | `?limit=200` | recorded action log `[{ at, owner, action }]` |
 | POST | /v1/devices/:id/replay | `{ actions: {action, delayMs?}[] }` | `202 { job }`; `job.result` = `{ ok, steps, skipped, warnings }` |
@@ -163,6 +214,39 @@ lease = anyone may act. `force: true` from `app:human` = the app's **Take Over**
 * `{ action: 'pinch', x, y, scale, durationMs?: 400 }`: `scale` < 1 pinches in, > 1 spreads.
 * `{ action: 'type', text, secret: true }`: logged as `{ action:'type', text:'•••', length, secret:true }`. `/replay`
   skips secret steps (a `'•••'` text counts as secret), and lists them in `skipped` and `warnings`.
+
+**Tap by ref (changed).** A ref names an element of the last tree read on the device (`/ui`, `/find`, `/wait`,
+`/scroll-to`), and the screen may have changed since: a keyboard closed and the layout moved, a list scrolled, a row
+was inserted. The old coordinates would then hit something else. So `tap {ref}` and `/fill {ref}` read the screen
+again (the same cleaned tree as `/ui`; OCR when the ref came from OCR text) and find the element there first
+(`src/daemon/refcheck.ts`):
+* **Same element** = same type, text, label and id; for a text field the placeholder instead of the text (typing
+  changes the text); a switch's `checked` state; an unlabelled element (type only) also about the same size. OCR
+  lines: the same text. When several elements look alike in either read (a Like heart under every comment), only
+  those whose nearest surrounding words still match stay candidates: the words of the ancestor that tells the
+  element apart (its row), or, in a flat tree (an iPhone without WDA), the words on its line.
+* **Where it is.** A candidate whose tap point is within 2% of the screen's shorter side (at least 8 px) of the old
+  one is tapped where it is now. Otherwise, if exactly one candidate is left, it is tapped at its new place and the
+  result says so: `resolved.moved: { from: {x,y}, to: {x,y} }` (added; the point the old read gave, the point
+  tapped; also in the activity log). Otherwise nothing is tapped: `409 stale_ref`, "The screen changed since it was
+  read, so PhoneDock didn't tap: read the screen again", with `detail` naming the element, where it was, how many
+  look-alikes there are now and where, and what a tap at the old point would hit now. Also refused: the element moved
+  off the screen; its switch flipped; the text around a look-alike changed (a refusal is far cheaper than a tap on
+  someone else's comment).
+* **Android keyboard.** When the keyboard covers the element it is hidden first (`resolved.keyboardHidden`), and
+  the screen is read and the element found again after that, since hiding it can move the layout too.
+* **Cost.** `resolved.refCheck: { via, ms }` (added) says how it was checked: `recent` (the tree the ref came from is
+  under 300 ms old with no input since: no read), `joined` (a read already in flight, e.g. another `/ui`, started
+  after the last input), `read` (a new read), `ocr` (a new OCR read), `unchecked` (see below). A read costs what a
+  `/ui` costs: on Android with the helper ≈40–120 ms on a still screen (while the screen is still moving it first
+  waits for 500 ms without changes, at most 5 s, which is what you want here; ≈2 s with `uiautomator dump`); iOS
+  simulator ≈0.1–0.5 s; an iPhone on iOS 27 without WDA 1.1–1.8 s; OCR a screenshot plus recognition.
+* **No new read.** When the screen can't be read again (the read fails, or OCR is unavailable), a ref from a tree
+  under 1.5 s old is tapped as before, unchecked (`refCheck.via: 'unchecked'`); an older one is refused with
+  `stale_ref`. A backend without a tree serves its refs from OCR, so the check reads OCR again.
+* Refs still resolve against the last tree read on the device, by any client or by the daemon itself (`expect`,
+  `/fill`, `/wait`), and still go stale with every input; `stale_ref` also means "no tree read yet" and "unknown
+  ref", as before. The check's own read never replaces that tree.
 
 **Delivery (added).** Every input route (`/input`, `/fill`, `/scroll-to`, `/swipe`, `/back`, `/gesture`,
 `/apps/:appId/launch`) says how far the input got, in its result and in its error JSON:
@@ -208,13 +292,14 @@ call: a tap went from ~50 to ~20 ms on the emulator and from ~120 to ~45 ms on a
 their moves without waiting for each frame, so a `/scroll-to` of 5 scrolls takes ~7–8.5 s instead of ~10–12 s. Each command is written once and
 answered `sent` / `notsent` / `unknown`; `unknown` is the `delivery_unknown` error, never retried. Without a session,
 or when the helper reports nothing was injected, the input goes through `adb shell input` as before. Non-ASCII text
-still uses the clipboard and paste. `PHONEDOCK_ANDROID_HELPER=0` turns the helper off;
+still uses the clipboard and paste, without the system's "Copied" preview (Android 13+). `PHONEDOCK_ANDROID_HELPER=0` turns the helper off;
 `PHONEDOCK_ANDROID_HELPER_INPUT=0` keeps it for UI reads only. `Backend.drag?(nativeId, x1, y1, x2, y2, durationMs,
 holdMs)` (added, optional) is the hold-before-lift drag `/scroll-to` uses.
 
 **`/fill`**
 1. Finds the field: text/id/type with editable fields preferred. If the match is a label, it uses the nearest
-   editable element. A `ref` or a point also works. When `text` matches nothing but is exactly a field's id (its
+   editable element. A `ref` (found again on a fresh read first, like `tap {ref}`: `moved`, `refCheck`, or
+   `409 stale_ref` with nothing tapped) or a point also works. When `text` matches nothing but is exactly a field's id (its
    short form, `nameField`, as `/ui` prints it), that field is used (`via: 'id'`). With no match, the `404
    not_found` hints list the text fields on screen with their refs and ids.
 2. Taps it. On iOS it taps near the right end so the caret lands after the existing text.
@@ -329,6 +414,8 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 | POST | /v1/devices/:id/push | `{ appId, payload }` | `{ ok }` |
 | POST | /v1/devices/:id/rotate | `{ orientation: 'portrait'\|'landscape' }` | `{ ok, orientation, screen?, note? }` once the screen has turned (see *Rotation*). `orientation` is what the screen shows afterwards; `note` is set when it stayed put |
 | GET | /v1/devices/:id/foreground | – | `{ app: AppInfo \| null }` |
+| GET | /v1/devices/:id/clipboard | – | `{ text: string \| null }` (added): the clipboard's plain text, `null` when it is empty or holds no text. Needs no lease (see *Clipboard*) |
+| PUT | /v1/devices/:id/clipboard | `{ text }` (a string, `""` empties it; at most 100,000 characters) | `{ ok, length }` (added; `POST` also accepted): replaces the clipboard. Needs the lease like other input |
 | GET | /v1/devices/:id/crashes | `?since=<ISO>&appId=&limit=20` | `CrashReport[]` (newest first) |
 | GET | /v1/devices/:id/crashes/:cid | `?full=1&maxChars=16000` | `{ id, text, truncated, length }`. By default: header + crashed thread (Apple `.ips` JSON is summarised) |
 | POST | /v1/devices/:id/recording/start | `{ maxSeconds?: 300 }` (1–3600) | `{ ok, active, path, startedAt, maxSeconds }` → `<state>/recordings/<name>-<time>.mp4`; `409 recording_active` |
@@ -338,7 +425,7 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 | POST | /v1/devices/:id/apps/:appId/data/export | `{ name }` | `{ ok, appId, name, path, sizeBytes, files }`: snapshot of the app's data container → `<state>/appdata/<device>/<appId>/<name>` (overwrites) |
 | POST | /v1/devices/:id/apps/:appId/data/import | `{ name }` | `{ ok, appId, name, path }`: restores a snapshot (`404` if unknown) |
 
-`foreground`, `crashes`, `recording/*`, `apps/:appId/data/*`, `keyboard/hide`, `rotate`, `files/*` and `push` return
+`foreground`, `clipboard`, `crashes`, `recording/*`, `apps/:appId/data/*`, `keyboard/hide`, `rotate`, `files/*` and `push` return
 `501 not_supported` on backends that lack them (see `capabilities` in `/v1/backends`). Names are `[A-Za-z0-9._-]`.
 
 **Rotation.** Devices that can turn list `rotate` in their capabilities; the app hides Rotate for the rest. `rotate`
@@ -366,9 +453,26 @@ turns the screen and returns once it has turned (or after ~1.5–2 s if the app 
 * Activity log: `rotate` `{ orientation, stayed? }` (`stayed` = the orientation the screen kept).
 * Backends report the screen with each stream frame (`FrameStream.onFrame(cb(jpeg, screen?))`) and may offer
   `FrameStream.restart()`, which the daemon calls after a rotation; streams without it are stopped and reopened.
+  The same goes for live video: `Backend.video?(nativeId, { maxSize })` returns a `VideoStream` whose `onPacket`
+  delivers `VideoPacket`s (`screen`, `config`, `frame`, `state`, `reset`; `src/core/types.ts`), with optional
+  `restart()` and `requestKeyFrame()`.
+
+**Clipboard.** Devices that can read and set it list `clipboard` in their capabilities: iOS simulators
+(`simctl pbpaste` / `pbcopy`), Android emulators and phones (the helper, below), and iPhones on iOS 27 or later (the
+CoreDevice pasteboard service, through the native sidecar). iPhones before iOS 27 return `501 not_supported`.
+* Plain text only. A clipboard holding only an image reads as `null`; on an iPhone a copied link (Safari's "Copy Link")
+  reads as its URL. Text goes in and out exactly: emoji, newlines and trailing whitespace are kept.
+* Pasting is up to the app: long-press the field and tap Paste. On Android 13+ a set from PhoneDock doesn't show the
+  system's "Copied" preview. On iOS, Paste from the edit menu just works; an app that reads the clipboard on its own
+  may make iOS ask "Allow Paste".
+* The text can be a secret (a one-time code). The daemon never logs it: the Activity log records
+  `clipboard.set` `{ length }` only, and errors never quote it.
+* Errors: `400 bad_request` (`text` missing, not a string, or too long), `502 clipboard_failed` (the device didn't
+  answer; hints say what to try), `409 device_locked` (an iPhone that is locked: iOS returns no clipboard items
+  then, so a read that finds no text on a locked phone says so instead of returning `null`).
 
 **Android notes.** PhoneDock pushes a small helper (`/data/local/tmp/phonedock-helper-<hash>.dex`, run with
-`app_process`, never installed as an app; source in `src/backends/android-helper.ts`) and uses it for two things:
+`app_process`, never installed as an app; source in `src/backends/android-helper.ts`) and uses it for:
 
 - `/ui` (and `find`, `wait`, `tap --text`, `scroll-to`): one persistent UiAutomation connection per device produces
   the same XML as `uiautomator dump`, but waits only until the screen has been quiet for 500 ms instead of a fixed
@@ -380,9 +484,11 @@ turns the screen and returns once it has turned (or after ~1.5–2 s if the app 
   `versionCode`, and also taken from the APK at install. A list waits at most 250 ms for labels it does not have
   yet; the rest appear in the next list. If labels cannot be read, `name` is left out; the list never fails because
   of it.
+- `/clipboard`: reads and sets the primary clip as the shell user (≈1 s each, the helper's start-up), which Android
+  allows in the background. A set falls back to `cmd clipboard` where the phone has it.
 
-`PHONEDOCK_ANDROID_HELPER=0` (daemon environment) turns the helper off: `/ui` uses `uiautomator dump`, and apps
-have no `name` unless it came from an install.
+`PHONEDOCK_ANDROID_HELPER=0` (daemon environment) turns the helper off: `/ui` uses `uiautomator dump`, apps
+have no `name` unless it came from an install, and reading the clipboard returns `501 not_supported`.
 
 ## Human handoff
 An agent hits something it must not or cannot do itself: Face ID, a passcode, a CAPTCHA, an Apple Account
@@ -434,6 +540,23 @@ note?, resolvedAt?, resolvedBy?, leaseHolder?, returnLease?, leaseReturned? }`.
 **ios-device Wi-Fi devices:** `connection: 'wifi'` for devicectl devices with `transportType: 'localNetwork'` and for manual WDA
 entries. Manual entries without a known udid have `nativeId = wda-<host>-<port>` and capabilities limited to what WDA
 can do (no install/apps list); `state` is `running` when `GET /status` answers, else `offline`. `meta.wdaUrl`, `meta.wdaReady`.
+
+**ios-device live video (iOS 27+).** These devices list `video`: `GET /video` serves the phone's own HEVC stream as it
+arrives (not re-encoded; up to 60 fps while the screen moves, measured ~58 frames/s scrolling Settings over Wi-Fi), with
+`codedWidth`/`codedHeight` in `screen` for the padding. Under heavy motion the phone can draw a shrunk copy of the screen
+in the top-left corner of the picture, flat grey (R = G = B = 128) around it, for a few frames; the Mac app stretches it
+back. A viewer that joins while another app streams the phone gets `{ state: 'error', code: 'stream_busy' }` and should
+poll `/frame`. They also list the `stream` capability: `/frame` and `/stream` decode the phone's
+own screen stream (RTP/HEVC, the one input already holds; VideoToolbox → JPEG, at most `fps`, only changed frames),
+about 10–15 fps with ~20 ms added on the Mac. A viewer never takes the stream from Xcode Device Hub or iPhone Mirroring:
+while another client streams the phone (or the stream can't open) frames come from screenshots, and video is tried
+again after 10 s, doubling up to 60 s. The stream closes about 5 s after the last viewer (45 s after the last input,
+if later). `POST /recording/start` writes the same stream to the `.mp4` without re-encoding (HEVC `hvc1`, up to 60 fps);
+on older iOS, or when the stream is busy, it uses `devicectl` screen-record or screenshots as before. `GET /info` adds
+`liveVideo: { frames, feed }`. `frames` (the latest frame stream; `null` before the first viewer) = `{ mode:
+starting|video|screenshots|stopped, reason?, frames, fps, latencyMs?, collapsed, startedAt, firstFrameMs? }`; `feed`
+(`null` while nothing uses the stream) = `{ consumers, units, bytes, lastUnitAgoMs, config?: { codec, codecString,
+codedWidth, codedHeight, width, height } }`.
 
 ## Pools / orchestration
 | Method | Path | Body | Response |

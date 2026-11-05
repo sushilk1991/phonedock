@@ -64,8 +64,8 @@ struct LocalNetworkWarning: View {
     }
 }
 
-/// Settings › Advanced › Troubleshooting: opens a TCP connection from a process this app started, to tell a missing
-/// Local Network permission apart from a wrong address.
+/// Settings › Advanced › Wi-Fi phones › Check: opens a TCP connection from a process this app started, to tell a
+/// missing Local Network permission apart from a wrong address.
 // MARK: - Connect a Phone
 
 struct ConnectPhoneSheet: View {

@@ -44,17 +44,27 @@ phonedock backends                        # shows what's missing if it isn't
 
 Tested on an iPhone 16 Pro Max running iOS 27.0 over Wi-Fi, with no WebDriverAgent:
 
-- Screenshots, in 1 to 2 seconds each (the live view updates at that rate, not at video speed).
+- A smooth live view in the PhoneDock app: the phone's own screen stream (the one Xcode uses), decoded in hardware,
+  at up to 60 frames a second (measured scrolling Settings over Wi-Fi: 58 frames a second, 16 ms apart). It also
+  shows the Lock Screen. Agents and other clients that take JPEG frames (`/frame`, `/stream`) get about 13 a second
+  from the same stream, a median of 34 ms old.
+- Screenshots, in 1 to 2 seconds each.
 - The UI tree: labels, values and frames of what's on screen, so agents can tap by text. It's complete inside apps
   and only partial on the Home Screen.
 - Tap (by text or by position), swipe, scroll to a label, and the Home and Back keys.
 - Typing, including non-ASCII text such as "café", and filling a text field.
 - Listing installed apps, launching an app (it comes to the front) and closing one.
 - Opening a URL. It opens in the phone's **default** browser, which isn't always Safari.
-- Screen recording, with the right length.
+- Screen recording from the same stream: HEVC at up to 60 frames a second, not re-encoded, with the right length.
 - Listing crash reports, newest first, in your local time.
 
 Not verified: installing an app. It needs an app signed for development, and none was available to test.
+
+The clipboard (`phonedock clipboard <phone> --get` / `--set TEXT`, the MCP `clipboard` tool) goes through iOS 27's
+pasteboard service. Over Wi-Fi the first call takes about 2 seconds; after that a set takes about 0.2 s and a read
+about 0.1 s (verified on an unlocked phone: set, read back, restore). While the phone is locked iOS shares nothing,
+so PhoneDock answers that the iPhone is locked (`device_locked`) instead of reporting an empty clipboard: unlock it
+first.
 
 Not available on a real iPhone:
 
@@ -64,19 +74,21 @@ Not available on a real iPhone:
 - **Logs.**
 - **The foreground app.** Reading which app is in front needs WebDriverAgent. `phonedock ui` shows what's on screen
   instead.
-- **Clipboard.** PhoneDock has no clipboard command for iPhones yet.
 
 If something here fails on your phone, please open an issue on GitHub.
 
 ### Things to know
 
-- **One screen viewer at a time.** iOS shares the phone's screen with one app at a time, and taps need that
-  screen share. If Xcode's device window, iPhone Mirroring or another tool is showing the phone, close it first.
-  Otherwise you'll get `stream_busy`.
+- **One screen viewer at a time.** iOS shares the phone's screen with one app at a time. PhoneDock's live view,
+  recording and taps all use that one screen share. If Xcode's device window, iPhone Mirroring or another tool is
+  showing the phone, close it first. Otherwise taps get `stream_busy`. The live view never takes the screen from
+  another app: it shows screenshots instead, which can be very slow while the other app streams, and goes back to
+  video by itself within about a minute of the other app closing.
 - iOS stops sharing the screen **during a phone or FaceTime call, while the camera or microphone is in use, or
   while Siri is active**.
-- While PhoneDock is driving the phone, iOS shows its screen-sharing indicator, and apps can't use the camera or
-  microphone. PhoneDock ends the share about a minute after the last action.
+- While PhoneDock shows or drives the phone, iOS shows its screen-sharing indicator, and apps can't use the camera
+  or microphone. PhoneDock ends the share about 5 seconds after you stop watching, and 45 seconds after the last
+  tap or keystroke.
 - The UI tree covers the app in front, plus system overlays such as the keyboard and banners. Some Home Screen
   widgets are drawn by another process and may be missing from it.
 
@@ -91,6 +103,7 @@ If something here fails on your phone, please open an issue on GitHub.
 | `ios_too_old` | iOS 26 or older: use WebDriverAgent, below |
 | `ddi_missing` | The developer disk image couldn't be mounted (it needs internet). Open the phone in Xcode once |
 | `stream_busy` | Another app is showing the phone's screen, or a call, the camera, the microphone or Siri is active |
+| `device_locked` | The phone is locked, so taps, swipes and typing weren't sent (they'd land on the Lock Screen). Unlock it; an agent should ask with `request_human`. Keys such as Home still work |
 | `locked` | Unlock the phone |
 | `local_network_denied` | Allow PhoneDock in System Settings › Privacy & Security › **Local Network** |
 
@@ -139,4 +152,5 @@ Agents use the MCP tools `discover_devices` and `connect_device`. The HTTP route
 - After the iPhone restarts, or if PhoneDock stops, run `wda-setup` again to relaunch WebDriverAgent.
 - The phone and the Mac must be on the same network. Keep the phone unlocked; Auto-Lock › Never helps.
 - Back is an edge swipe.
-- The live screen is a series of screenshots, so it updates a few times a second rather than at full frame rate.
+- The live screen is a series of screenshots, so it updates about once a second rather than at full frame rate.
+  (On iOS 27 and later it's video.)

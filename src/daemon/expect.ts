@@ -12,7 +12,7 @@ import { lastActionAt, uiCache } from './core.ts';
 import { badRequest } from './http.ts';
 import { findElements, screenSummary, type MatchMode } from './media.ts';
 import { screenDigest } from './observe.ts';
-import { axTree, ocrTree, pollFind, type Dev, type FindOpts } from './find.ts';
+import { axTree, ocrTree, pollFind, recentTree, type Dev, type FindOpts } from './find.ts';
 
 export type { Expect, ExpectReport };
 export type ExpectOutcome = ExpectReport['outcome'];
@@ -90,7 +90,9 @@ export async function prepareExpect(d: Dev, raw: unknown): Promise<PendingExpect
   const at = cached ? Date.parse(cached.capturedAt) : NaN;
   if (cached && Number.isFinite(at) && at >= (lastActionAt.get(d.id) ?? 0) && Date.now() - at < 15_000) tree = cached;
   else {
-    try { tree = await axTree(d); } catch { tree = undefined; }
+    // not cached: a ref in this same request resolves against the tree the client read, not this one (whose refs
+    // number the elements anew); a ref check right after can use this read instead of its own (refcheck.ts)
+    try { tree = (await recentTree(d, lastActionAt.get(d.id) ?? 0, 0))?.tree; } catch { tree = undefined; }
     if (!tree || !tree.root.length) { try { tree = await ocrTree(d.b, d.nid); } catch { /* no reading: outcomes can't say whether it changed */ } }
   }
   if (!tree) return { e };

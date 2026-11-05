@@ -46,6 +46,7 @@ Apps:       apps <id> [--system] | install <id> <path|url> | launch|terminate|un
 System:     shell <id> -- <cmd…> | push <id> <local> <remote> | pull <id> <remote> [local]
             logs <id> [-n N] [--filter F] | location <id> <lat> <lon> | rotate <id> portrait|landscape
             notify <id> <appId> '<json payload>' | appearance <id> [dark|light]   (no mode: show the current one)
+            clipboard <id> [--get | --set TEXT]   (prints the text as is; --set with no TEXT reads it from stdin)
 Multi-agent: lease <id> [--ttl S] [--force] | release <id> [--pool]
             acquire [--platform P] [--backend B] [--ttl S]
 Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <code> | disconnect <id>
@@ -259,6 +260,12 @@ function promptLine(pr: SystemPrompt): string {
 }
 
 function wantWait(a: ParsedArgs): boolean { return !(a.flags.noWait === true || a.flags.wait === false); }
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const ch of process.stdin) chunks.push(ch as Buffer);
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 export async function run(argv: string[]): Promise<number> {
   const a = parseArgs(argv);
@@ -636,6 +643,25 @@ export async function run(argv: string[]): Promise<number> {
       if (mode !== 'dark' && mode !== 'light') usage('appearance <id> [dark|light]');
       const r = await c.setAppearance(d.id, mode as 'dark' | 'light');
       out(r, () => `${d.name}: appearance ${r.appearance}${r.changed ? ` (was ${r.previous})` : ' (unchanged)'}`);
+      return 0;
+    }
+    case 'clipboard': case 'clip': {
+      const d = await dev();
+      if (p.length > 2) usage('clipboard <id> [--get | --set TEXT]: quote the text (--set "two words"), or pipe it in with --set alone');
+      const set = a.flags.set;
+      if (set !== undefined && set !== false) {
+        if (a.flags.get === true) usage('clipboard takes --get or --set, not both');
+        if (set === true && process.stdin.isTTY) usage('--set needs TEXT, or the text piped in on stdin');
+        const text = typeof set === 'string' ? set : await readStdin();
+        const r = await c.setClipboard(d.id, text);
+        out(r, () => `${d.name}: clipboard set (${r.length} character${r.length === 1 ? '' : 's'})`);
+        return 0;
+      }
+      const text = await c.getClipboard(d.id);
+      if (JSON_OUT) { out({ text }); return 0; }
+      if (text === null) { if (!quiet) process.stderr.write(`${d.name}: the clipboard is empty or holds no text\n`); return 0; }
+      // exactly the clipboard's text, so it pipes into files and other commands unchanged
+      process.stdout.write(text + (process.stdout.isTTY && !text.endsWith('\n') ? '\n' : ''));
       return 0;
     }
     case 'shell': {

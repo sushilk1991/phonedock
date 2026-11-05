@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appFixedOrientation, clockOffsetFrom, imeFrameFrom, H264Flusher, H264_AUD, orientationOf, parseCurrentSize, parseDisplayChange, parseRotation, rotationFor, rotationPending, startsWithStartCode } from './android-common.ts';
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+import { appFixedOrientation, clockOffsetFrom, imeFrameFrom, H264_AUD, orientationOf, parseCurrentSize, parseDisplayChange, parseRotation, rotationFor, rotationPending, startsWithStartCode } from './android-common.ts';
 
 test('startsWithStartCode: 3- and 4-byte Annex B start codes only', () => {
   assert.equal(startsWithStartCode(Buffer.from([0, 0, 1, 0x65])), true);
@@ -12,34 +10,9 @@ test('startsWithStartCode: 3- and 4-byte Annex B start codes only', () => {
   assert.equal(startsWithStartCode(Buffer.from([0, 0])), false);
 });
 
-test('H264Flusher: forwards chunks and appends one AUD after the input goes quiet', async () => {
-  const out: Buffer[] = [];
-  const f = new H264Flusher((b) => out.push(b), 10);
-  f.push(Buffer.from([0, 0, 0, 1, 0x67, 1])); f.push(Buffer.from([2, 3]));   // one access unit split in two writes
-  assert.equal(out.length, 2);
-  await sleep(30);
-  assert.equal(out.length, 3);
-  assert.ok(out[2].equals(H264_AUD));
-  await sleep(30);
-  assert.equal(out.length, 3);                                               // only one AUD per quiet period
-  f.stop();
-});
-
-test('H264Flusher: reports an AUD that landed inside a NAL unit; stop() cancels a pending AUD', async () => {
-  let splits = 0;
-  const out: Buffer[] = [];
-  const f = new H264Flusher((b) => out.push(b), 5, () => { splits++; });
-  f.push(Buffer.from([0, 0, 0, 1, 0x41, 9]));
-  await sleep(20);
-  f.push(Buffer.from([0, 0, 0, 1, 0x41, 9]));   // starts with a start code: fine
-  assert.equal(splits, 0);
-  await sleep(20);
-  f.push(Buffer.from([7, 7, 7]));               // continuation of a NAL after the AUD: split
-  assert.equal(splits, 1);
-  f.stop();
-  const n = out.length;
-  await sleep(20);
-  assert.equal(out.length, n);
+test('H264_AUD: an access unit delimiter NAL unit', () => {
+  assert.ok(startsWithStartCode(H264_AUD));
+  assert.equal(H264_AUD[4] & 0x1f, 9);
 });
 
 test('clockOffsetFrom: device clock behind the host gives a positive offset', () => {

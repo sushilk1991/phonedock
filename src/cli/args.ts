@@ -13,7 +13,7 @@ export interface ParseSpec {
 }
 
 export const GLOBAL_BOOLEAN = ['json', 'help', 'wait', 'no-wait', 'window', 'cold', 'boot', 'auto-start', 'force', 'system', 'headless', 'no-ocr', 'load', 'quiet', 'debug', 'pool',
-  'secret', 'submit', 'full', 'all', 'restart-adb', 'android', 'dry-run', 'check', 'uninstall', 'launch'];
+  'secret', 'submit', 'full', 'all', 'restart-adb', 'android', 'dry-run', 'check', 'uninstall', 'launch', 'get'];
 export const GLOBAL_ALIAS: Record<string, string> = { o: 'output', n: 'lines', h: 'help', j: 'json', q: 'quiet' };
 
 const camel = (s: string) => s.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());

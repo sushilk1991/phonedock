@@ -23,6 +23,12 @@ final class DeviceScreenNSView: NSView {
         layer?.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
         os_signpost(.end, log: perfLog, name: "Layer update", signpostID: id)
     } }
+    /// Live video (FrameLoop.videoLayer), over `image`, filling the view; it draws itself.
+    var videoLayer: CALayer? { didSet {
+        guard videoLayer !== oldValue else { return }
+        oldValue?.removeFromSuperlayer()
+        if let v = videoLayer { layer?.addSublayer(v); needsLayout = true; layoutVideo() }
+    } }
 
     private var downPoint: CGPoint?
     private var downTime: Date?
@@ -40,6 +46,18 @@ final class DeviceScreenNSView: NSView {
         registerForDraggedTypes([.fileURL])
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        layoutVideo()
+    }
+
+    private func layoutVideo() {
+        guard let v = videoLayer, v.frame != bounds else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        v.frame = bounds
+        CATransaction.commit()
+    }
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
@@ -157,6 +175,7 @@ final class DeviceScreenNSView: NSView {
 
 struct DeviceScreenView: NSViewRepresentable {
     var image: NSImage?
+    var videoLayer: CALayer? = nil
     var devicePixelSize: CGSize
     var handlers: ScreenInputHandlers
 
@@ -165,6 +184,7 @@ struct DeviceScreenView: NSViewRepresentable {
         v.handlers = handlers
         v.devicePixelSize = devicePixelSize
         v.image = image
+        v.videoLayer = videoLayer
         return v
     }
 
@@ -172,5 +192,6 @@ struct DeviceScreenView: NSViewRepresentable {
         v.handlers = handlers
         if v.devicePixelSize != devicePixelSize { v.devicePixelSize = devicePixelSize }
         if v.image !== image { v.image = image }
+        if v.videoLayer !== videoLayer { v.videoLayer = videoLayer }
     }
 }

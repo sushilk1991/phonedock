@@ -1305,6 +1305,18 @@ export const backend: Backend = {
     await simctl(['ui', udid, 'appearance', mode]);
   },
 
+  // simctl pbcopy/pbpaste: plain UTF-8 text, exact (trailing newlines, emoji); the text only ever travels on stdin/stdout.
+  // An empty pasteboard and one without text both read as "".
+  async clipboardGet(udid) {
+    await requireBooted(udid);
+    const out = (await simctl(['pbpaste', udid], { timeoutMs: 20_000, failureMessage: 'Couldn’t read the simulator’s clipboard' })).stdout;
+    return out === '' ? null : out;
+  },
+  async clipboardSet(udid, text) {
+    await requireBooted(udid);
+    await simctl(['pbcopy', udid], { input: text, timeoutMs: 20_000, failureMessage: 'Couldn’t set the simulator’s clipboard' });
+  },
+
   async launchApp(udid, appId) {
     // Under heavy host load `simctl launch` can block long after the app is up (seen: SIGKILL at 60s while
     // the app was already foreground). On failure, check launchd for the app before reporting an error.

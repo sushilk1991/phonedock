@@ -51,7 +51,12 @@ import org.xmlpull.v1.XmlPullParser;
  *        notsent = nothing was injected; unknown = an injection failed after the first was attempted.
  *    Dumps and inputs run on separate threads (an input never waits behind a dump's quiet wait); replies to inputs
  *    are matched by <seq>, dump replies come in order.
- *  labels <apk>...    one-shot: prints "<apk>\t<label>" per APK (empty label when unknown). */
+ *  labels <apk>...    one-shot: prints "<apk>\t<label>" per APK (empty label when unknown).
+ *  clip get           one-shot: prints "PDCLIP <base64 utf-8>" (the primary clip's text), or "PDCLIP -" when the
+ *                     clipboard is empty or holds no text; "PDERR <message>" (exit 1) when it can't be read.
+ *  clip set           one-shot: reads one line of base64 utf-8 from stdin, makes it the primary clip, prints
+ *                     "PDCLIP ok"; "PDERR <message>" (exit 1) when it can't. No UiAutomation connection: these work
+ *                     while the ui session (or anyone else's UiAutomation client) is running. */
 public final class Helper {
   private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
   private static final int ATTR_LABEL = 0x01010001; // android.R.attr.label
@@ -73,7 +78,8 @@ public final class Helper {
     String mode = args.length > 0 ? args[0] : "";
     if (mode.equals("labels")) { labels(args); return; }
     if (mode.equals("ui")) { ui(args.length > 1 ? Integer.parseInt(args[1]) : 30); return; }
-    System.err.println("usage: ui [idleExitSec] | labels <apk>...");
+    if (mode.equals("clip")) { clip(args.length > 1 ? args[1] : ""); return; }
+    System.err.println("usage: ui [idleExitSec] | labels <apk>... | clip get|set");
     System.exit(2);
   }
 
@@ -363,6 +369,134 @@ public final class Helper {
     return b.toString();
   }
 
+  // ── clipboard ───────────────────────────────────────────────────────────────
+  private static final String SHELL_PACKAGE = "com.android.shell";
+  /** SystemUI's clipboard overlay (Android 13+) stays hidden for clips the shell sets with this extra. */
+  private static final String EXTRA_SUPPRESS_OVERLAY = "com.android.systemui.SUPPRESS_CLIPBOARD_OVERLAY";
+
+  private static Object clipboardService() throws Exception {
+    Object binder = Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "clipboard");
+    if (binder == null) throw new IllegalStateException("no clipboard service");
+    return Class.forName("android.content.IClipboard$Stub").getMethod("asInterface", android.os.IBinder.class).invoke(null, binder);
+  }
+
+  /** Arguments for an IClipboard method whose first parameter is `first` (the clip, or the package for reads): the
+   *  first String is the package (the shell's), later Strings null (attribution tag), ints 0 (user 0, the default
+   *  device), booleans `flag`. null when a parameter has another type. */
+  private static Object[] clipArgs(Class<?>[] p, Object first, boolean flag) {
+    Object[] args = new Object[p.length];
+    args[0] = first;
+    boolean pkg = first instanceof String;
+    for (int i = 1; i < p.length; i++) {
+      if (p[i] == String.class) { args[i] = pkg ? null : SHELL_PACKAGE; pkg = true; }
+      else if (p[i] == int.class) args[i] = 0;
+      else if (p[i] == boolean.class) args[i] = flag;
+      else return null;
+    }
+    return args;
+  }
+
+  private static String clipMethods(Object cb, String prefix) {
+    StringBuilder seen = new StringBuilder();
+    for (Method m : cb.getClass().getMethods()) {
+      if (!m.getName().startsWith(prefix)) continue;
+      seen.append(' ').append(m.getName()).append('(');
+      for (Class<?> c : m.getParameterTypes()) seen.append(c.getSimpleName()).append(',');
+      seen.append(')');
+    }
+    return seen.toString();
+  }
+
+  /** Sets the primary clip through the clipboard service as the shell user (as scrcpy does). Unlike `cmd clipboard`,
+   *  which some vendor builds leave out, the service is always there. setPrimaryClip's parameters changed across
+   *  releases ((clip, pkg), (clip, pkg, user), (clip, pkg, attributionTag, user), (clip, pkg, attributionTag, user,
+   *  deviceId), and vendor variants such as vivo's with a trailing boolean), so the arguments follow whichever one
+   *  this build has: the package first, null for the attribution tag, user 0, the default device, false. When none
+   *  fits, the error lists what the build has. SystemUI's "copied" overlay (Android 13+) is kept off the screen, so
+   *  it neither covers the app nor shows the text (an emoji being typed, a one-time code) in screenshots. */
+  private static void setClipboard(String text) throws Exception {
+    Object cb = clipboardService();
+    android.content.ClipData clip = android.content.ClipData.newPlainText("PhoneDock", text);
+    if (android.os.Build.VERSION.SDK_INT >= 24) {
+      try {
+        android.os.PersistableBundle extras = new android.os.PersistableBundle();
+        extras.putBoolean(EXTRA_SUPPRESS_OVERLAY, true);
+        clip.getDescription().setExtras(extras);
+      } catch (Throwable t) { /* the overlay may show */ }
+    }
+    for (Method m : cb.getClass().getMethods()) {
+      if (!m.getName().equals("setPrimaryClip")) continue;
+      Class<?>[] p = m.getParameterTypes();
+      if (p.length == 0 || p[0] != android.content.ClipData.class) continue;
+      Object[] args = clipArgs(p, clip, false);   // vivo's Android 15 adds a trailing boolean
+      if (args == null) continue;
+      m.invoke(cb, args);
+      return;
+    }
+    throw new NoSuchMethodException("IClipboard.setPrimaryClip; this build has:" + clipMethods(cb, "setPrimaryClip"));
+  }
+
+  /** The primary clip's text as the shell user (which may read the clipboard in the background, as scrcpy does), or
+   *  null when it is empty or holds no text. getPrimaryClip's parameters changed like setPrimaryClip's ((pkg),
+   *  (pkg, user), (pkg, attributionTag, user), (pkg, attributionTag, user, deviceId), vendor variants with a trailing
+   *  boolean); the same rule fills them in. A vendor boolean is tried false, then true when that reads nothing. */
+  private static String getClipboard() throws Exception {
+    Object cb = clipboardService();
+    for (Method m : cb.getClass().getMethods()) {
+      if (!m.getName().equals("getPrimaryClip")) continue;
+      Class<?>[] p = m.getParameterTypes();
+      if (p.length == 0 || p[0] != String.class) continue;
+      Object[] args = clipArgs(p, SHELL_PACKAGE, false);
+      if (args == null) continue;
+      Object clip = m.invoke(cb, args);
+      boolean flag = false;
+      for (Class<?> c : p) flag |= c == boolean.class;
+      if (clip == null && flag) clip = m.invoke(cb, clipArgs(p, SHELL_PACKAGE, true));
+      return clip instanceof android.content.ClipData ? clipText((android.content.ClipData) clip) : null;
+    }
+    throw new NoSuchMethodException("IClipboard.getPrimaryClip; this build has:" + clipMethods(cb, "getPrimaryClip"));
+  }
+
+  /** Every item's text (HTML items give their text; a URI-only item its URI), one per line, as a paste would put
+   *  them in a text field. null: no item with text. */
+  private static String clipText(android.content.ClipData clip) {
+    StringBuilder sb = null;
+    for (int i = 0; i < clip.getItemCount(); i++) {
+      android.content.ClipData.Item it = clip.getItemAt(i);
+      CharSequence t = it.getText();
+      if (t == null && it.getHtmlText() != null) t = it.getHtmlText();
+      if (t == null && it.getUri() != null) t = it.getUri().toString();
+      if (t == null) continue;
+      if (sb == null) sb = new StringBuilder(); else sb.append('\n');
+      sb.append(t);
+    }
+    return sb == null ? null : sb.toString();
+  }
+
+  /** `clip get` / `clip set` (see the class comment). */
+  private static void clip(String verb) {
+    try {
+      if (verb.equals("get")) {
+        String text = getClipboard();
+        say(text == null ? "PDCLIP -" : "PDCLIP " + android.util.Base64.encodeToString(text.getBytes(StandardCharsets.UTF_8), android.util.Base64.NO_WRAP));
+      } else if (verb.equals("set")) {
+        String line = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine();
+        if (line == null) throw new IllegalArgumentException("no text on stdin");
+        setClipboard(new String(android.util.Base64.decode(line.trim(), android.util.Base64.DEFAULT), StandardCharsets.UTF_8));
+        say("PDCLIP ok");
+      } else {
+        say("PDERR usage: clip get|set");
+        System.exit(2);
+      }
+    } catch (Throwable t) {
+      Throwable c = t instanceof InvocationTargetException && t.getCause() != null ? t.getCause() : t;
+      say("PDERR " + String.valueOf(c).replace('\n', ' '));
+      System.exit(1);
+    }
+  }
+
+  private static void say(String s) { System.out.print(s + "\n"); System.out.flush(); }
+
   // ── input ───────────────────────────────────────────────────────────────────
   /** Counts injections: `tried` = calls that returned (true or false), `ok` = calls that returned true. */
   private static final class Sent { int tried, ok; }
@@ -386,6 +520,12 @@ public final class Helper {
             now = SystemClock.uptimeMillis();
           }
           inject(s, new KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD));
+          break;
+        }
+        case "clip": {   // put text on the clipboard (the host then pastes it): how emoji and other non-key text go in
+          String text = a.length > 3 ? new String(android.util.Base64.decode(a[3], android.util.Base64.DEFAULT), StandardCharsets.UTF_8) : "";
+          setClipboard(text);   // throws when it can't: nothing was sent; no "copied" overlay
+          s.tried++; s.ok++;
           break;
         }
         case "text": {

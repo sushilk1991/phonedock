@@ -29,7 +29,7 @@ approved mockups: an indigo-filled segment would be the loudest thing in the chr
 |---|---|---|---|
 | `Surface.window` | system `windowBackgroundColor` | system | chrome, inspector, sheets |
 | `Surface.content` | system `controlBackgroundColor` | system | lists, form rows, code and log wells |
-| `Surface.stage` | `#E8E8EC` | `#161618` | behind the device frame |
+| `Surface.stage` | `#E8E8EC` | `#161618` | behind the device frame; the Settings panes |
 | `Surface.card` | `#FFFFFF` | `#2A2A2D` | cards, glass fallback |
 | `Ink.primary` | system `labelColor` | system | all primary text |
 | `Ink.secondary` | `#5C5C61` | `#AEAEB2` | all secondary text (system secondary is below 4.5:1 on white). Sidebar rows keep system `.secondary`. With Increase Contrast: `#3A3A3E` / `#D1D1D6` |
@@ -155,9 +155,13 @@ Power live in the toolbar. No fps anywhere.
 Never show that control changed or a handoff resolved until the service confirms it. Taking over is always an
 explicit click; the first click on the screen during a handoff doesn't take over.
 
-**Toolbar** Sidebar toggle · title = device name with subtitle "Pixel 9 · Android 16" · Power ▾ (Start, Shut
-Down; ⌥ Cold Boot) · Screenshot · Record · Open in Separate Window · ＋▾ (New Device…, Connect a Phone…) ·
-Inspector toggle. A connection pill appears only when something is wrong ("Reconnecting…", or "Can’t connect to
+**Toolbar** Title = device name with subtitle "Pixel 9 · Android 16" · Power ▾ (Start, Shut Down; ⌥ Cold Boot) ·
+Screenshot · Record · Open in Separate Window · Inspector toggle. The sidebar's own toolbar band holds only the
+Sidebar toggle, at its trailing end (top right of the sidebar), mirroring the Inspector toggle; with the sidebar
+hidden the system's toggle sits by the traffic lights. Adding lives in the sidebar too: **Add Device** at the foot of
+the sidebar (as Reminders has Add List; laid out like a row, `plus.circle` in the 20 pt glyph column, secondary ink)
+opens the Add menu: New Device…, Connect a Phone…, Connect an Agent…. It sits under the update card, so it never
+moves. With the sidebar hidden, the same menu is ＋▾ in the main toolbar. A connection pill appears only when something is wrong ("Reconnecting…", or "Can’t connect to
 PhoneDock" with Try Again). While recording: a static red dot and a ticking timer.
 The inspector's own toolbar band holds the inspector tabs (icon-only segmented picker, as in the mockup) and, at
 its trailing end, the Inspector toggle (top right of the window, as in Xcode). With the inspector hidden the toggle
@@ -183,9 +187,63 @@ blocking action the person started.
 **Stale screen** If frames stop for more than 3 s or the stream is reconnecting, dim the screen slightly and show a
 small "Reconnecting…" capsule over its top edge. Never show a stale screen as live.
 
+**Software update (`UpdateSidebarItem`)** A small card pinned under the sidebar's list. It is there only while
+there's something to say, so with no update the sidebar ends at its last row: there's no "Up to date" line, and that
+answer goes in a toast after App menu › Check for Updates… or in Settings › General › Updates. The card's fill is
+`.quaternary` (60%), with a `Line.card` hairline at 0.5 pt and `Radius.card`, inset 10 pt like the rows. It is quieter
+than a device row, not a banner. Its states:
+- **Available.** `arrow.down.circle.fill` in `Accent.fill` (the arrow on `onFill`). The body line is "PhoneDock 0.2.0"
+  (just "0.2.0" when the column is narrow), with "Update available" in `meta` under it, and a small prominent
+  **Update** button.
+- **In progress.** "Downloading PhoneDock 0.2.0…" with a linear bar and the percentage (`meta`, monospaced digits), and
+  a small × to stop. Then "Installing…" and "Restarting PhoneDock…", with **Restart Now** if quitting stalls.
+- **A problem.** `exclamationmark.triangle.fill` in `Status.error`, the title in plain words ("Couldn’t verify the
+  update"), one `meta` sentence, **Try Again**, and the same small × to dismiss it. The raw error is in the tooltip
+  and in Copy Details.
+
+It slides up from the bottom edge (opacity only with Reduce Motion). A check someone started from the menu shows
+"Checking for updates…" in the same card. Background checks never show anything until they find an update.
+
 **Reserved symbols** `sparkles` means an agent and nothing else. `person.fill` = you, `hand.raised.fill` = needs
 you, `exclamationmark.triangle.fill` = an error, `exclamationmark.octagon` = crashes. Use only SF Symbols that
 already exist; a misspelled name renders nothing.
+
+## Settings
+
+The Settings window (⌘,, `SettingsView.swift`) keeps the system's toolbar tabs, 560 pt wide: **General**
+(`gearshape`), **Agents** (`sparkles`: it is about agents) and **Advanced** (`gearshape.2`). The selected tab takes
+the bundle's indigo accent (when the system accent is Multicolor). Everything under the toolbar is built from the main window's parts, so the two windows
+read as one product:
+
+- **The pane is the stage.** Each tab is a column on `Surface.stage` with the window margins (`xxl` at the sides and
+  bottom, `windowTop` under the toolbar) and `xxl` between sections. Cards sit on it as on the main window's stage,
+  in light and dark. The window takes the column's height, so each tab fits its content; past the room on screen
+  the column scrolls and a fade marks the bottom edge. No fixed heights.
+- **`SettingsSection(title, note:)`** A headline title (with an optional trailing accessory) `m` above its card, and
+  an optional callout note in `Ink.secondary` under it. Title and note line up with the text inside the rows (`l` in).
+- **`SettingsCard`** `.pdCard(padding: 0)` with a hairline between rows, inset `l`, like the agent list in Connect an
+  Agent. Never a stock grouped `Form`: its grey boxes don't match the main window.
+- **`SettingsRow(title, detail:) { control }`** Body title, one callout sentence in `Ink.secondary` under it, the
+  control at the trailing edge, vertically centred; at least 40 pt tall. Toggles are switches whose label is the
+  row's title. Buttons are text only.
+- **Status headline (`SettingsStatusHeadline`)** The first row of a card that reports health: a `display`-size glyph,
+  the state in words as a headline ("Running", "Everything is ready", "Ready" with "Optional: Corellium cloud isn’t
+  set up."), and a `meta` line of detail ("Version 0.1.0 · Started by PhoneDock"). State words, not counts: a missing
+  Beta or Experimental extra doesn't make PhoneDock less ready. Glyphs: `checkmark.circle.fill` in `Status.running`
+  (ready), a small spinner (working), `exclamationmark.triangle.fill` in `Status.error` (a problem, with Try Again),
+  `circle.dashed` in `Ink.secondary` (not set up: neutral, since the remedy may be a token rather than a download),
+  `arrow.down.circle.fill` in `Accent.fill` (an update to install: the sidebar update item's glyph).
+  A row's own state sits at its trailing edge as `SettingsStateLabel`: the glyph in its colour and the word in
+  `Ink.secondary` ("✓ Ready", "✓ Connected", "Not set up").
+- **Detail stays one click away.** Device support lists every kind of device (sidebar glyph, name, Beta badge,
+  state) under Show Details, with the service's hints under How to Set Up. Agents keeps the copyable commands
+  under Set Up by Hand. A problem is a full-width `ProblemView` next to the card it belongs to, never inside one.
+
+| Tab | Sections |
+|---|---|
+| General | Notifications (Notify me when an agent needs help; a note that the Dock badge shows either way) · Startup (Open at login) · Updates, last: a status headline ("Up to date" with "You have 0.1.0 (1000) · Checked 2 minutes ago", "PhoneDock 0.2.0 is available" with Update, progress, or the problem with Try Again; before any check this session, a plain row with the version and when it last checked) with Check Now, then Check for updates automatically |
+| Agents | Coding agents: Set Up… and each agent's state from setup's dry run · Set Up by Hand |
+| Advanced | Background service: status, Restart Service…, Data folder, Diagnostics · Device support: one summary line, Show Details · Wi-Fi phones: the Local Network warning, then Check, which tries the phone's address with the app's Local Network permission and says what's in the way (a success says so when the running service is still blocked) |
 
 ## Copy
 

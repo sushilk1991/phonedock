@@ -17,7 +17,7 @@ import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 __all__ = ["PhoneDock", "PhoneDockApiError", "phonedock_home", "read_daemon_info"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 DEFAULT_PORT = 47420
 
@@ -613,6 +613,15 @@ class PhoneDock:
     def set_appearance(self, device_id: str, mode: str) -> Dict[str, Any]:
         """Switch to "dark" or "light" (iOS simulator: simctl ui; Android: cmd uimode night)."""
         return self._request("POST", self._dev(device_id, "/appearance"), {"appearance": mode})
+
+    def get_clipboard(self, device_id: str) -> Optional[str]:
+        """The device clipboard's plain text, or None when it is empty or holds no text (capability "clipboard":
+        iOS simulators, Android, iPhones on iOS 27+)."""
+        return self._request("GET", self._dev(device_id, "/clipboard")).get("text")
+
+    def set_clipboard(self, device_id: str, text: str) -> Dict[str, Any]:
+        """Replace the device clipboard with `text` (needs the lease): {"ok": True, "length": N}. Only the length is logged."""
+        return self._request("PUT", self._dev(device_id, "/clipboard"), {"text": text})
 
     def logs(self, device_id: str, lines: Optional[int] = None, filter: Optional[str] = None) -> str:
         return self._request("GET", self._dev(device_id, "/logs"), query={"lines": lines, "filter": filter})

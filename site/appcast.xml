@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PhoneDock's update feed. The app reads it from https://sushilk1991.github.io/phonedock/appcast.xml.
+     scripts/release-appcast.sh adds an item for each release, newest first; docs/RELEASING.md has the steps.
+     With no items, every copy of PhoneDock is up to date. -->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>PhoneDock</title>
+    <link>https://sushilk1991.github.io/phonedock/</link>
+    <description>Updates for PhoneDock for Mac</description>
+    <language>en</language>
+  </channel>
+</rss>

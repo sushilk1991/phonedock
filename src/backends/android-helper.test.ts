@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { HELPER_DEX_B64, HELPER_DEX_SHA256, HelperReplyParser, parseLabelLines } from './android-helper.ts';
+import { HELPER_DEX_B64, HELPER_DEX_SHA256, HelperReplyParser, parseClipReply, parseLabelLines } from './android-helper.ts';
+import { redact } from './android-clipboard.ts';
 import { parsePmPackages, parseUiautomatorXml } from './android-common.ts';
 
 test('helper dex: embedded bytes match HELPER_DEX_SHA256 and are a dex file', () => {
@@ -62,4 +63,21 @@ test('parseUiautomatorXml: helper output (same format as uiautomator dump) parse
   const roots = parseUiautomatorXml(xml);
   assert.equal(roots.length, 1);
   assert.equal(roots[0].children[0].attrs.text, 'Greet');
+});
+
+test('parseClipReply: text (base64 utf-8, CRLF tolerated), none, ok, errors, stray lines', () => {
+  const t = 'héllo 👋\nline 2\n';
+  assert.deepEqual(parseClipReply(`WARNING: linker noise\r\nPDCLIP ${Buffer.from(t).toString('base64')}\r\n`), { text: t });
+  assert.deepEqual(parseClipReply('PDCLIP -\n'), { text: null });
+  assert.deepEqual(parseClipReply('PDCLIP \n'), { text: '' });
+  assert.deepEqual(parseClipReply('PDCLIP ok\n'), { ok: true });
+  assert.deepEqual(parseClipReply('PDERR java.lang.SecurityException: denied\n'), { error: 'java.lang.SecurityException: denied' });
+  assert.equal(parseClipReply('Error: Could not find class dev.phonedock.Helper\n'), undefined);
+  assert.equal(parseClipReply(''), undefined);
+});
+
+test('redact: clipboard text never survives into an error detail', () => {
+  assert.equal(redact('cmd clipboard: bad arg 493817 here', '493817'), 'cmd clipboard: bad arg ••• here');
+  assert.equal(redact('no text in here', 'secret'), 'no text in here');
+  assert.equal(redact('a b', 'a'), 'a b');   // too short to tell apart from ordinary words
 });

@@ -64,7 +64,7 @@ struct DeviceDetailView: View {
         var s = frames.deviceSize
             ?? device.screen.flatMap { $0.width > 0 && $0.height > 0 ? CGSize(width: $0.width, height: $0.height) : nil }
             ?? (device.platform == "ios" ? CGSize(width: 1206, height: 2622) : CGSize(width: 1080, height: 2400))
-        if let i = frames.image?.size, i.width > 0, i.height > 0, (i.width > i.height) != (s.width > s.height) {
+        if let i = frames.pictureSize, i.width > 0, i.height > 0, (i.width > i.height) != (s.width > s.height) {
             s = CGSize(width: s.height, height: s.width)
         }
         return s
@@ -112,16 +112,16 @@ struct DeviceDetailView: View {
         }
         .background(Theme.Surface.stage)
         .onAppear {
-            frames.run(client: model.client, deviceId: device.id, active: device.isRunning)
+            frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video"))
             if SelfTest.enabled { SelfTest.frameLoop = frames }
         }
-        .onChange(of: device.id) { frames.run(client: model.client, deviceId: device.id, active: device.isRunning) }
-        .onChange(of: device.state) { frames.run(client: model.client, deviceId: device.id, active: device.isRunning) }
+        .onChange(of: device.id) { frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
+        .onChange(of: device.state) { frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
         .onChange(of: frames.asleep) { _, a in
             if a { model.asleep.insert(device.id) } else { model.asleep.remove(device.id) }
         }
         .onChange(of: device.isRunning) { _, r in if !r { model.asleep.remove(device.id) } }
-        .onChange(of: model.connection) { frames.stop(); frames.run(client: model.client, deviceId: device.id, active: device.isRunning) }
+        .onChange(of: model.connection) { frames.stop(); frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
         .onDisappear { frames.stop(); model.asleep.remove(device.id) }
     }
 }
@@ -229,8 +229,8 @@ private struct LiveScreen: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            DeviceScreenView(image: frames.image, devicePixelSize: pixels, handlers: handlers)
-            if frames.image == nil {
+            DeviceScreenView(image: frames.image, videoLayer: frames.videoLayer, devicePixelSize: pixels, handlers: handlers)
+            if !frames.hasPicture {
                 Group {
                     if let f = frames.failure {
                         ScreenFailureView(failure: f, device: device)
@@ -254,7 +254,7 @@ private struct LiveScreen: View {
                 ReconnectingCapsule().padding(.top, Theme.Space.l)
             }
             if let r = highlight { highlightBox(r) }
-            if frames.asleep, frames.image != nil {
+            if frames.asleep, frames.hasPicture {
                 AsleepHint(device: device)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .padding(.bottom, Theme.Space.xxl)
@@ -269,8 +269,8 @@ private struct LiveScreen: View {
         .task(id: device.id) {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
-                // Stale = polls stopped succeeding. An unchanged screen (304) is still live.
-                let s = frames.image != nil && (frames.failure != nil || Date().timeIntervalSince(max(clock.last, frames.lastSuccess)) > 3)
+                // Stale = polls stopped succeeding. An unchanged screen (304, or the video's ping) is still live.
+                let s = frames.hasPicture && (frames.failure != nil || Date().timeIntervalSince(max(clock.last, frames.lastSuccess)) > 3)
                 if s != stale { stale = s }
             }
         }

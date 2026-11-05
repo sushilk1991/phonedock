@@ -10,10 +10,12 @@ import { stateDir, toolEnv, which } from '../core/paths.ts';
 import {
   PhoneDockError,
   type Availability, type Backend, type BootOptions, type Device, type DeviceSpec, type DeviceState,
-  type HardwareProfile, type OsImage, type ScreenInfo, type Snapshot,
+  type HardwareProfile, type OsImage, type ScreenInfo, type Snapshot, type VideoPacket, type VideoStream,
 } from '../core/types.ts';
 import * as A from './android-common.ts';
 import * as T from './android-trace.ts';
+import * as C from './android-clipboard.ts';
+import { adbFrameStream, adbVideoStream } from './android-video.ts';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -343,7 +345,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   displayName: 'Android Emulator',
   platform: 'android',
   kind: 'virtual',
-  capabilities: ['boot', 'shutdown', 'delete', 'clone', 'snapshot', ...A.ANDROID_CAPS, 'location', 'root', 'pinch'],
+  capabilities: ['boot', 'shutdown', 'delete', 'clone', 'snapshot', ...A.ANDROID_CAPS, 'location', 'root', 'pinch', 'clipboard'],
 
   async available(): Promise<Availability> {
     try {
@@ -584,15 +586,29 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   async screenInfo(name) { return A.screenInfo(await requireSerial(name)); },
   stream(name, opts) {
     // serial resolution is async; wrap.
-    let inner: ReturnType<typeof A.adbFrameStream> | undefined; let stopped = false;
+    let inner: ReturnType<typeof adbFrameStream> | undefined; let stopped = false;
     const fcb: ((j: Buffer, s?: ScreenInfo) => void)[] = []; const ecb: ((e?: Error) => void)[] = [];
     void requireSerial(name).then((s) => {
       if (stopped) return;
-      inner = A.adbFrameStream(s, { ...opts, capture: () => emulatorScreenshot(s) });
+      inner = adbFrameStream(s, { ...opts, capture: () => emulatorScreenshot(s) });
       inner.onFrame((j, si) => fcb.forEach((c) => c(j, si)));
       inner.onEnd((e) => ecb.forEach((c) => c(e)));
     }, (e) => ecb.forEach((c) => c(e)));
     return { onFrame: (cb) => { fcb.push(cb); }, onEnd: (cb) => { ecb.push(cb); }, stop: () => { stopped = true; inner?.stop(); }, restart: () => inner?.restart?.() };
+  },
+  video(name, opts) {
+    let inner: VideoStream | undefined; let stopped = false;
+    const pcb: ((p: VideoPacket) => void)[] = []; const ecb: ((e?: Error) => void)[] = [];
+    void requireSerial(name).then((s) => {
+      if (stopped) return;
+      inner = adbVideoStream(s, opts);
+      inner.onPacket((p) => pcb.forEach((c) => c(p)));
+      inner.onEnd((e) => ecb.forEach((c) => c(e)));
+    }, (e) => ecb.forEach((c) => c(e)));
+    return {
+      onPacket: (cb) => { pcb.push(cb); }, onEnd: (cb) => { ecb.push(cb); },
+      stop: () => { stopped = true; inner?.stop(); }, restart: () => inner?.restart?.(), requestKeyFrame: () => inner?.requestKeyFrame?.(),
+    };
   },
   async uiTree(name) { return A.uiTree(await requireSerial(name)); },
   async tap(name, x, y) { await A.tap(await requireSerial(name), x, y); },
@@ -628,6 +644,8 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   async stopRecording(name) { return A.stopRecording(await requireSerial(name)); },
   async exportAppData(name, pkg, dir) { await A.exportAppData(await requireSerial(name), pkg, dir); },
   async importAppData(name, pkg, dir) { await A.importAppData(await requireSerial(name), pkg, dir); },
+  async clipboardGet(name) { return C.clipboardGet(await requireSerial(name)); },
+  async clipboardSet(name, text) { await C.clipboardSet(await requireSerial(name), text); },
   async startTrace(name, dir, o) { return T.startPerfetto(await requireSerial(name), dir, o); },
   async stopTrace(name) { return T.stopPerfetto(await requireSerial(name)); },
   async abortTrace(name) { const s = await serialFor(name).catch(() => undefined); if (s) await T.abortPerfetto(s); },

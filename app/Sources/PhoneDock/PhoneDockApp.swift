@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !SelfTest.background { NSApp.activate(ignoringOtherApps: true) }   // self-tests stay behind the user's work
         MenuTidy.start()
         FirstClick.install()
+        UpdateController.shared.start()   // auto-update: UpdateController.swift
     }
     func applicationWillTerminate(_ notification: Notification) { SeparateWindows.closeAll() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -145,6 +146,7 @@ struct PhoneDockCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) { CheckForUpdatesMenuItem() }   // UpdatesSettingsSection.swift
         CommandGroup(replacing: .sidebar) {
             Button(model.sidebarVisible ? "Hide Sidebar" : "Show Sidebar") { model.sidebarVisible.toggle() }
                 .keyboardShortcut("s", modifiers: [.command, .control])
@@ -374,6 +376,15 @@ struct ContentView: View {
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 225, ideal: 250, max: 360)
+                // The sidebar toggle sits at the trailing end of the sidebar's toolbar band (top right of the
+                // sidebar, as in Mail and Notes), mirroring the inspector toggle at the top right of the inspector.
+                // The system one would sit next to the traffic lights. With the sidebar hidden the system puts its
+                // own toggle back at the leading end of the main toolbar, which is where it belongs then.
+                .toolbar(removing: .sidebarToggle)
+                .toolbar {
+                    if #available(macOS 26.0, *) { ToolbarSpacer(.flexible) }
+                    ToolbarItem(placement: .automatic) { sidebarToggle }
+                }
         } detail: {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -457,22 +468,22 @@ struct ContentView: View {
         if #available(macOS 26.0, *) {
             ToolbarSpacer(.fixed, placement: .primaryAction)
         }
-        ToolbarItem(placement: .primaryAction) {
-            Menu {
-                Button { model.showCreate = true } label: { Label("New Device…", systemImage: "plus") }
-                    .disabled(!model.connection.isConnected)
-                Button { model.showConnect = true } label: { Label("Connect a Phone…", systemImage: "iphone.radiowaves.left.and.right") }
-                Divider()
-                Button { model.showAgentSetup = true } label: { Label("Connect an Agent…", systemImage: "sparkles") }
-            } label: {
-                Label("Add", systemImage: "plus")
+        // Add lives at the foot of the sidebar (SidebarAddButton); with the sidebar hidden it's ＋ here.
+        if !model.sidebarVisible {
+            ToolbarItem(placement: .primaryAction) {
+                Menu { AddMenuItems() } label: { Label("Add", systemImage: "plus") }
+                    .help("New Device, Connect a Phone or Connect an Agent")
+                    .testAnchor("Add menu")
             }
-            .help("New Device, Connect a Phone or Connect an Agent")
-            .testAnchor("Add menu")
         }
         if !model.inspectorVisible, !model.devices.isEmpty {
             ToolbarItem(placement: .primaryAction) { inspectorToggle }
         }
+    }
+
+    private var sidebarToggle: some View {
+        Button { model.sidebarVisible.toggle() } label: { Label(model.sidebarVisible ? "Hide Sidebar" : "Show Sidebar", systemImage: "sidebar.leading") }
+            .help(model.sidebarVisible ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
     }
 
     private var inspectorToggle: some View {
@@ -720,6 +731,8 @@ struct SidebarView: View {
                   !DeviceActions.isBusy(d, model) else { NSSound.beep(); return }
             DeviceActions.confirmDelete(d, model)
         }
+        .sidebarUpdateItem()   // "PhoneDock 0.2.0 · Update" at the bottom, only when there is one: UpdateSidebarItem.swift
+        .sidebarAddButton()    // Add Device, under everything, so it never moves when the update card comes and goes
     }
 
     @ViewBuilder private func rows(_ items: [Device]) -> some View {
@@ -766,6 +779,59 @@ struct SidebarView: View {
             Button("Delete…", role: .destructive) { DeviceActions.confirmDelete(d, model) }
                 .disabled(!online || DeviceActions.isBusy(d, model))
         }
+    }
+}
+
+extension View {
+    /// Pins Add Device to the foot of the sidebar (a safe-area bar on macOS 26, as the update card is).
+    @ViewBuilder func sidebarAddButton() -> some View {
+        if #available(macOS 26.0, *) {
+            safeAreaBar(edge: .bottom, spacing: 0) { SidebarAddButton() }
+        } else {
+            safeAreaInset(edge: .bottom, spacing: 0) { SidebarAddButton() }
+        }
+    }
+}
+
+/// Add Device at the foot of the sidebar, as Reminders has Add List: devices are listed there, so adding one is too.
+/// It opens the menu that ＋ in the main toolbar opened; with the sidebar hidden, ＋ is back in the toolbar.
+struct SidebarAddButton: View {
+    var body: some View {
+        Menu {
+            AddMenuItems()
+        } label: {
+            // Laid out as a device row is (20 pt glyph column, then the name), so glyph and words line up with theirs.
+            HStack(spacing: Theme.Space.m) {
+                Image(systemName: "plus.circle").frame(width: 20)
+                Text("Add Device")
+            }
+            .font(Theme.Fonts.body)
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("New Device, Connect a Phone or Connect an Agent")
+        .testAnchor("Add menu")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10 + Theme.Space.s)   // rows sit 10 pt in, their glyph column 6 pt further
+        .padding(.vertical, Theme.Space.m)
+    }
+}
+
+/// The Add menu's items: in the sidebar's Add Device and in the toolbar's ＋ (sidebar hidden).
+struct AddMenuItems: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button { model.showCreate = true } label: { Label("New Device…", systemImage: "plus") }
+            .disabled(!model.connection.isConnected)
+        Button { model.showConnect = true } label: { Label("Connect a Phone…", systemImage: "iphone.radiowaves.left.and.right") }
+        Divider()
+        Button { model.showAgentSetup = true } label: { Label("Connect an Agent…", systemImage: "sparkles") }
     }
 }
 
@@ -1051,355 +1117,6 @@ struct CommandBody: View {
             Text(p.before).fixedSize(horizontal: false, vertical: true)
             if let path = p.path { Text(path).lineLimit(1).truncationMode(.middle).help(path) }
             if !p.after.isEmpty { Text(p.after) }
-        }
-    }
-}
-
-// MARK: - Settings
-
-struct SettingsView: View {
-    @AppStorage(Prefs.settingsTab) private var tab = "general"
-
-    var body: some View {
-        TabView(selection: $tab) {
-            GeneralSettings()
-                .tabItem { Label("General", systemImage: "gearshape") }
-                .tag("general")
-            AgentSettings()
-                .tabItem { Label("Agents", systemImage: "chevron.left.forwardslash.chevron.right") }
-                .tag("agents")
-            AdvancedSettings()
-                .tabItem { Label("Advanced", systemImage: "wrench.and.screwdriver") }
-                .tag("advanced")
-        }
-        .frame(width: 520)
-    }
-}
-
-/// A Form section footer: callout, secondary, leading-aligned.
-private struct SettingsNote: View {
-    let text: LocalizedStringKey
-    init(_ text: LocalizedStringKey) { self.text = text }
-    var body: some View {
-        Text(text)
-            .font(Theme.Fonts.callout)
-            .foregroundStyle(Theme.Ink.secondary)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct GeneralSettings: View {
-    @AppStorage(Prefs.notifyOnHandoff) private var notify = true
-    @State private var notificationsOff = false
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Notify me when an agent needs help", isOn: $notify)
-                    .onChange(of: notify) { _, on in
-                        // Turning it on is the moment the system prompt makes sense (never at launch).
-                        if on { HandoffNotifier.shared.requestPermissionIfNeeded() }
-                    }
-            } footer: {
-                VStack(alignment: .leading, spacing: Theme.Space.s) {
-                    SettingsNote("Answer from the notification with Take Over, Done or Can’t Do It. PhoneDock also badges its Dock icon while a request is waiting.")
-                    if notify && notificationsOff {
-                        HStack(spacing: Theme.Space.m) {
-                            Label("Notifications for PhoneDock are off in System Settings.", systemImage: "bell.slash")
-                                .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
-                            Button("Open Settings…") { HandoffNotifier.openNotificationSettings() }
-                                .controlSize(.small)
-                        }
-                    }
-                }
-            }
-            Section {
-                OpenAtLoginToggle()
-            } footer: {
-                SettingsNote("Help requests reach you without opening PhoneDock first.")
-            }
-        }
-        .formStyle(.grouped)
-        .frame(height: 250)
-        .task { notificationsOff = await HandoffNotifier.shared.isDenied() }
-    }
-}
-
-/// General › Open at login, through the system's Login Items (SMAppService). Only a bundled app can register.
-private struct OpenAtLoginToggle: View {
-    @State private var on = SMAppService.mainApp.status == .enabled
-    @State private var problem: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            Toggle("Open at login", isOn: Binding(get: { on }, set: set))
-                .disabled(!DaemonLocator.isBundled)
-                .help(DaemonLocator.isBundled ? "" : "Available in the PhoneDock app bundle")
-            if let problem {
-                Text(problem).font(Theme.Fonts.callout).foregroundStyle(Theme.Status.errorText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func set(_ want: Bool) {
-        let app = SMAppService.mainApp
-        do {
-            if want { try app.register() } else { try app.unregister() }
-            problem = nil
-        } catch {
-            problem = want ? "Couldn’t add PhoneDock to your login items." : "Couldn’t remove PhoneDock from your login items."
-        }
-        if app.status == .requiresApproval {
-            problem = "Allow PhoneDock in System Settings › General › Login Items."
-            SMAppService.openSystemSettingsLoginItems()
-        }
-        on = app.status == .enabled || app.status == .requiresApproval
-    }
-}
-
-private struct AgentSettings: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        // Commands stay on one line (truncated in the middle; the tooltip and Copy have all of it), so the pane fits.
-        Form {
-            Section {
-                LabeledContent("Claude Code, Codex, Cursor, Pi") {
-                    Button("Set Up…") {
-                        model.showAgentSetup = true
-                        if !SelfTest.blocksForeground("bring the main window forward for Set Up") {
-                            NSApp.activate()
-                            NSApp.windows.first { $0.isVisible && $0.canBecomeMain && $0.identifier?.rawValue.contains("Settings") != true }?.makeKeyAndOrderFront(nil)
-                        }
-                    }
-                }
-            } footer: {
-                SettingsNote("Adds PhoneDock to each agent, installs its skill and checks that it answers. In Terminal: phonedock setup")
-            }
-            Section("Claude Code") { CommandWell(command: AgentCommands.command(.claude), plain: true, oneLine: true) }
-            Section("Codex") { CommandWell(command: AgentCommands.command(.codex), plain: true, oneLine: true) }
-            Section("Pi") { CommandWell(command: AgentCommands.command(.pi), plain: true, oneLine: true) }
-            Section {
-                CommandWell(command: AgentCommands.command(.other), plain: true, oneLine: true)
-            } header: {
-                Text("Other MCP clients")
-            } footer: {
-                SettingsNote("Any MCP client can run this command over stdio. Cursor and other clients that take JSON: Connect an Agent › Other MCP Client.")
-            }
-            Section {
-                CommandWell(command: AgentCommands.listDevices, plain: true, oneLine: true)
-            } header: {
-                Text("Command line")
-            } footer: {
-                SettingsNote("When an agent is using a device, you’ll see it above the screen. You can take over at any time.")
-            }
-        }
-        .formStyle(.grouped)
-        .frame(height: 580)
-    }
-}
-
-private struct AdvancedSettings: View {
-    @Environment(AppModel.self) private var model
-    @State private var host = ""
-    @State private var checking = false
-    @State private var check: NetworkCheck?
-    @State private var diagnosticsCopied = false
-
-    struct NetworkCheck: Equatable {
-        var ok: Bool
-        var title: String
-        var message: String?
-        var details: String?
-    }
-
-    @State private var moreBelow = false
-
-    var body: some View {
-        Form {
-            // Service, data and diagnostics in one section, so Backends and Troubleshooting fit without scrolling.
-            Section("Service") {
-                LabeledContent("Status") {
-                    HStack(spacing: Theme.Space.m) {
-                        Text(serviceStatus).foregroundStyle(Theme.Ink.secondary)
-                        Button(model.restartingDaemon ? "Restarting…" : "Restart Service…") { model.restartDaemonFromApp() }
-                            .disabled(model.restartingDaemon)
-                    }
-                }
-                .background(ScrollerFlash())
-                LabeledContent("Started by") {
-                    Text(startedBy).foregroundStyle(Theme.Ink.secondary)
-                }
-                LabeledContent("Data folder") {
-                    Button("Show in Finder") {
-                        try? FileManager.default.createDirectory(at: DaemonLocator.home, withIntermediateDirectories: true)
-                        if !SelfTest.blocksForeground("Show data folder in Finder") { NSWorkspace.shared.activateFileViewerSelecting([DaemonLocator.home]) }
-                    }
-                    .help(DaemonLocator.home.path)
-                }
-                LabeledContent("Diagnostics") {
-                    Button(diagnosticsCopied ? "Copied" : "Copy Diagnostics") {
-                        Clipboard.copy(diagnostics)
-                        diagnosticsCopied = true
-                    }
-                    .help("Copies versions, the service address and backend status for a bug report")
-                }
-            }
-            Section("Backends") {
-                if model.backends.isEmpty {
-                    Text(model.connection.isConnected ? "Loading…" : "Available once PhoneDock is connected.")
-                        .foregroundStyle(Theme.Ink.secondary)
-                }
-                ForEach(model.backends) { b in BackendRow(backend: b) }
-            }
-            Section("Troubleshooting") {
-                LocalNetworkWarning()
-                VStack(alignment: .leading, spacing: Theme.Space.s) {
-                    Text("Check that PhoneDock can reach a phone on your network.")
-                        .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
-                    HStack(spacing: Theme.Space.m) {
-                        TextField("Phone’s IP address", text: $host)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(runCheck)
-                            .testAnchor("Check host")
-                        Button(checking ? "Checking…" : "Check") { runCheck() }
-                            .disabled(checking || host.trimmingCharacters(in: .whitespaces).isEmpty)
-                    }
-                    if let check {
-                        if check.ok {
-                            Label(check.title, systemImage: "checkmark.circle.fill")
-                                .font(Theme.Fonts.callout)
-                                .foregroundStyle(Theme.Ink.primary)
-                                .symbolRenderingMode(.multicolor)
-                        } else {
-                            ProblemView(problem: FriendlyError(title: check.title, message: check.message, details: check.details))
-                        }
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        // When it doesn't all fit (a small screen, an open "How to install", a check result), say so: a visible
-        // scroller and a fade over the last row.
-        .scrollIndicators(.visible)
-        .onScrollGeometryChange(for: Bool.self) { g in
-            g.contentOffset.y + g.containerSize.height < g.contentSize.height - 8
-        } action: { _, more in moreBelow = more }
-        .overlay(alignment: .bottom) {
-            if moreBelow {
-                LinearGradient(colors: [Theme.Surface.window.opacity(0), Theme.Surface.window], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 48)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
-        }
-        .frame(height: 700)
-        .task { await model.loadBackends() }
-        .task(id: diagnosticsCopied) {
-            guard diagnosticsCopied else { return }
-            try? await Task.sleep(for: .seconds(1.5))
-            diagnosticsCopied = false
-        }
-    }
-
-    private var serviceStatus: String {
-        switch model.connection {
-        case .connected(let v): return "Running" + (v.map { " · Version \($0)" } ?? "")
-        case .connecting: return "Starting…"
-        case .failed: return "Not running"
-        }
-    }
-
-    private var startedBy: String {
-        guard model.connection.isConnected else { return "—" }
-        switch model.daemonOrigin {
-        case .app: return "PhoneDock"
-        case .other(let p): return p.map { ($0 as NSString).lastPathComponent } ?? "Terminal or another app"
-        case .unknown: return "Unknown"
-        }
-    }
-
-    private var diagnostics: String {
-        var lines = ["PhoneDock " + (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")]
-        lines.append("Service: \(model.connection.label)")
-        if let c = model.client { lines.append("Endpoint: \(c.base.absoluteString)") }
-        lines.append("Port: \(DaemonLocator.port)")
-        if let pid = model.daemonPid { lines.append("PID: \(pid)") }
-        switch model.daemonOrigin {
-        case .app(let p): lines.append("Started by: \(p)")
-        case .other(let p): lines.append("Started by: \(p ?? "itself (no responsible app)")")
-        case .unknown: lines.append("Started by: unknown")
-        }
-        lines.append("Data folder: \(DaemonLocator.home.path)")
-        lines.append("CLI: \(DaemonLocator.cliPath)")
-        lines.append("macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)")
-        for b in model.backends {
-            lines.append("Backend \(b.id): " + (b.isAvailable ? "ready \(b.availability?.version ?? "")" : "unavailable \(b.availability?.reason ?? "")"))
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private func runCheck() {
-        let h = host.trimmingCharacters(in: .whitespaces)
-        guard !h.isEmpty, !checking else { return }
-        checking = true
-        check = nil
-        Task {
-            // Any TCP answer — even "refused" — proves macOS lets PhoneDock reach the phone.
-            let r = await DaemonLocator.localNetworkCheck(host: h, port: 62078)
-            checking = false
-            switch r.code {
-            case "CONNECTED", "ECONNREFUSED":
-                check = NetworkCheck(ok: true, title: "PhoneDock can reach \(h)")
-            case "EHOSTUNREACH":
-                check = NetworkCheck(ok: false, title: "Can’t reach \(h)",
-                                     message: "Allow PhoneDock in System Settings › Privacy & Security › Local Network, and check the phone is on the same Wi-Fi.",
-                                     details: r.message)
-            case "ETIMEDOUT":
-                check = NetworkCheck(ok: false, title: "No answer from \(h)",
-                                     message: "Check the address and that the phone is on the same Wi-Fi.", details: r.message)
-            default:
-                check = NetworkCheck(ok: false, title: "Couldn’t check \(h)", message: "Try again.", details: "\(r.code): \(r.message)")
-            }
-        }
-    }
-}
-
-private struct BackendRow: View {
-    let backend: BackendInfo
-    @State private var expanded = false
-
-    var body: some View {
-        let hints = ([backend.availability?.reason].compactMap { $0 } + (backend.availability?.hints ?? [])).filter { !$0.isEmpty }
-        VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            LabeledContent {
-                HStack(spacing: Theme.Space.s) {
-                    StatusDot(status: backend.isAvailable ? .running : .stopped)
-                    Text(backend.isAvailable ? "Ready" : "Not installed").foregroundStyle(Theme.Ink.secondary)
-                }
-            } label: {
-                // The service's `stage` field becomes the same Beta label the sidebar and Connect use.
-                HStack(spacing: Theme.Space.s) {
-                    Text(backend.plainName)
-                    if let stage = backend.stageLabel { BetaBadge(label: stage) }
-                }
-            }
-            if !backend.isAvailable, !hints.isEmpty {
-                DisclosureGroup("How to install", isExpanded: $expanded) {
-                    VStack(alignment: .leading, spacing: Theme.Space.xxs) {
-                        ForEach(hints, id: \.self) { h in
-                            Text(h).font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary).textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, Theme.Space.xs)
-                }
-                .font(Theme.Fonts.callout)
-            }
         }
     }
 }

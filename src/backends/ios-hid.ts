@@ -3,6 +3,8 @@
 // open (iOS only honours injected touches while a stream runs). Opening costs ~1.7 s once; each gesture ~50 ms after.
 // The sidecar quits after IDLE_MS without use: frees the camera/mic and lets Device Hub / iPhone Mirroring stream.
 // It keeps the stream alive with RTCP and reopens it (~0.85 s) if the phone reaped it or another client took over.
+// The same stream is the phone's live screen: with a video sink (hidVideoStart, used by ios-video.ts) the sidecar
+// writes its HEVC access units to fd 3 and stays up while someone watches.
 // Verified on an iPhone 16 Pro Max, iOS 27.0, Wi-Fi paired (2026-11-03).
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -57,6 +59,13 @@ export function isNativeInputCapable(osVersion?: string): boolean {
 
 interface Pending { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
 
+/** Receives the sidecar's video channel: raw records (see tools/pd-ios-hid.py, "Video fd records"). */
+export interface HidVideoSink {
+  onData(chunk: Buffer): void;
+  /** The sidecar exited (idle, crash, phone gone) or video was switched off by another sink. */
+  onClose(err?: Error): void;
+}
+
 class HidChannel {
   udid: string;
   proc: ChildProcess;
@@ -68,15 +77,20 @@ class HidChannel {
   idle?: NodeJS.Timeout;
   dead = false;
   queue: Promise<unknown> = Promise.resolve();
+  lastInput = 0;   // never: a sidecar started for a viewer quits as soon as the last viewer leaves
+  video?: HidVideoSink;
 
-  constructor(udid: string) {
+  /** noSteal: spawned for a viewer, so don't take the screen stream from Xcode / iPhone Mirroring at start-up. */
+  constructor(udid: string, opts: { noSteal?: boolean } = {}) {
     this.udid = udid;
     const py = pymd3Python(); const script = hidScript();
     if (!py || !script) {
       throw new PhoneDockError('iPhone input is unavailable', 'ios_native_unavailable', 501, undefined,
         'Native iPhone input needs pymobiledevice3 ≥ 11.49 and tools/pd-ios-hid.py. Install: uv tool install pymobiledevice3. Or set PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_IOS_HID_SRC.');
     }
-    this.proc = spawn(py, ['-I', '-u', script, '--udid', udid], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // fd 3: the binary video channel (HEVC access units); stdout stays JSON lines
+    this.proc = spawn(py, ['-I', '-u', script, '--udid', udid, '--video-fd', '3', ...(opts.noSteal ? ['--no-steal'] : [])],
+      { stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
     let readyOk!: () => void; let readyFail!: (e: Error) => void;
     this.ready = new Promise<void>((res, rej) => { readyOk = res; readyFail = rej; });
     this.ready.catch(() => { /* surfaced via send() */ });
@@ -89,12 +103,15 @@ class HidChannel {
         const line = this.buf.slice(0, i); this.buf = this.buf.slice(i + 1);
         let m: any; try { m = JSON.parse(line); } catch { continue; }
         if (m.event === 'ready') { clearTimeout(readyTimer); readyOk(); continue; }
-        if (m.event === 'failed') { clearTimeout(readyTimer); readyFail(this.err(m.error)); continue; }
+        if (m.event === 'failed') { clearTimeout(readyTimer); readyFail(m.code === 'stream_busy' ? busyError(m.error) : this.err(m.error)); continue; }
         const p = this.pending.get(m.id); if (!p) continue;
         this.pending.delete(m.id); clearTimeout(p.timer);
-        if (m.ok) p.resolve(m); else p.reject(this.err(m.error, !m.fatal));
+        if (m.ok) p.resolve(m); else p.reject(m.code === 'stream_busy' ? busyError(m.error) : this.err(m.error, !m.fatal));
       }
     });
+    const vid = this.proc.stdio[3] as NodeJS.ReadableStream | null;
+    vid?.on('data', (d: Buffer) => this.video?.onData(d));
+    vid?.on('error', () => { /* the exit handler reports it */ });
     this.proc.stderr!.setEncoding('utf8');
     this.proc.stderr!.on('data', (d: string) => { this.stderr = (this.stderr + d).slice(-4000); });
     this.proc.on('exit', (code) => {
@@ -104,6 +121,7 @@ class HidChannel {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e); }
       this.pending.clear();
       if (channels.get(udid) === this) channels.delete(udid);
+      const v = this.video; this.video = undefined; v?.onClose(e);
     });
   }
 
@@ -116,11 +134,13 @@ class HidChannel {
         [msg, ...tail, ...READY_HINTS].join('\n'));
   }
 
-  /** Commands are serialised: a drag must finish before the next tap starts. */
-  send(cmd: Record<string, unknown>, timeoutMs = 20_000): Promise<any> {
+  /** Commands are serialised: a drag must finish before the next tap starts. `input: false` for video commands, which
+   *  don't count as use for the idle timeout. */
+  send(cmd: Record<string, unknown>, timeoutMs = 20_000, input = true): Promise<any> {
     const run = async () => {
       await this.ready;
       if (this.dead) throw this.err('iPhone input session is not running');
+      if (input) this.lastInput = Date.now();
       this.touch();
       const id = this.nextId++;
       return new Promise((resolve, reject) => {
@@ -134,9 +154,12 @@ class HidChannel {
     return p;
   }
 
+  /** Quit IDLE_MS after the last input, but never while a viewer is watching: then once the last viewer left (and
+   *  the input timeout has passed too), so the phone stops being "observed remotely" right away. */
   touch(): void {
     if (this.idle) clearTimeout(this.idle);
-    this.idle = setTimeout(() => this.close(), IDLE_MS);
+    const left = Math.max(0, this.lastInput + IDLE_MS - Date.now());
+    this.idle = setTimeout(() => { if (this.video) this.touch(); else this.close(); }, this.video ? Math.max(left, 5_000) : left);
     this.idle.unref?.();
   }
 
@@ -149,12 +172,56 @@ class HidChannel {
   }
 }
 
+function busyError(detail?: string): PhoneDockError {
+  return new PhoneDockError('Another app is showing this iPhone’s screen', 'stream_busy', 409,
+    ['Close Xcode Device Hub or iPhone Mirroring for this phone to see it live here.'],
+    detail ?? 'Another client is streaming this iPhone’s screen (one screen stream per phone)');
+}
+
 const channels = new Map<string, HidChannel>();
 
-function channel(udid: string): HidChannel {
+function channel(udid: string, opts: { noSteal?: boolean } = {}): HidChannel {
   let c = channels.get(udid);
-  if (!c || c.dead) { c = new HidChannel(udid); channels.set(udid, c); }
+  if (!c || c.dead) { c = new HidChannel(udid, opts); channels.set(udid, c); }
   return c;
+}
+
+/** Live video for one phone: the sidecar writes HEVC access units for `sink` until the returned stop() (or until the
+ *  sidecar exits: sink.onClose). One sink per phone (src/backends/ios-video.ts fans out). `steal: false` refuses with
+ *  code stream_busy while another client (Xcode Device Hub, iPhone Mirroring, another PhoneDock) streams the phone. */
+export async function hidVideoStart(udid: string, sink: HidVideoSink, opts: { steal?: boolean } = {}): Promise<() => void> {
+  const c = channel(udid, { noSteal: opts.steal === false });
+  const prev = c.video;
+  c.video = sink;
+  if (prev && prev !== sink) prev.onClose();
+  try {
+    await c.send({ cmd: 'video', on: true, steal: opts.steal !== false }, 20_000, false);
+  } catch (e) {
+    if (c.video === sink) c.video = undefined;
+    throw e;
+  }
+  c.touch();
+  let stopped = false;
+  return () => {
+    if (stopped) return; stopped = true;
+    if (c.video !== sink) return;
+    c.video = undefined;
+    if (c.dead) return;
+    if (Date.now() - c.lastInput >= IDLE_MS) { c.close(); return; }   // nobody typed for a while: free the phone now
+    c.send({ cmd: 'video', on: false }, 10_000, false).catch(() => undefined);
+    c.touch();
+  };
+}
+/** Ask the phone for a fresh key frame (the sidecar rate-limits it). No-op without a running sidecar. */
+export function hidKeyframe(udid: string): void {
+  const c = channels.get(udid);
+  if (c && !c.dead && c.video) c.send({ cmd: 'keyframe' }, 10_000, false).catch(() => undefined);
+}
+/** Stream health and video counters, for diagnostics (undefined when no sidecar runs). */
+export async function hidStatus(udid: string): Promise<any> {
+  const c = channels.get(udid);
+  if (!c || c.dead) return undefined;
+  return c.send({ cmd: 'status' }, 10_000, false);
 }
 
 /** Screen geometry in screenshot pixels, used to normalise to the HID range. */

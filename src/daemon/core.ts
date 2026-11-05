@@ -7,7 +7,8 @@ import { loadBackends } from '../backends/index.ts';
 import { probeVideo } from '../backends/ios-common.ts';
 import { instrumentBackend } from './metrics.ts';
 import { PHONEDOCK_HOME, daemonInfoName, stateDir } from '../core/paths.ts';
-import { PhoneDockError, type Backend, type Device, type DeviceSpec, type FrameStream, type Handoff, type HandoffState, type Lease, type ScreenInfo, type UiTree } from '../core/types.ts';
+import { PhoneDockError, type Backend, type Device, type DeviceSpec, type FrameStream, type Handoff, type HandoffState, type Lease, type ScreenInfo, type UiTree, type VideoStream } from '../core/types.ts';
+import { VideoFanout } from '../core/video.ts';
 
 // ── backends ────────────────────────────────────────────────────────────────
 export let backends: Backend[] = [];
@@ -514,17 +515,25 @@ export function sharedStream(deviceId: string, maxSize: number, fps = 15): Share
   streams.set(key, ns);
   return ns;
 }
+/** A stream with no viewers is stopped this long after its last one left (a viewer that comes back, e.g. switching
+ *  devices in the app and back, gets the running stream: the picture at once). */
+const STREAM_LINGER_MS = 5_000;
 setInterval(() => {
   for (const [k, s] of streams) {
-    if (s.viewers <= 0 && Date.now() - s.lastAccess > 5_000) { s.ended = true; streams.delete(k); try { s.stream.stop(); } catch { /* */ } }
+    if (s.viewers <= 0 && Date.now() - s.lastAccess > STREAM_LINGER_MS) { s.ended = true; streams.delete(k); try { s.stream.stop(); } catch { /* */ } }
+  }
+  for (const [k, v] of videos) {
+    if (v.viewers <= 0 && Date.now() - v.lastAccess > STREAM_LINGER_MS) endVideo(k, v);
   }
 }, 1000).unref();
 function isStreaming(deviceId: string): boolean {
   for (const [k, s] of streams) if (k.startsWith(deviceId + '|') && !s.ended) return true;
+  for (const [k, v] of videos) if (k.startsWith(deviceId + '|') && !v.ended) return true;
   return false;
 }
 export function stopStreamsFor(deviceId: string) {
   for (const [k, s] of streams) if (k.startsWith(deviceId + '|')) { s.ended = true; streams.delete(k); try { s.stream.stop(); } catch { /* */ } }
+  for (const [k, v] of videos) if (k.startsWith(deviceId + '|')) endVideo(k, v);
 }
 /** The screen turned: streams that can restart at the new size do (viewers keep the last frame meanwhile); others stop
  *  and the next viewer starts a fresh one. */
@@ -534,8 +543,62 @@ export function restartStreamsFor(deviceId: string) {
     if (s.stream.restart) { try { s.stream.restart(); } catch { /* */ } continue; }
     s.ended = true; streams.delete(k); try { s.stream.stop(); } catch { /* */ }
   }
+  for (const [k, v] of videos) {
+    if (!k.startsWith(deviceId + '|')) continue;
+    if (v.stream.restart) { try { v.stream.restart(); } catch { /* */ } continue; }
+    endVideo(k, v);
+  }
 }
-export function streamStats() { return [...streams.values()].map((s) => ({ key: s.key, viewers: s.viewers, hasFrame: !!s.latest, ageMs: s.latestAt ? Date.now() - s.latestAt : null, firstFrameMs: s.latestAt && s.firstFrameAt ? s.firstFrameAt - s.startedAt : null, fallbackCaptures: s.fallbackCaptures })); }
+export function streamStats() {
+  return [
+    ...[...streams.values()].map((s) => ({ key: s.key, kind: 'jpeg', viewers: s.viewers, hasFrame: !!s.latest, ageMs: s.latestAt ? Date.now() - s.latestAt : null, firstFrameMs: s.latestAt && s.firstFrameAt ? s.firstFrameAt - s.startedAt : null, fallbackCaptures: s.fallbackCaptures })),
+    ...[...videos.values()].map((v) => ({ key: v.key, kind: 'video', viewers: v.viewers, hasFrame: v.fanout.cache.decodable, ageMs: v.lastFrameAt ? Date.now() - v.lastFrameAt : null, firstFrameMs: v.firstFrameAt ? v.firstFrameAt - v.startedAt : null,
+      frames: v.frames, cachedFrames: v.fanout.cache.frames.length, cachedBytes: v.fanout.cache.bytes, dropped: v.fanout.dropped, resyncs: v.fanout.resyncs })),
+  ];
+}
+
+// ── shared live video ───────────────────────────────────────────────────────
+/** One backend video stream per device (and size), fanned out to the GET /video viewers. Each viewer starts from the
+ *  fan-out's cache (screen, config, the frames since the key frame) and is dropped back to a resync if it falls
+ *  behind (src/core/video.ts). */
+export interface SharedVideo {
+  key: string; deviceId: string; stream: VideoStream; fanout: VideoFanout;
+  viewers: number; lastAccess: number; ended: boolean; err?: Error;
+  startedAt: number; firstFrameAt?: number; lastFrameAt?: number; frames: number;
+  /** Called when the stream ends (its viewers' responses are closed). */
+  endListeners: Set<(err?: Error) => void>;
+  /** A screenshot for viewers that join before the first frame (shared by them, at most one in flight). */
+  still?: Promise<{ data: Buffer; at: number } | undefined>;
+}
+const videos = new Map<string, SharedVideo>();
+function endVideo(k: string, v: SharedVideo, err?: Error) {
+  if (videos.get(k) === v) videos.delete(k);
+  if (v.ended) return;
+  v.ended = true; v.err = err;
+  try { v.stream.stop(); } catch { /* */ }
+  for (const l of [...v.endListeners]) { try { l(err); } catch { /* */ } }
+}
+export function sharedVideo(deviceId: string, maxSize: number): SharedVideo {
+  const key = `${deviceId}|${maxSize}`;
+  const s = videos.get(key);
+  if (s && !s.ended) { s.lastAccess = Date.now(); return s; }
+  const { backend, nativeId } = splitId(deviceId);
+  const b = getBackend(backend);
+  if (!b.video) throw new PhoneDockError('Live video is unavailable for this device', 'not_supported', 501, ['Use GET /v1/devices/:id/frame (JPEG) instead.'], `${backend} has no live video`);
+  const stream = b.video(nativeId, { maxSize });
+  const fanout = new VideoFanout();
+  const v: SharedVideo = { key, deviceId, stream, fanout, viewers: 0, lastAccess: Date.now(), ended: false, startedAt: Date.now(), frames: 0, endListeners: new Set() };
+  fanout.onNeedKeyFrame = () => { try { stream.requestKeyFrame?.(); } catch { /* */ } };
+  stream.onPacket((p) => {
+    if (v.ended) return;
+    if (p.type === 'frame') { v.frames++; v.lastFrameAt = Date.now(); v.firstFrameAt ??= v.lastFrameAt; }
+    else if (p.type === 'screen') noteScreen(deviceId, p.screen.width, p.screen.height);
+    fanout.packet(p);
+  });
+  stream.onEnd((e) => endVideo(key, v, e));
+  videos.set(key, v);
+  return v;
+}
 
 // ── human handoffs ──────────────────────────────────────────────────────────
 // In memory only (a daemon restart drops them; requesters then see 404 and may ask again).

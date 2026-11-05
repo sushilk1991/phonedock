@@ -13,7 +13,7 @@ import {
 } from './core.ts';
 import { badRequest, notSupported, type Ctx } from './http.ts';
 import {
-  center, diffThumbs, findElements, findRef, flatten, focusedElement, grayThumb, isEditable, keyboardInfo,
+  center, diffThumbs, findElements, flatten, focusedElement, grayThumb, isEditable, keyboardInfo,
   nearestEditable, pngSize, screenSummary, toMatch, truncateCrash, unionBounds, type Thumb,
 } from './media.ts';
 import { router as r, dev, need, num, truthy } from './routes.ts';
@@ -21,6 +21,7 @@ import { canScroll, contentItems, contentMoved, contentSignature, lookFromFinger
 import { imeShownFrom } from '../backends/android-common.ts';
 import { observeScrollTo, observeWait } from './observe.ts';
 import { axTree, describe, findOnce, ocrTree, parseFind, pollFind, queryText, type Dev } from './find.ts';
+import { resolveRef, type RefTarget } from './refcheck.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 import { inputRoute } from './delivery.ts';
 
@@ -173,14 +174,15 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
 
   // 1. resolve the field
   let field: ElementMatch | undefined; let label: ElementMatch | undefined; let via: string;
-  let tree: UiTree | undefined;
+  let tree: UiTree | undefined; let moved: RefTarget['moved']; let refCheck: RefTarget['check'] | undefined;
+  let clientRef: string | undefined;   // reported for the field instead of its ref in the new read
   if (body.ref) {
+    // like tap {ref}: the field the ref names, found again on the screen as it is now, or stale_ref (nothing tapped)
     via = 'ref';
-    tree = uiCache.get(d.id);
-    if (!tree) throw new PhoneDockError("The screen information is out of date", 'stale_ref', 409, ["Refresh the screen information and try again."], `No UI tree cached for ${d.id}; call /ui or /find first`);
-    const e = findRef(tree, String(body.ref).replace(/^@/, ''));
-    if (!e) throw new PhoneDockError("The screen reference is out of date", 'stale_ref', 409, ["Refresh the screen information and try again."], [`Unknown ref ${body.ref}`, ...['Refs are only valid until the next /ui call; fetch /ui again']].filter(Boolean).join('\n'));
-    field = toMatch(e, tree);
+    clientRef = String(body.ref).replace(/^@/, '');
+    const t = await resolveRef(d, clientRef);
+    tree = t.tree; moved = t.moved; refCheck = t.check;
+    field = toMatch(t.el, t.tree);
   } else if (Number.isFinite(body.x) && Number.isFinite(body.y)) {
     via = 'point';
   } else {
@@ -229,7 +231,7 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
     ...(body.match && body.match !== 'contains' ? { match: String(body.match) } : {}), ...(Number(body.index) > 0 ? { index: Math.floor(Number(body.index)) } : {}),
     ...(via === 'ref' ? { ref: true } : {}), ...(via === 'point' ? { point: true } : {}),
     ...(secret ? { secret: true, length: [...value].length } : { value }), ...(submit ? { submit: true } : {}), ...(clear ? {} : { clear: false }) };
-  log({ action: 'tap', x: tx, y: ty }, { ...(field ? { resolved: { ref: field.ref, element: { type: field.type, text: field.text, label: field.label, id: field.id, placeholder: field.placeholder } } } : {}), fill: asked });
+  log({ action: 'tap', x: tx, y: ty }, { ...(field ? { resolved: { ref: clientRef ?? field.ref, element: { type: field.type, text: field.text, label: field.label, id: field.id, placeholder: field.placeholder }, ...(moved ? { moved } : {}) } } : {}), fill: asked });
 
   // 3. wait up to 2 s for focus / keyboard (an iOS simulator known to use a hardware keyboard: one read)
   const hw = ios && hwKeyboard.has(d.id);
@@ -424,7 +426,7 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
 
   const expect = exp ? await finishExpect(d, exp) : undefined;
   return {
-    ok: true, via, element: field ?? null, ...(label ? { label } : {}), tapped: { x: tx, y: ty },
+    ok: true, via, element: field ? (clientRef ? { ...field, ref: clientRef } : field) : null, ...(label ? { label } : {}), tapped: { x: tx, y: ty }, ...(moved ? { moved } : {}), ...(refCheck ? { refCheck } : {}),
     focused: fs.ok, keyboard: fs.keyboard, cleared, ...(clearMethod ? { clearMethod } : {}),
     previousValue: mask(before, secret), finalValue: mask(finalValue, secret), finalLength: finalValue === undefined ? undefined : [...finalValue].length,
     verified: verified ?? null, secret, submitted: submit, warnings, elapsedMs: Date.now() - t0, ...(expect ? { expect } : {}),
@@ -486,6 +488,38 @@ r.post('/v1/devices/:id/appearance', async (c) => {
   const now = await appearanceOf(d, platform).catch(() => 'unknown' as const);
   return { ok: true, appearance: now, previous, changed: previous !== now };
 });
+
+// ── clipboard ───────────────────────────────────────────────────────────────
+// Plain text only. Clipboard text can be secret (one-time codes, copied passwords): the Activity log and SSE get its
+// length, never the text, and a set never echoes it back. Reading needs no lease (like a screenshot); setting does.
+export const MAX_CLIPBOARD_CHARS = 100_000;   // well under Android's 1 MB binder transaction limit
+function clipboardFn<K extends 'clipboardGet' | 'clipboardSet'>(b: Backend, k: K): NonNullable<Backend[K]> {
+  const f = b[k];
+  if (typeof f !== 'function') {
+    throw new PhoneDockError('This device can’t read or set the clipboard', 'not_supported', 501,
+      ['Type the text into the field instead (type_text or fill).'], `${b.id} has no clipboard support (capability "clipboard")`);
+  }
+  return f.bind(b) as NonNullable<Backend[K]>;
+}
+r.get('/v1/devices/:id/clipboard', async (c) => {
+  const d = dev(c);
+  const text = await clipboardFn(d.b, 'clipboardGet')(d.nid);
+  return { text: typeof text === 'string' && text !== '' ? text : null };   // null: empty, or nothing that is text
+});
+async function setClipboard(c: Ctx) {
+  const d = dev(c);
+  checkLease(d.id, c.owner);
+  const body = await c.body();
+  if (typeof body?.text !== 'string') throw badRequest('text must be a string: the clipboard’s new contents ("" empties it)');
+  const text: string = body.text;
+  const length = [...text].length;
+  if (length > MAX_CLIPBOARD_CHARS) throw badRequest(`text is too long: ${length} characters (at most ${MAX_CLIPBOARD_CHARS})`);
+  await clipboardFn(d.b, 'clipboardSet')(d.nid, text);
+  logAction(d.id, c.owner, { action: 'clipboard.set', length });
+  return { ok: true, length };
+}
+r.add('PUT', '/v1/devices/:id/clipboard', setClipboard);
+r.post('/v1/devices/:id/clipboard', setClipboard);
 
 // ── foreground app / keyboard ───────────────────────────────────────────────
 r.get('/v1/devices/:id/foreground', async (c) => {

@@ -228,9 +228,13 @@ final class AppModel {
         }
     }
 
-    func loadBackends() async {
-        guard let c = client else { return }
-        if let b = try? await c.get([BackendInfo].self, "/v1/backends", timeout: 30) { backends = b }
+    /// Refreshes `backends`; false when the service didn't answer (the last list is kept).
+    @discardableResult
+    func loadBackends() async -> Bool {
+        guard let c = client else { return false }
+        guard let b = try? await c.get([BackendInfo].self, "/v1/backends", timeout: 30) else { return false }
+        backends = b
+        return true
     }
 
     /// Self-test only: device-id prefixes to leave out of the window (`PHONEDOCK_APP_SELFTEST_HIDE=ios-device:`), so

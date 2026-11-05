@@ -55,6 +55,10 @@ export interface FillResult extends InputDelivery {
   ok: true; via: 'ref' | 'text' | 'id' | 'point'; element: ElementMatch | null; label?: ElementMatch; tapped: { x: number; y: number };
   focused: boolean; keyboard: boolean; cleared: boolean; clearMethod?: string; previousValue?: string; finalValue?: string; finalLength?: number;
   verified: boolean | null; secret: boolean; submitted: boolean; warnings: string[]; elapsedMs: number;
+  /** `ref` fills: the field had moved since that read; where the read had it and where it was tapped. */
+  moved?: { from: { x: number; y: number }; to: { x: number; y: number } };
+  /** `ref` fills: how the ref was checked against the screen (see `tap {ref}` in docs/API.md). */
+  refCheck?: { via: 'recent' | 'joined' | 'read' | 'ocr' | 'unchecked'; ms: number };
 }
 /** POST /v1/devices/:id/flow (`flow save`): which part of the action log to turn into a flow. */
 export interface SaveFlowOptions {
@@ -764,6 +768,13 @@ export class PhoneDockClient {
   /** Switch dark/light; resolves with what the device reports afterwards (`previous` = before). */
   setAppearance(id: string, mode: Appearance): Promise<{ ok: boolean; appearance: Appearance | 'unknown'; previous: Appearance | 'unknown'; changed: boolean }> {
     return this.request('POST', this.dev(id, '/appearance'), { body: { appearance: mode } });
+  }
+  /** The device clipboard's plain text; null when it is empty or holds no text (capability `clipboard`: iOS simulators,
+   *  Android, iPhones on iOS 27+). */
+  async getClipboard(id: string): Promise<string | null> { return (await this.request<{ text: string | null }>('GET', this.dev(id, '/clipboard'))).text; }
+  /** Replace the device clipboard with `text` (needs the lease). The daemon logs only its length, never the text. */
+  setClipboard(id: string, text: string): Promise<{ ok: boolean; length: number }> {
+    return this.request('PUT', this.dev(id, '/clipboard'), { body: { text } });
   }
   pushFile(id: string, local: string, remote: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/files/push'), { body: { local, remote } }); }
   pullFile(id: string, remote: string, local: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/files/pull'), { body: { remote, local } }); }

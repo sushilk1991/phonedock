@@ -4,6 +4,8 @@ import { toolEnv, which } from '../core/paths.ts';
 import { PhoneDockError, type Availability, type Backend, type Device, type DeviceState } from '../core/types.ts';
 import * as A from './android-common.ts';
 import * as T from './android-trace.ts';
+import * as C from './android-clipboard.ts';
+import { adbFrameStream, adbVideoStream } from './android-video.ts';
 import { sleep, waitFor } from '../core/exec.ts';
 import {
   chooseConnect, choosePairing, discoverAndroid, hostOf, manyPhonesError, matchConnectService, noConnectError, noPairingError,
@@ -138,7 +140,7 @@ export const backend: Backend & {
   displayName: 'Android phones and tablets',
   platform: 'android',
   kind: 'physical',
-  capabilities: [...A.ANDROID_CAPS],
+  capabilities: [...A.ANDROID_CAPS, 'clipboard'],
 
   async available(): Promise<Availability> {
     try {
@@ -229,7 +231,9 @@ export const backend: Backend & {
   },
   async screenshot(s) { return A.screenshot(await requireOnline(s)); },
   async screenInfo(s) { return A.screenInfo(await requireOnline(s)); },
-  stream(s, opts) { return A.adbFrameStream(s, opts); },
+  // `s` is the hardware serial; adb needs the live transport (over Wi-Fi it differs), found when the stream starts
+  stream(s, opts) { return adbFrameStream(() => requireOnline(s), opts); },
+  video(s, opts) { return adbVideoStream(() => requireOnline(s), opts); },
   async uiTree(s) { return A.uiTree(await requireOnline(s)); },
   async tap(s, x, y) { await A.tap(await requireOnline(s), x, y); },
   async longPress(s, x, y, ms) { await A.longPress(await requireOnline(s), x, y, ms); },
@@ -259,6 +263,8 @@ export const backend: Backend & {
   async stopRecording(s) { return A.stopRecording(await requireOnline(s)); },
   async exportAppData(s, pkg, dir) { await A.exportAppData(await requireOnline(s), pkg, dir); },
   async importAppData(s, pkg, dir) { await A.importAppData(await requireOnline(s), pkg, dir); },
+  async clipboardGet(s) { return C.clipboardGet(await requireOnline(s)); },
+  async clipboardSet(s, text) { await C.clipboardSet(await requireOnline(s), text); },
   async startTrace(s, dir, o) { return T.startPerfetto(await requireOnline(s), dir, o); },
   async stopTrace(s) { return T.stopPerfetto(await requireOnline(s)); },
   async abortTrace(s) { await T.abortPerfetto(s); },

@@ -21,7 +21,9 @@ import {
 import { JsonState, ScreenshotRecorder, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize } from './ios-common.ts';
 import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidSwipe, hidTap, hidType, hidTypable, isNativeInputCapable, type Geometry } from './ios-hid.ts';
 import { isNativeCapable, nativeSession, nativeUiTree } from './ios-native.ts';
+import { lockGuard } from './ios-lock.ts';
 import { abortXctrace, startXctrace, stopXctrace } from './ios-trace.ts';
+import { iosFeedStats, iosHevcFeed, iosVideoFrameStream, iosVideoStats, iosVideoStream, startHevcRecording, warmVideoHelper, type HevcRecording, type HevcVideoFeed, type VideoDeps } from './ios-video.ts';
 
 const ID = 'ios-device';
 // devicectl-only features (no WDA): screenshot, record, crashes, appData, location, openUrl. No 'rotate': devicectl's
@@ -32,8 +34,29 @@ const BASE_CAPS: Capability[] = DC_CAPS;
 const WDA_ONLY_CAPS: Capability[] = ['screenshot', 'uiTree', 'ocr', 'tap', 'longPress', 'swipe', 'type', 'key', 'launch', 'openUrl'];
 // iOS 27+ without WDA: real touch/keyboard/buttons via the CoreDevice HID sidecar (ios-hid.ts) and the accessibility
 // tree via remoteAXService (ios-native.ts, read-only); the daemon falls back to OCR when the tree is unavailable.
-const NATIVE_CAPS: Capability[] = [...DC_CAPS, 'tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap'];
+// 'stream': live video from the same sidecar's screen stream (ios-video.ts).
+const NATIVE_CAPS: Capability[] = [...DC_CAPS, 'stream', 'tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap'];
 function nativeCaps(osv?: string): Capability[] { return isNativeCapable(osv) ? [...NATIVE_CAPS, 'uiTree'] : NATIVE_CAPS; }
+/** iOS 27+: the pasteboard through the native sidecar (CoreDevice pasteboard service), with or without WDA. */
+function withClipboard(caps: Capability[], osv?: string): Capability[] { return isNativeCapable(osv) ? [...caps, 'clipboard'] : caps; }
+/** iOS 27+: live video (GET /video) from the sidecar's screen stream, with or without WDA. */
+function withVideo(caps: Capability[], osv?: string): Capability[] { return isNativeInputCapable(osv) && !caps.includes('video') ? [...caps, 'video'] : caps; }
+/** The devicectl id of an iOS 27+ phone whose clipboard the native sidecar can reach; not_supported otherwise. */
+async function clipboardPhone(udid: string): Promise<string> {
+  let dc: string;
+  try { dc = dcId(udid); } catch { throw clipboardUnsupported(`${udid} is connected through WebDriverAgent only`); }
+  if (!osByUdid.has(dc)) {
+    const v = (await findDev(dc) as any)?.deviceProperties?.osVersionNumber;
+    if (v) osByUdid.set(dc, String(v));
+  }
+  const osv = osByUdid.get(dc);
+  if (!(Number.parseInt(osv ?? '', 10) >= 27)) throw clipboardUnsupported(`the phone runs iOS ${osv ?? '(unknown)'}; the clipboard needs iOS 27 or later`);
+  return dc;
+}
+function clipboardUnsupported(why: string): PhoneDockError {
+  return new PhoneDockError('PhoneDock can read and set the clipboard only on iPhones with iOS 27 or later', 'not_supported', 501,
+    ['Paste a known value by typing it instead (type_text / fill).'], `${why}. iOS 27 exposes the pasteboard to the Mac (CoreDevice); older iOS needs an app on the phone`);
+}
 const osByUdid = new Map<string, string>();
 /** Use the native HID path when no WDA is configured and the phone runs iOS 27+. */
 function nativeInput(udid: string): boolean {
@@ -71,6 +94,27 @@ function nativeGeo(udid: string): Geometry {
     if (!v.width || !v.height) throw new PhoneDockError('Could not read the iPhone screen size', 'device_error', 502);
     geoCache.set(dc, { at: Date.now(), w: v.width, h: v.height });
     return { width: v.width, height: v.height };
+  };
+}
+
+/** What live video (ios-video.ts) needs from this backend. Video rides the HID sidecar's screen stream, so it works on
+ *  iOS 27+ whether or not WebDriverAgent is configured; anything else (older iOS, WDA-only entries) gets screenshots. */
+function videoDeps(nid: string): VideoDeps {
+  return {
+    async capable() {
+      let dc: string; try { dc = dcId(nid); } catch { return false; }
+      if (!osByUdid.has(dc)) {
+        const v = (await findDev(dc).catch(() => undefined) as any)?.deviceProperties?.osVersionNumber;
+        if (v) osByUdid.set(dc, String(v));
+      }
+      return isNativeInputCapable(osByUdid.get(dc));
+    },
+    async screen() {
+      const v = await displayInfo(dcId(nid));
+      if (!v.width || !v.height) throw new PhoneDockError('Could not read the iPhone screen size', 'device_error', 502);
+      return { width: v.width, height: v.height, scale: v.scale };
+    },
+    screenshot: () => screenshotAny(nid),
   };
 }
 
@@ -193,6 +237,8 @@ function dcId(nativeId: string): string {
     ['Pair the iPhone with this Mac.'], `${nativeId} is connected via WebDriverAgent only; pair by USB in Xcode/Finder, then reconnect with phonedock connect --ios <ip> --udid <udid>`);
   return u;
 }
+/** dcId, or the nativeId itself for WDA-only entries (where only screenshots work). */
+function dcIdOr(nativeId: string): string { try { return dcId(nativeId); } catch { return nativeId; } }
 
 export interface WdaStatus { ok: boolean; status?: any; error?: string }
 const statusCache = new Map<string, { at: number; v: WdaStatus }>();
@@ -377,6 +423,9 @@ async function probeLock(udid: string): Promise<boolean | null> {
   return typeof r?.passcodeRequired === 'boolean' ? r.passcodeRequired : null;
 }
 
+/** Pointer and text input refuse a locked phone (ios-lock.ts): keys stay allowed (Home, the side button wake it). */
+const locks = lockGuard(probeLock);
+
 function readinessOf(d: DcDevice, locked: boolean | null, checkedAt?: number): Readiness {
   const c = conn(d), legacy = d.connectionProperties ?? {};
   const pairing = c.pairingState ?? legacy.pairingState;
@@ -512,7 +561,7 @@ async function pool<T>(items: T[], n: number, fn: (t: T) => Promise<void>): Prom
 
 // ── recording ──────────────────────────────────────────────────────────────
 
-interface DevRecording { outPath: string; tmp: string; dest?: string; child?: ChildProcess; exited?: Promise<number | null>; shots?: ScreenshotRecorder }
+interface DevRecording { outPath: string; tmp: string; dest?: string; child?: ChildProcess; exited?: Promise<number | null>; shots?: ScreenshotRecorder; hevc?: HevcRecording }
 const recordings = new Map<string, DevRecording>();
 const noScreenRecord = new Set<string>();   // devices whose CoreDevice lacks the "Screen Recording" capability
 
@@ -649,6 +698,9 @@ export const backend: Backend & {
   connectWda(input: string, opts?: { name?: string; udid?: string }): Promise<{ nativeId: string; wdaUrl: string; status: any }>;
   disconnect(nativeId: string): Promise<boolean>;
   wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string }, onProgress?: (l: string) => void): Promise<{ udid: string; wdaUrl: string; pid?: number }>;
+  /** iOS 27+: the phone's own HEVC access units (decoder config + frames with timestamps), from the stream input uses.
+   *  Not wired to a route yet; for a raw /video endpoint and the Mac app's VideoToolbox view. */
+  videoHevc(nativeId: string): HevcVideoFeed;
 } = {
   id: ID,
   displayName: 'iPhone and iPad (beta)',
@@ -688,7 +740,7 @@ export const backend: Backend & {
         osVersion: s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber,
         model: h.marketingName ?? h.productType,
         connection: transportOf(d) === 'localNetwork' || transportOf(d) === 'network' ? 'wifi' : 'usb',
-        capabilities: url ? CAPS : isNativeInputCapable(s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber) ? nativeCaps(s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber) : BASE_CAPS,
+        capabilities: withVideo(withClipboard(url ? CAPS : isNativeInputCapable(osv) ? nativeCaps(osv) : BASE_CAPS, osv), osv),
         error: readiness.hints.length && mapState(d) !== 'running' ? readiness.hints[0] : undefined,
         meta: {
           coreDeviceId: d.identifier, productType: h.productType, transport: transportOf(d), pairingState: c.pairingState ?? d.connectionProperties?.pairingState,
@@ -756,6 +808,13 @@ export const backend: Backend & {
 
   async screenshot(udid) { return screenshotAny(udid); },
 
+  // Live frames: iOS 27+ decodes the phone's own screen stream (~15 fps JPEGs, ios-video.ts); anything else, or while
+  // Xcode Device Hub / iPhone Mirroring holds the stream, falls back to screenshots (~1 fps).
+  stream(udid, opts) { warmVideoHelper(); return iosVideoFrameStream(dcIdOr(udid), opts ?? {}, videoDeps(udid)); },
+
+  video(udid) { return iosVideoStream(dcId(udid), videoDeps(udid)); },
+  videoHevc(udid) { const deps = videoDeps(udid); return iosHevcFeed(dcId(udid), { screen: () => deps.screen() }); },
+
   async screenInfo(udid): Promise<ScreenInfo> {
     // devicectl knows the framebuffer size + point scale without taking a screenshot (verified read-only on iOS 27).
     let dc: string | undefined; try { dc = dcId(udid); } catch { /* WDA-only */ }
@@ -786,23 +845,23 @@ export const backend: Backend & {
   },
 
   async tap(udid, x, y) {
-    if (await ensureNative(udid)) { await hidTap(dcId(udid), nativeGeo(udid), x, y); return; }
+    if (await ensureNative(udid)) { await locks.refuseIfLocked(dcId(udid)); await hidTap(dcId(udid), nativeGeo(udid), x, y); return; }
     const s = await wdaScale(udid); await wdaSession(udid, 'POST', '/wda/tap', { x: p(x, s), y: p(y, s) });
   },
 
   async doubleTap(udid, x, y) {
-    if (await ensureNative(udid)) { await hidDoubleTap(dcId(udid), nativeGeo(udid), x, y); return; }
+    if (await ensureNative(udid)) { await locks.refuseIfLocked(dcId(udid)); await hidDoubleTap(dcId(udid), nativeGeo(udid), x, y); return; }
     await this.tap(udid, x, y); await new Promise((r) => setTimeout(r, 80)); await this.tap(udid, x, y);
   },
 
   async longPress(udid, x, y, durationMs) {
-    if (await ensureNative(udid)) { await hidLongPress(dcId(udid), nativeGeo(udid), x, y, durationMs || 800); return; }
+    if (await ensureNative(udid)) { await locks.refuseIfLocked(dcId(udid)); await hidLongPress(dcId(udid), nativeGeo(udid), x, y, durationMs || 800); return; }
     const s = await wdaScale(udid);
     await wdaSession(udid, 'POST', '/wda/touchAndHold', { x: p(x, s), y: p(y, s), duration: Math.max(0.1, (durationMs || 800) / 1000) });
   },
 
   async swipe(udid, x1, y1, x2, y2, durationMs) {
-    if (await ensureNative(udid)) { await hidSwipe(dcId(udid), nativeGeo(udid), x1, y1, x2, y2, durationMs || 300); return; }
+    if (await ensureNative(udid)) { await locks.refuseIfLocked(dcId(udid)); await hidSwipe(dcId(udid), nativeGeo(udid), x1, y1, x2, y2, durationMs || 300); return; }
     const s = await wdaScale(udid);
     await wdaSession(udid, 'POST', '/wda/dragfromtoforduration', {
       fromX: p(x1, s), fromY: p(y1, s), toX: p(x2, s), toY: p(y2, s), duration: Math.max(0.05, (durationMs || 300) / 1000),
@@ -811,6 +870,7 @@ export const backend: Backend & {
 
   async type(udid, text) {
     if (await ensureNative(udid)) {
+      await locks.refuseIfLocked(dcId(udid));
       if (hidTypable(text)) { await hidType(dcId(udid), text); return; }
       // Emoji / accents / non-Latin: put the text on the device pasteboard, then Cmd+V. (iOS may show its
       // "Allow Paste" prompt the first time an app reads a pasteboard written by another source.)
@@ -910,6 +970,20 @@ export const backend: Backend & {
     await devicectl(['device', 'process', 'launch', '--device', dcId(udid), '--payload-url', url, 'com.apple.mobilesafari']);
   },
 
+  // iOS 27+ via the native sidecar's CoreDevice pasteboard service (plain text). The text travels only inside the
+  // sidecar's JSON-lines stdin/stdout, never on a command line.
+  // A locked phone's pasteboard service answers with no items (hardware, iOS 27.0: changeCount kept counting, items
+  // []), so "no text" from a locked phone says nothing: report the lock instead of an empty clipboard.
+  async clipboardGet(udid) {
+    const text = await nativeSession(await clipboardPhone(udid)).clipboardGet();
+    if (text === null && await probeLock(udid).catch(() => null) === true) {
+      throw new PhoneDockError('The iPhone is locked, so PhoneDock can’t tell what is on its clipboard', 'device_locked', 409,
+        ['Unlock the iPhone and try again.'], 'iOS returns no clipboard items while the phone is locked (devicectl lockState: passcodeRequired)');
+    }
+    return text;
+  },
+  async clipboardSet(udid, text) { await nativeSession(await clipboardPhone(udid)).clipboardSet(text); },
+
   // `devicectl device orientation set` is documented as "simulated device physical orientation" and on a real iPhone
   // it reports "New Device Orientation: portrait" whatever you ask (hardware test, iOS 27.0). It can never work, so
   // we don't send it, and 'rotate' is not a capability of this backend.
@@ -975,15 +1049,25 @@ export const backend: Backend & {
     return r ? ipsRender(r) : text;
   },
 
-  // ── recording: devicectl capture screen-record, else a screenshot-loop recorder ──
+  // ── recording: the phone's own HEVC stream (iOS 27+, no re-encode), else devicectl capture screen-record, else a
+  // screenshot-loop recorder ──
   // devicectl screen-record is UNTESTED on hardware: the paired iPhone 16 Pro Max / iOS 27.0 reports
-  // "The capability 'Screen Recording' is not supported by this device", so it falls back to screenshots (~1 fps).
+  // "The capability 'Screen Recording' is not supported by this device", so older iOS falls back to screenshots (~1 fps).
   async startRecording(nid, outPath, opts = {}) {
     if (recordings.has(nid)) throw new PhoneDockError('A recording is already running on this device', 'busy', 409, ['Stop it first']);
     const maxSeconds = Math.max(1, Math.min(Math.round(opts.maxSeconds ?? 300), 3600));
     mkdirSync(dirname(outPath), { recursive: true });
     let udid: string | undefined; try { udid = dcId(nid); } catch { /* WDA-only */ }
     const tmp = mkdtempSync(join(tmpdir(), 'pd-iosdev-rec-'));
+    if (udid) {
+      const deps = videoDeps(nid);
+      // a placeholder holds the slot while the stream starts (a second start gets 'busy')
+      recordings.set(nid, { outPath, tmp });
+      try {
+        if (await deps.capable()) { recordings.set(nid, { outPath, tmp, hevc: await startHevcRecording(udid, outPath, { maxSeconds }, deps) }); return; }
+      } catch { /* stream_busy, no helper, no key frame: the older ways below */ }
+      recordings.delete(nid);
+    }
     if (udid && !noScreenRecord.has(udid)) {
       const dest = join(tmp, 'rec.mp4'); const jsonOut = join(tmp, 'out.json');
       const child = spawn('xcrun', ['devicectl', 'device', 'capture', 'screen-record', '--device', udid, '--destination', dest, '--codec', 'h264',
@@ -1003,7 +1087,9 @@ export const backend: Backend & {
   async stopRecording(nid) {
     const rec = recordings.get(nid);
     if (!rec) throw new PhoneDockError('No recording is running on this device', 'not_recording', 404);
+    if (!rec.hevc && !rec.shots && !rec.exited) throw new PhoneDockError('The recording is still starting', 'busy', 409, ['Try again in a few seconds']);
     try {
+      if (rec.hevc) return await rec.hevc.stop();
       if (rec.shots) { await rec.shots.finish(rec.outPath); return rec.outPath; }
       if (rec.child && rec.child.exitCode === null) rec.child.kill('SIGINT');
       const code = await Promise.race([rec.exited!, new Promise<'timeout'>((res) => setTimeout(() => res('timeout'), 60_000))]);
@@ -1098,6 +1184,8 @@ export const backend: Backend & {
     if (live) lockCache.set(udid!, { at: Date.now(), locked });
     const readiness = live ? readinessOf(d as DcDevice, locked, Date.now()) : undefined;
     const summary = live ? infoSummary(d as DcDevice, details as any, displays as any, readiness) : undefined;
-    return { summary, device: d, details, readiness, displays, wdaUrl: base ?? null, wda: wdaInfo, config: cfgFor(nid) ?? null, experimental: true };
+    // liveVideo: what the screen stream is doing right now (null while nobody watches)
+    const liveVideo = udid ? { frames: iosVideoStats(udid) ?? null, feed: iosFeedStats(udid) ?? null } : null;
+    return { summary, device: d, details, readiness, displays, wdaUrl: base ?? null, wda: wdaInfo, config: cfgFor(nid) ?? null, liveVideo, experimental: true };
   },
 };

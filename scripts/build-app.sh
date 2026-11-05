@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Builds dist/PhoneDock.app (SwiftUI app + bundled node + daemon/CLI bundles), then a .zip and a .dmg.
 # Usage: scripts/build-app.sh             local build, ad-hoc signed (runs on this Mac only)
-#        scripts/build-app.sh --release   Developer ID signed, hardened runtime, notarized and stapled DMG
+#        scripts/build-app.sh --release   Developer ID signed, hardened runtime, notarized and stapled DMG, plus the
+#                                         signed update archive's appcast entry (scripts/release-appcast.sh)
 # Release env: PHONEDOCK_NOTARY_PROFILE  notarytool keychain profile (required; see `xcrun notarytool store-credentials`)
 #              PHONEDOCK_SIGN_IDENTITY   signing identity (default: the first "Developer ID Application" in the keychain)
-# Never installs anything into /Applications.
+# Test env:    PHONEDOCK_VERSION, PHONEDOCK_BUILD_NUMBER  override the version and CFBundleVersion (local test builds)
+#              PHONEDOCK_SPARKLE_PUBLIC_KEY               EdDSA public key to embed instead of app/sparkle-public-ed-key.txt
+# Releasing, step by step: docs/RELEASING.md. Never installs anything into /Applications.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$(node -p "require('$ROOT/package.json').version" 2>/dev/null || echo 0.1.0)"
+VERSION="${PHONEDOCK_VERSION:-$(node -p "require('$ROOT/package.json').version" 2>/dev/null || echo 0.1.0)}"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 DIST="${PHONEDOCK_DIST:-$ROOT/dist}"   # override to build somewhere other than dist/
 APP="$DIST/PhoneDock.app"
@@ -19,6 +22,43 @@ case "${1:-}" in
   "") ;;
   *) echo "usage: scripts/build-app.sh [--release]" >&2; exit 2 ;;
 esac
+
+# CFBundleVersion is what Sparkle compares to decide whether an appcast item is newer, so it has to grow with every
+# release. It comes from the version: MAJOR*1000000 + MINOR*1000 + PATCH (0.2.0 → 2000, 1.4.12 → 1004012), so bumping
+# package.json's version is the only step. CFBundleShortVersionString stays the version people see.
+if [ -n "${PHONEDOCK_BUILD_NUMBER:-}" ]; then
+  BUILD_NUMBER="$PHONEDOCK_BUILD_NUMBER"
+elif [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-.*)?$ ]]; then
+  if [ "${BASH_REMATCH[2]}" -ge 1000 ] || [ "${BASH_REMATCH[3]}" -ge 1000 ]; then
+    echo "error: version $VERSION: minor and patch must be below 1000 for the build number" >&2; exit 1
+  fi
+  if [ -n "${BASH_REMATCH[4]}" ] && [ "$RELEASE" = 1 ]; then
+    echo "error: $VERSION is a pre-release and would share its build number with ${VERSION%%-*}; set PHONEDOCK_BUILD_NUMBER" >&2; exit 1
+  fi
+  BUILD_NUMBER=$(( 10#${BASH_REMATCH[1]} * 1000000 + 10#${BASH_REMATCH[2]} * 1000 + 10#${BASH_REMATCH[3]} ))
+else
+  echo "error: version '$VERSION' isn't MAJOR.MINOR.PATCH; set PHONEDOCK_BUILD_NUMBER" >&2; exit 1
+fi
+[[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || { echo "error: PHONEDOCK_BUILD_NUMBER must be a whole number" >&2; exit 1; }
+
+# Auto-update (Sparkle, app/Sources/PhoneDock/UpdateController.swift): the app reads this appcast, which GitHub Pages
+# serves from site/appcast.xml, and installs only archives signed with the private half of this EdDSA key.
+FEED_URL="https://sushilk1991.github.io/phonedock/appcast.xml"
+ED_KEY_FILE="$ROOT/app/sparkle-public-ed-key.txt"
+ED_PUBLIC_KEY="${PHONEDOCK_SPARKLE_PUBLIC_KEY:-}"
+if [ -z "$ED_PUBLIC_KEY" ] && [ -f "$ED_KEY_FILE" ]; then
+  ED_PUBLIC_KEY="$(grep -v '^#' "$ED_KEY_FILE" | tr -d ' \n\r\t')"
+fi
+if [ -n "$ED_PUBLIC_KEY" ] && ! [[ "$ED_PUBLIC_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]]; then
+  echo "error: the Sparkle public key '$ED_PUBLIC_KEY' isn't a base64 EdDSA public key (44 characters)" >&2; exit 1
+fi
+if [ -z "$ED_PUBLIC_KEY" ] && [ "$RELEASE" = 1 ]; then
+  echo "error: no Sparkle public key (SUPublicEDKey), so this release could never update itself." >&2
+  echo "       One-time setup (docs/RELEASING.md): create the key in your login keychain, then save its public half:" >&2
+  echo "         app/.build/artifacts/sparkle/Sparkle/bin/generate_keys --account phonedock" >&2
+  echo "         app/.build/artifacts/sparkle/Sparkle/bin/generate_keys --account phonedock -p > app/sparkle-public-ed-key.txt" >&2
+  exit 1
+fi
 
 # Check release credentials before spending minutes on a build.
 if [ "$RELEASE" = 1 ]; then
@@ -34,13 +74,16 @@ if [ "$RELEASE" = 1 ]; then
   if ! xcrun notarytool history --keychain-profile "$PHONEDOCK_NOTARY_PROFILE" >/dev/null 2>&1; then
     echo "error: notarytool profile '$PHONEDOCK_NOTARY_PROFILE' doesn't work; recreate it with store-credentials" >&2; exit 1
   fi
-  echo "==> Release build, signing as: $IDENTITY"
+  echo "==> Release build $VERSION ($BUILD_NUMBER), signing as: $IDENTITY"
 fi
 mkdir -p "$DIST" "$WORK"
 
 echo "==> Building Swift app (release)"
 swift build -c release --package-path "$ROOT/app"
-BIN="$(swift build -c release --package-path "$ROOT/app" --show-bin-path)/PhoneDock"
+BIN_DIR="$(swift build -c release --package-path "$ROOT/app" --show-bin-path)"
+BIN="$BIN_DIR/PhoneDock"
+SPARKLE_FW="$BIN_DIR/Sparkle.framework"
+[ -d "$SPARKLE_FW" ] || { echo "error: Sparkle.framework is missing from $BIN_DIR" >&2; exit 1; }
 
 echo "==> Bundling daemon + CLI"
 node "$ROOT/scripts/bundle.mjs"
@@ -57,10 +100,33 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$WORK/AppIcon.icns"
 
-echo "==> Assembling $APP"
+# Sparkle's settings: check daily (and soon after each launch, UpdateController.swift) without asking first; never
+# download or install without a click; check the archive's EdDSA signature before unpacking it.
+SPARKLE_PLIST=""
+if [ -n "$ED_PUBLIC_KEY" ]; then
+  SPARKLE_PLIST="  <key>SUFeedURL</key><string>${FEED_URL}</string>
+  <key>SUPublicEDKey</key><string>${ED_PUBLIC_KEY}</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>
+  <key>SUAutomaticallyUpdate</key><false/>
+  <key>SUAllowsAutomaticUpdates</key><false/>
+  <key>SUVerifyUpdateBeforeExtraction</key><true/>
+"
+else
+  echo "    note: no Sparkle public key (app/sparkle-public-ed-key.txt), so this build won't check for updates"
+fi
+
+echo "==> Assembling $APP ($VERSION, build $BUILD_NUMBER)"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/daemon" "$APP/Contents/Resources/cli" "$APP/Contents/Resources/bin"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources/daemon" "$APP/Contents/Resources/cli" "$APP/Contents/Resources/bin"
 cp "$BIN" "$APP/Contents/MacOS/PhoneDock"
+# Sparkle: the binary links @rpath/Sparkle.framework (rpath @executable_path/../Frameworks); ditto keeps its symlinks.
+# Its XPC services are only for sandboxed apps (SUEnableInstallerLauncherService, SUEnableDownloaderService) and
+# PhoneDock isn't sandboxed, so they stay out, with the headers: less code to sign and ship.
+SPK="$APP/Contents/Frameworks/Sparkle.framework"
+ditto "$SPARKLE_FW" "$SPK"
+rm -rf "$SPK/Versions/B/XPCServices" "$SPK/XPCServices" "$SPK/Versions/B/Headers" "$SPK/Headers" \
+       "$SPK/Versions/B/PrivateHeaders" "$SPK/PrivateHeaders" "$SPK/Versions/B/Modules" "$SPK/Modules"
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 # Indigo accent for default buttons, selection and focus (applies when the user's system accent is Multicolor).
 xcrun actool "$ROOT/app/Assets.xcassets" --compile "$APP/Contents/Resources" --platform macosx \
@@ -77,7 +143,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>PhoneDock</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>NSAccentColorName</key><string>AccentColor</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
@@ -95,7 +161,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>_adb-tls-pairing._tcp</string>
     <string>_adb._tcp</string>
   </array>
-</dict>
+${SPARKLE_PLIST}</dict>
 </plist>
 PLIST
 
@@ -156,10 +222,20 @@ if [ "$RELEASE" = 1 ]; then
 </dict>
 </plist>
 ENT
-  # Sign inside-out: nested executables first, then the app.
+  # Sign inside-out: nested code first, then the app. Sparkle's helpers (the installer, and the small app that shows
+  # progress and relaunches PhoneDock) get our Developer ID too: library validation under the hardened runtime and
+  # macOS's App Management check (who may replace this app) both want one team throughout.
+  codesign --force --timestamp --options runtime -s "$IDENTITY" "$SPK/Versions/B/Autoupdate"
+  codesign --force --timestamp --options runtime -s "$IDENTITY" "$SPK/Versions/B/Updater.app"
+  codesign --force --timestamp --options runtime -s "$IDENTITY" "$SPK"
   codesign --force --timestamp --options runtime --entitlements "$NODE_ENT" -s "$IDENTITY" "$APP/Contents/Resources/node"
   codesign --force --timestamp --options runtime -s "$IDENTITY" "$APP"
   codesign --verify --deep --strict "$APP" && echo "    signature ok"
+  TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  for f in "$SPK/Versions/B/Autoupdate" "$SPK/Versions/B/Updater.app" "$SPK" "$APP/Contents/Resources/node"; do
+    t="$(codesign -dv "$f" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [ "$t" = "$TEAM" ] || { echo "error: $f is signed by team '$t', the app by '$TEAM'" >&2; exit 1; }
+  done
 else
   echo "==> Codesigning (ad-hoc; use --release for a build other Macs can open)"
   codesign --force --deep -s - "$APP"
@@ -170,7 +246,7 @@ echo "==> Packaging"
 ZIP="$DIST/PhoneDock-$VERSION.zip"
 DMG="$DIST/PhoneDock-$VERSION.dmg"
 rm -f "$ZIP" "$DMG"
-ditto -c -k --keepParent "$APP" "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 DMGSRC="$WORK/dmg"
 rm -rf "$DMGSRC" && mkdir -p "$DMGSRC"
 cp -R "$APP" "$DMGSRC/"
@@ -194,10 +270,13 @@ if [ "$RELEASE" = 1 ]; then
   # Staple the app too, so the .zip opens offline, then rebuild the zip from the stapled app.
   xcrun stapler staple "$APP" >/dev/null
   xcrun stapler staple "$DMG" >/dev/null
-  rm -f "$ZIP" && ditto -c -k --keepParent "$APP" "$ZIP"
+  # The zip is also the update archive Sparkle downloads; release-appcast.sh signs it below.
+  rm -f "$ZIP" && ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
   spctl --assess --type execute "$APP" && echo "    Gatekeeper accepts the app"
   spctl --assess --type open --context context:primary-signature "$DMG" && echo "    Gatekeeper accepts the DMG"
   shasum -a 256 "$DMG" "$ZIP" | sed "s|$DIST/||" > "$DIST/SHA256SUMS.txt"
+  echo "==> Update archive: EdDSA signature and appcast entry"
+  "$ROOT/scripts/release-appcast.sh" "$ZIP"
 fi
 
 echo

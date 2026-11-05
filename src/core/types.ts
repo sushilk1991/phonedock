@@ -18,7 +18,8 @@ export type Capability =
   | 'install' | 'apps' | 'launch' | 'openUrl'
   | 'shell' | 'files' | 'logs' | 'location' | 'push' | 'rotate' | 'clipboard' | 'root' | 'window'
   | 'record' | 'crashes' | 'appData' | 'doubleTap' | 'pinch' | 'appearance'
-  | 'trace';   // performance trace of one app (startTrace/stopTrace)
+  | 'trace'    // performance trace of one app (startTrace/stopTrace)
+  | 'video';   // live H.264 video (Backend.video, GET /v1/devices/:id/video)
 
 /** System-wide light/dark appearance (iOS "Dark Appearance", Android night mode). */
 export type Appearance = 'dark' | 'light';
@@ -386,6 +387,38 @@ export interface FrameStream {
   restart?(): void;
 }
 
+/** Codec of a live video stream. */
+export type VideoCodec = 'h264' | 'hevc';
+/** What a live video source sends, in order (served as-is by `GET /v1/devices/:id/video`, docs/API.md "Live video").
+ *  A new VideoStream, and the packets after every `reset`, start with what a decoder needs: `screen`, `config`, then a
+ *  key frame and the frames after it (all but the newest marked `replay`: decode them, don't show them). */
+export type VideoPacket =
+  /** The device screen (screenshot pixels: what taps use) and the size of the encoded picture. Sent first and whenever
+   *  either changes (rotation, a new encoder size). */
+  | { type: 'screen'; screen: ScreenInfo; video: { width: number; height: number }; rotation?: number;
+      /** The decoded picture, when it is larger than `video`: show only its top-left `video` part (an iPhone pads its
+       *  picture without saying so in the SPS, e.g. 1328x2896 for a 1320x2868 screen). */
+      coded?: { width: number; height: number } }
+  /** Parameter sets (H.264: SPS + PPS; HEVC: VPS + SPS + PPS), Annex B (each NAL unit after 00 00 00 01). */
+  | { type: 'config'; codec: VideoCodec; data: Buffer }
+  /** One access unit (a picture), Annex B, without parameter sets. `at`: ms since the epoch when the daemon got it. */
+  | { type: 'frame'; data: Buffer; key: boolean; at: number; replay?: boolean }
+  /** `asleep`: the display is off, no frames until it wakes. `live`: frames flow again. */
+  | { type: 'state'; state: 'live' | 'asleep' }
+  /** Throw away the decoder's state: a fresh `screen`/`config`/key frame sequence follows. */
+  | { type: 'reset' };
+
+/** Live H.264/HEVC source. The daemon starts at most one per device and fans its packets out. */
+export interface VideoStream {
+  onPacket(cb: (p: VideoPacket) => void): void;
+  onEnd(cb: (err?: Error) => void): void;
+  stop(): void;
+  /** The screen may have turned: start again at its current size if it did. */
+  restart?(): void;
+  /** A viewer needs a key frame soon (it joined while the frames since the last one were too many to replay). */
+  requestKeyFrame?(): void;
+}
+
 export interface Backend {
   readonly id: string;           // 'android-emulator' | 'android-device' | 'ios-simulator' | 'ios-device' | 'qemu' | 'corellium'
   readonly displayName: string;
@@ -418,6 +451,9 @@ export interface Backend {
   screenshot(nativeId: string): Promise<Buffer>;                    // PNG, full resolution
   screenInfo?(nativeId: string): Promise<ScreenInfo>;
   stream?(nativeId: string, opts?: { maxSize?: number; fps?: number }): FrameStream;
+  /** Live video straight from the device's encoder (additive; `GET /v1/devices/:id/video`). `maxSize` bounds the
+   *  longer side of the encoded picture. Backends that have it share one capture between it and `stream()`. */
+  video?(nativeId: string, opts?: { maxSize?: number }): VideoStream;
   uiTree?(nativeId: string): Promise<UiTree>;
 
   // ── input ──────────────────────────────────────────────────────────────
@@ -466,6 +502,11 @@ export interface Backend {
   /** System-wide dark/light appearance. Android backends without these get `cmd uimode night` via shell(). */
   getAppearance?(nativeId: string): Promise<Appearance | 'unknown'>;
   setAppearance?(nativeId: string, mode: Appearance): Promise<void>;
+  /** The device clipboard's (pasteboard's) plain text; null when it is empty or holds no text. Backends with these
+   *  list the 'clipboard' capability. The text can be secret: never log it or put it in an error. */
+  clipboardGet?(nativeId: string): Promise<string | null>;
+  /** Replace the clipboard with `text` (plain text, may be ""). */
+  clipboardSet?(nativeId: string, text: string): Promise<void>;
 
   // ── performance traces (optional; the daemon returns 501 not_supported when absent) ──
   /** Start tracing one app; files go into `dir` (an empty directory). One trace per device. Resolves once recording

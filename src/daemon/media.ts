@@ -6,6 +6,7 @@ import { runBuffer, run } from '../core/exec.ts';
 import { which } from '../core/paths.ts';
 import { PhoneDockError, type Bounds, type ElementMatch, type UiElement, type UiTree } from '../core/types.ts';
 import { windowsLine } from '../backends/android-windows.ts';
+import { ocrWords, type OcrWord } from '../core/ocr.ts';
 
 export function pngSize(png: Buffer): { width: number; height: number } | undefined {
   if (png.length < 24 || png.readUInt32BE(0) !== 0x89504e47) return undefined;
@@ -291,8 +292,8 @@ export function uncoveredPoint(e: UiElement, c: { x: number; y: number }, bars: 
   return c;
 }
 
-export function toMatch(e: UiElement, tree: UiTree, extra: { exact?: boolean; kb?: ReturnType<typeof keyboardInfo>; kbKeys?: Set<UiElement>; editableBoost?: boolean; bars?: ReturnType<typeof floatingBars> } = {}): ElementMatch {
-  const p = uncoveredPoint(e, tapPoint(e), extra.bars ?? floatingBars(tree));
+export function toMatch(e: UiElement, tree: UiTree, extra: { exact?: boolean; kb?: ReturnType<typeof keyboardInfo>; kbKeys?: Set<UiElement>; editableBoost?: boolean; bars?: ReturnType<typeof floatingBars>; at?: { x: number; y: number } } = {}): ElementMatch {
+  const p = uncoveredPoint(e, extra.at ?? tapPoint(e), extra.bars ?? floatingBars(tree));
   const c = { x: p.x, y: p.y };
   const W = tree.screen.width, H = tree.screen.height;
   const onScreen = !(W && H) || (c.x >= 0 && c.y >= 0 && c.x < W && c.y < H);
@@ -333,10 +334,59 @@ export function findElements(tree: UiTree, q: FindQuery): ElementMatch[] {
     }
     if (!tm && !im && !ty) return;
     if (tm && kbKeys.has(e) && !ty) return; // never match the keyboard's own keys by text ("a", "space", …)
-    out.push({ m: toMatch(e, tree, { exact, kb, kbKeys, editableBoost: q.editable, bars }), i });
+    const at = tm && !exact && tree.source === 'ocr' ? ocrWordTarget(e, q.text!, mode) : undefined;
+    out.push({ m: toMatch(e, tree, { exact, kb, kbKeys, editableBoost: q.editable, bars, at }), i });
   });
   out.sort((a, b) => (b.m.score - a.m.score) || ((a.m.enabled === false ? 1 : 0) - (b.m.enabled === false ? 1 : 0)) || (a.i - b.i));
   return out.map((x) => x.m);
+}
+
+// ── OCR word targets ────────────────────────────────────────────────────────
+// OCR reads whole lines. "Terms" in "I agree to the Terms and Privacy Policy" must be tapped on "Terms", not in the
+// middle of the line, which may be another word or another link.
+const WORD_CH = /[\p{L}\p{N}]/u;
+/** Where `q` matches inside `s`, as [start, end) in the normalized text (spaces collapsed, lower case): the first
+ *  hit that starts and ends on word boundaries, else the first hit (regex: the first non-empty match). Pure. */
+export function matchSpan(s: string, q: string, mode: MatchMode = 'contains'): [number, number] | undefined {
+  const ns = norm(s);
+  if (mode === 'regex') {
+    let re: RegExp; try { re = new RegExp(q, 'gi'); } catch { return undefined; }
+    for (const m of ns.matchAll(re)) if (m[0]) return [m.index, m.index + m[0].length];
+    return undefined;
+  }
+  const nq = norm(q); if (!nq) return undefined;
+  let first: [number, number] | undefined;
+  for (let i = ns.indexOf(nq); i >= 0; i = ns.indexOf(nq, i + 1)) {
+    const end = i + nq.length;
+    if ((i === 0 || !WORD_CH.test(ns[i - 1])) && (end === ns.length || !WORD_CH.test(ns[end]))) return [i, end];
+    first ??= [i, end];
+  }
+  return first;
+}
+/** The box around the words of an OCR line that `span` (from matchSpan on `line`) touches. Words are found in
+ *  order in the line; a word that can't be placed is skipped. Pure. */
+export function wordSpanBounds(line: string, words: OcrWord[], span: [number, number]): Bounds | undefined {
+  const ns = norm(line); let at = 0; let box: Bounds | undefined;
+  for (const w of words) {
+    const nw = norm(w.text); if (!nw) continue;
+    const i = ns.indexOf(nw, at); if (i < 0) continue;
+    at = i + nw.length;
+    if (i < span[1] && at > span[0]) box = unionBounds(box, { x: w.x, y: w.y, width: w.width, height: w.height });
+  }
+  return box;
+}
+/** Tap point for a text query that matches part of an OCR line: the centre of the matched words. undefined (tap the
+ *  line's centre) when the line has no word boxes or the words' centre falls outside the line. */
+export function ocrWordTarget(e: UiElement, q: string, mode: MatchMode = 'contains'): { x: number; y: number } | undefined {
+  const words = ocrWords(e); const text = e.text ?? e.label;
+  if (!words || !text) return undefined;
+  const span = matchSpan(text, q, mode);
+  const b = span && wordSpanBounds(text, words, span);
+  if (!b) return undefined;
+  const c = { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) };
+  const lb = e.bounds; const pad = lb.height / 2;
+  if (c.x < lb.x - pad || c.x > lb.x + lb.width + pad || c.y < lb.y - pad || c.y > lb.y + lb.height + pad) return undefined;
+  return c;
 }
 
 /** For fill: given a matched label (non-editable), the nearest editable element below or to the right of it. */

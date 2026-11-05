@@ -10,7 +10,7 @@ import { PhoneDockError, type Backend, type BootOptions, type Device, type Devic
 import { describePrompt, detectPrompt } from '../core/prompts.ts';
 import {
   acquireLease, backends, checkLease, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
-  loadFailures, logAction, readActions, record, releaseLease, removeRecord, sharedStream, splitId, sseClients, startJob,
+  loadFailures, logAction, readActions, record, releaseLease, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
   stopStreamsFor, restartStreamsFor, withTransition, dropLeaseOnStop, streamStats, uiCache, upsertRecord, pollDevices, withTimeout, stopRecordingFor, fallbackFrame, waitForStreamFrame, type Job,
   assertDeviceAllowed, assertNameAllowed, assertPhysicalAllowed, touchLease, noteScreen,
 } from './core.ts';
@@ -18,12 +18,16 @@ import { HANDLED, Raw, Router, badRequest, notSupported, type Ctx } from './http
 import { metrics } from './metrics.ts';
 import { stopTraceFor } from './trace.ts';
 import { IME_PROBE, imeFrameFrom } from '../backends/android-common.ts';
-import { cleanTree, coarseWhere, findRef, floatingBars, labelAt, jpegSize, mergeOcr, partialRegions, pngSize, tapPoint, transformPng, uiText, uncoveredPoint } from './media.ts';
+import { screenSourceStats } from '../backends/android-video.ts';
+import { cleanTree, coarseWhere, labelAt, jpegSize, mergeOcr, partialRegions, pngSize, transformPng, uiText } from './media.ts';
+import { readUiTree } from './find.ts';
+import { recheckRef, resolveRef } from './refcheck.ts';
 import { ocrUiTree, warmOcr } from '../core/ocr.ts';
 import { inputRoute } from './delivery.ts';
+import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTENT_TYPE, VIDEO_MSG, type VideoSink } from '../core/video.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;
@@ -57,7 +61,7 @@ r.get('/v1/backends', async (c) => {
     }));
     availCache = { at: Date.now(), v };
   }
-  return truthy(c.q('debug')) ? { backends: availCache.v, failures: loadFailures, streams: streamStats() } : availCache.v;
+  return truthy(c.q('debug')) ? { backends: availCache.v, failures: loadFailures, streams: streamStats(), screenSources: screenSourceStats() } : availCache.v;
 });
 r.get('/v1/backends/:backend/images', async (c) => {
   const b = getBackend(c.params.backend);
@@ -364,6 +368,59 @@ r.get('/v1/devices/:id/stream', async (c) => {
   return HANDLED;
 });
 
+// Live video (docs/API.md "Live video"): the device's H.264 as it comes from its encoder, framed. One capture per
+// device is shared by every viewer (and by /frame and /stream); a viewer that falls behind skips frames and resyncs.
+/** A viewer that joins before the stream's first picture gets a screenshot after this long, to show meanwhile. */
+const VIDEO_STILL_MS = 250;
+r.get('/v1/devices/:id/video', async (c) => {
+  const { id, b, nid } = dev(c);
+  if (!b.video) throw notSupported('live video', b.id, ['GET /v1/devices/:id/frame serves JPEG frames']);
+  const maxSize = Math.max(160, Math.min(num(c.q('maxSize'), 1280)!, 4096));
+  const v = sharedVideo(id, maxSize);
+  const res = c.res;
+  res.writeHead(200, { 'Content-Type': VIDEO_CONTENT_TYPE, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', Connection: 'close' });
+  res.socket?.setNoDelay(true);
+  v.viewers++;
+  let open = true; let lastWrite = Date.now(); let sawFrame = false; let stillTimer: NodeJS.Timeout | undefined;
+  const write = (bufs: Buffer[]) => {
+    if (!open) return;
+    for (const x of bufs) res.write(x);
+    lastWrite = Date.now();
+  };
+  const sink: VideoSink = {
+    packet: (p) => { if (p.type === 'frame') sawFrame = true; write(encodeVideoPacket(p)); },
+    backlog: () => res.writableLength,
+  };
+  // Every second without anything else: a viewer can tell a still screen from a dead connection.
+  const ping = setInterval(() => { if (Date.now() - lastWrite >= 900) write([pingMessage()]); }, 1000);
+  const onDrain = () => { if (open) v.fanout.drained(sink); };
+  const close = () => {
+    if (!open) return;
+    open = false; clearInterval(ping); clearTimeout(stillTimer);
+    res.off('drain', onDrain); v.fanout.remove(sink); v.endListeners.delete(onEnd);
+    v.viewers--; v.lastAccess = Date.now();
+  };
+  const onEnd = (e?: Error) => {
+    if (e && open) {
+      const body = Buffer.from(JSON.stringify({ state: 'error', code: (e as PhoneDockError).code ?? 'stream_failed', message: e.message }));
+      write([videoHeader(VIDEO_MSG.state, 0, body.length, Date.now()), body]);
+    }
+    close(); res.end();
+  };
+  v.endListeners.add(onEnd);
+  res.on('drain', onDrain);
+  c.req.on('close', close); res.on('close', close); res.on('error', close);
+  v.fanout.add(sink);
+  // Before the first picture (the encoder can take a second to start): a screenshot, shared by the viewers waiting.
+  stillTimer = setTimeout(() => {
+    if (!open || sawFrame) return;
+    v.still ??= b.screenshot(nid).then((data) => ({ data, at: Date.now() }), () => undefined).finally(() => { setTimeout(() => { v.still = undefined; }, 2000); });
+    void v.still.then((s) => { if (s && open && !sawFrame) write(stillMessage(s.data, s.at)); });
+  }, VIDEO_STILL_MS);
+  if (v.ended) onEnd(v.err);
+  return HANDLED;
+});
+
 r.get('/v1/devices/:id/ui', async (c) => {
   const { id, b, nid } = dev(c);
   // OCR fallback: on by default when the device has no usable accessibility tree (e.g. iPhones without WDA);
@@ -373,7 +430,7 @@ r.get('/v1/devices/:id/ui', async (c) => {
   const ocrFallback = !ocrOff || c.q('source') === 'ocr';
   let tree: UiTree | undefined; let err: unknown;
   if (b.uiTree && c.q('source') !== 'ocr') {
-    try { tree = await b.uiTree(nid); } catch (e) { err = e; }
+    try { tree = await readUiTree({ id, b, nid }); } catch (e) { err = e; }
   }
   if ((!tree || !tree.root.length) && ocrFallback) tree = await ocrUiTree(await b.screenshot(nid));
   else warmOcr();
@@ -424,15 +481,22 @@ export async function runAction(id: string, b: Backend, nid: string, a: InputAct
   switch (a.action) {
     case 'tap': {
       if ('ref' in a && a.ref) {
-        const tree = uiCache.get(id);
-        if (!tree) throw new PhoneDockError("The screen information is out of date", 'stale_ref', 409, ["Refresh the screen information and try again."], `No UI tree cached for ${id}: read the UI first, then tap by ref`);
-        const el = findRef(tree, a.ref);
-        if (!el) throw new PhoneDockError("The screen reference is out of date", 'stale_ref', 409, ["Refresh the screen information and try again."], `Unknown ref ${a.ref}: refs are only valid until the next UI read; read the UI again`);
-        // a row under a floating bar (iOS 26 Settings' search field): tap its part above the bar
-        const p = uncoveredPoint(el, tapPoint(el), floatingBars(tree));
+        // The element the ref names, found again on the screen as it is now (refcheck.ts): tapped where it is, or
+        // nothing is tapped (stale_ref). Its point is above a floating bar that covers its centre (iOS 26 Settings'
+        // search field: tap the row's part above the bar).
+        const d = { id, b, nid };
+        let p = await resolveRef(d, a.ref);
         const kb = await clearImeOver(b, nid, p.x, p.y);
+        if (kb) {   // hiding the keyboard can move the layout again
+          p = await recheckRef(d, p, Date.now()).catch((e: unknown) => {
+            if (e instanceof PhoneDockError) e.detail = `${e.detail ?? ''}\nThe on-screen keyboard covered it, so it was hidden first; the screen changed after that.`.trim();
+            throw e;
+          });
+        }
         await b.tap(nid, p.x, p.y);
-        return { ref: a.ref, x: p.x, y: p.y, element: { type: el.type, text: el.text, label: el.label, id: el.id }, ...(p.coveredBy ? { coveredBy: p.coveredBy, ...(p.hidden ? { hidden: true } : {}) } : {}), ...(kb ? { keyboardHidden: true } : {}) };
+        const el = p.el;
+        return { ref: a.ref, x: p.x, y: p.y, element: { type: el.type, text: el.text, label: el.label, id: el.id }, ...(p.coveredBy ? { coveredBy: p.coveredBy, ...(p.hidden ? { hidden: true } : {}) } : {}), ...(kb ? { keyboardHidden: true } : {}),
+          ...(p.moved ? { moved: p.moved } : {}), refCheck: p.check };
       }
       const t = a as { x: number; y: number; label?: string };
       if (!Number.isFinite(t.x) || !Number.isFinite(t.y)) throw badRequest('tap needs x,y or ref');

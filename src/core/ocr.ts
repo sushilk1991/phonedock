@@ -9,7 +9,17 @@ import { run } from './exec.ts';
 import { stateDir, toolEnv } from './paths.ts';
 import { PhoneDockError, type UiElement, type UiTree } from './types.ts';
 
-interface OcrItem { text: string; confidence: number; x: number; y: number; width: number; height: number }
+/** A word inside an OCR line (pixels, top-left origin). */
+export interface OcrWord { text: string; x: number; y: number; width: number; height: number }
+/** One recognised line. `words`: its whitespace-separated words with their own boxes (lines of two or more words;
+ *  absent from helpers built before word boxes). */
+export interface OcrItem { text: string; confidence: number; x: number; y: number; width: number; height: number; words?: OcrWord[] }
+
+// Word boxes of the Text elements of an OCR tree, kept beside the tree (not in it) so /ui JSON stays as it was.
+// findElements uses them to aim a partial text match at the matched words; copies of an element (cleanTree) have none.
+const WORDS = new WeakMap<UiElement, OcrWord[]>();
+/** The word boxes of an element of a tree from ocrUiTree / ocrTreeFromItems, if its line has them. */
+export function ocrWords(e: UiElement): OcrWord[] | undefined { return WORDS.get(e); }
 
 function helperSource(): string {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -92,16 +102,24 @@ export async function ocrText(png: Buffer, opts: { fast?: boolean } = {}): Promi
 
 /** OCR a screenshot into a flat UiTree of Text elements (bounds in screenshot pixels). */
 export async function ocrUiTree(png: Buffer, opts: { fast?: boolean; minConfidence?: number } = {}): Promise<UiTree> {
-  const { width, height } = pngDims(png);
-  const items = await ocrText(png, opts);
-  const min = opts.minConfidence ?? 0.3;
+  const screen = pngDims(png);
+  return ocrTreeFromItems(await ocrText(png, opts), screen, opts.minConfidence);
+}
+
+/** The helper's lines as a flat UiTree of Text elements, words attached (see ocrWords). Pure. */
+export function ocrTreeFromItems(items: OcrItem[], screen: { width: number; height: number }, minConfidence = 0.3): UiTree {
   const root: UiElement[] = items
-    .filter((i) => i.text.trim() && i.confidence >= min)
+    .filter((i) => i.text.trim() && i.confidence >= minConfidence)
     .sort((a, b) => (a.y - b.y) || (a.x - b.x))
-    .map((i, n) => ({
-      ref: `e${n + 1}`, type: 'Text', text: i.text, label: i.text,
-      bounds: { x: i.x, y: i.y, width: i.width, height: i.height },
-      clickable: true, enabled: true,
-    }));
-  return { source: 'ocr', screen: { width, height }, root, capturedAt: new Date().toISOString() };
+    .map((i, n) => {
+      const e: UiElement = {
+        ref: `e${n + 1}`, type: 'Text', text: i.text, label: i.text,
+        bounds: { x: i.x, y: i.y, width: i.width, height: i.height },
+        clickable: true, enabled: true,
+      };
+      const words = i.words?.filter((w) => w.text.trim() && w.width > 0 && w.height > 0);
+      if (words && words.length > 1) WORDS.set(e, words);
+      return e;
+    });
+  return { source: 'ocr', screen: { width: screen.width, height: screen.height }, root, capturedAt: new Date().toISOString() };
 }
