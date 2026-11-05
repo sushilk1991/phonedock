@@ -9,6 +9,16 @@
     <description>Updates for PhoneDock for Mac</description>
     <language>en</language>
     <item>
+      <title>PhoneDock 0.2.5</title>
+      <pubDate>Thu, 05 Nov 2026 18:36:32 GMT</pubDate>
+      <sparkle:version>2005</sparkle:version>
+      <sparkle:shortVersionString>0.2.5</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+      <sparkle:releaseNotesLink>https://github.com/sushilk1991/phonedock/releases/tag/v0.2.5</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/sushilk1991/phonedock/releases/download/v0.2.5/PhoneDock-0.2.5.zip" length="48782657" type="application/octet-stream" sparkle:edSignature="JLjOf0yroOlGDvSwM0x8GIqleAnCjRTO1wiASyscutMNohRXUBFV/myMhzd6JflagLCWV1xophp2LjOnagewCg=="/>
+    </item>
+    <item>
       <title>PhoneDock 0.2.4</title>
       <pubDate>Thu, 05 Nov 2026 14:54:17 GMT</pubDate>
       <sparkle:version>2004</sparkle:version>
