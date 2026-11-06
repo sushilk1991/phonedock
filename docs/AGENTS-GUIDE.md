@@ -47,6 +47,9 @@ What setup protects:
   different copy is reported as a conflict: `--force` replaces it.
 - **Your skill edits.** A skill file you edited stays as it is unless you pass `--force`; setup still updates
   the other files.
+- **Updates.** After PhoneDock updates, its service brings the skill copies setup installed up to date when it
+  starts, for agents still registered to this PhoneDock. It keeps your edits the same way, never installs a skill
+  setup didn't, and notes what it changed in `daemon.log`.
 - **Other `phonedock` commands.** It never replaces a different `phonedock` file or link on PATH.
 - **Your files.** Every write is atomic, and every file it changes is backed up first to
   `~/Library/Application Support/PhoneDock/setup-backups/<time>/`.

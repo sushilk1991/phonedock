@@ -11,6 +11,7 @@ import './routes-extra.ts'; // v0.2 routes (registers onto `router`; must load a
 import './routes-flow.ts'; // POST /v1/devices/:id/flow (flow save)
 import './routes-trace.ts'; // performance traces (same)
 import './routes-notes.ts'; // app notes (same)
+import { refreshAgentSkills } from './skills.ts';
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
 
 const port = DEFAULT_PORT;
@@ -72,6 +73,7 @@ server.on('error', (e) => { console.error(`[phonedockd] listen failed: ${(e as E
 server.listen(port, '127.0.0.1', () => {
   console.log(`[phonedockd] v${VERSION} listening on http://127.0.0.1:${port} (pid ${process.pid}); backends: ${backends.map((b) => b.id).join(', ')}`);
   void autoStart();
+  refreshAgentSkills(port).catch((e) => console.error(`[phonedockd] skill refresh failed: ${(e as Error).message}`));
 });
 
 async function autoStart() {

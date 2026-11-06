@@ -24,7 +24,7 @@ import { registerFlowTools } from './tools-flow.ts';
 import { notesHint, registerNotesTools } from './tools-notes.ts';
 import { registerTraceTools } from './tools-trace.ts';
 
-const VERSION = '0.2.5';
+const VERSION = '0.2.6';
 const DEFAULT_MAX_SIZE = 1024;
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };

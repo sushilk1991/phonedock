@@ -18,7 +18,7 @@ import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 __all__ = ["PhoneDock", "PhoneDockApiError", "phonedock_home", "read_daemon_info"]
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 DEFAULT_PORT = 47420
 

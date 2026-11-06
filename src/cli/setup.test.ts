@@ -3,10 +3,10 @@
 // phonedock CLI; the verification stages are off (verify: false) or stubbed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CODEX_TOOL_TIMEOUT_SEC, PI_TIMEOUT_SEC, formatReport, resolveContext, runSetup, type Exec, type SetupContext } from './setup.ts';
+import { CODEX_TOOL_TIMEOUT_SEC, PI_TIMEOUT_SEC, formatReport, refreshSkills, resolveContext, runSetup, type Exec, type SetupContext } from './setup.ts';
 import { readTomlServer, removeTomlServer, setTomlServerKey, tomlServerBlock, upsertTomlServer } from './setup-files.ts';
 
 const SKILL = '---\nname: phonedock\ndescription: test skill\n---\n\n# PhoneDock\n';
@@ -423,4 +423,66 @@ test('verification stages: a stubbed probe fills stages 1-6 and picks the try-it
   assert.match(r.stages[4].fix!, /iPhone simulators: Install Xcode/);
   assert.ok(r.ok);
   assert.ok(r.restart.some((x) => x.agent === 'cursor'));
+});
+
+test('refreshSkills: after an update, the copies setup installed take the new skill; a second run changes nothing', async () => {
+  const s = sandbox();
+  await runSetup(await ctxFor(s), { agents: ['claude', 'codex'], verify: false });
+  const claudeDir = join(s.home, '.claude', 'skills', 'phonedock'); const shared = join(s.home, '.agents', 'skills', 'phonedock');
+  writeFileSync(join(s.skill, 'SKILL.md'), SKILL + '\nNew upstream text.\n');   // the app updated
+  writeFileSync(join(s.skill, 'references', 'recipes.md'), '# Recipes\n');       // with a new file
+  const before = snapshot(join(s.home, '.codex'));
+  const r = refreshSkills(await ctxFor(s, { now: new Date('2026-11-06T09:00:00Z') }));
+  assert.deepEqual(actions({ changes: r }), ['skill:claude:update', 'skill:codex:update']);
+  for (const d of [claudeDir, shared]) {
+    assert.match(read(join(d, 'SKILL.md')), /New upstream text/);
+    assert.equal(read(join(d, 'references', 'recipes.md')), '# Recipes\n');
+    assert.ok(json(join(d, '.phonedock-skill.json')).files['references/recipes.md']);
+  }
+  assert.deepEqual(snapshot(join(s.home, '.codex')), before, 'MCP entries are not touched');
+  assert.ok(!existsSync(join(s.home, '.cursor')), 'no client is set up by a refresh');
+  assert.deepEqual(refreshSkills(await ctxFor(s)), []);
+  const again = await runSetup(await ctxFor(s), { agents: ['claude', 'codex'], dryRun: true });
+  assert.deepEqual(actions(again).filter((a) => a.startsWith('skill')), ['skill:claude:none', 'skill:codex:none']);
+});
+
+test('refreshSkills: keeps the user\'s edits and says so when this version changes the same file', async () => {
+  const s = sandbox();
+  await runSetup(await ctxFor(s), { agents: ['claude', 'pi'], verify: false });
+  const mine = join(s.home, '.claude', 'skills', 'phonedock', 'SKILL.md');
+  writeFileSync(mine, SKILL + '\nMy own notes.\n');
+  writeFileSync(join(s.home, '.agents', 'skills', 'phonedock', 'references', 'cli.md'), '# my cli notes\n');
+  writeFileSync(join(s.skill, 'SKILL.md'), SKILL + '\nNew upstream text.\n');
+  const r = refreshSkills(await ctxFor(s));
+  assert.deepEqual(actions({ changes: r }), ['skill:claude:conflict', 'skill:pi:update']);
+  assert.match(r[0].detail, /you edited SKILL\.md, which this version also changes: kept yours/);
+  assert.match(r[1].detail, /your edits to references\/cli\.md are kept/);
+  assert.match(read(mine), /My own notes/);
+  assert.match(read(join(s.home, '.agents', 'skills', 'phonedock', 'SKILL.md')), /New upstream text/);
+  assert.equal(read(join(s.home, '.agents', 'skills', 'phonedock', 'references', 'cli.md')), '# my cli notes\n');
+});
+
+test('refreshSkills: leaves skills alone unless setup installed them for an agent that runs this PhoneDock', async () => {
+  const s = sandbox();
+  // Claude Code was set up, then registered to another copy; Codex never was, but has a hand-copied skill.
+  await runSetup(await ctxFor(s), { agents: ['claude'], verify: false });
+  const claudeJson = join(s.home, '.claude.json');
+  writeFileSync(claudeJson, JSON.stringify({ mcpServers: { phonedock: { type: 'stdio', command: '/elsewhere/bin/phonedock', args: ['mcp'] } } }));
+  const shared = join(s.home, '.agents', 'skills', 'phonedock');
+  mkdirSync(shared, { recursive: true }); writeFileSync(join(shared, 'SKILL.md'), 'hand-copied');
+  writeFileSync(join(s.skill, 'SKILL.md'), SKILL + '\nNew upstream text.\n');
+  const home = snapshot(s.home);
+  assert.deepEqual(refreshSkills(await ctxFor(s)), []);
+  // Codex registered to this copy, but its skill folder wasn't installed by setup: still untouched.
+  mkdirSync(join(s.home, '.codex'), { recursive: true });
+  writeFileSync(join(s.home, '.codex', 'config.toml'), tomlServerBlock('phonedock', s.cli, ['mcp'], {}, CODEX_TOOL_TIMEOUT_SEC));
+  assert.deepEqual(refreshSkills(await ctxFor(s)), []);
+  assert.equal(read(join(shared, 'SKILL.md')), 'hand-copied');
+  delete home[join(s.home, '.codex', 'config.toml')];
+  const after = snapshot(s.home); delete after[join(s.home, '.codex', 'config.toml')];
+  assert.deepEqual(after, home);
+  // Pi set up with no skill folder at all: a refresh never installs one.
+  rmSync(shared, { recursive: true });
+  assert.deepEqual(refreshSkills(await ctxFor(s)), []);
+  assert.ok(!existsSync(shared));
 });

@@ -1,6 +1,6 @@
 {
   "name": "phonedock",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Lets coding agents use Android emulators, iOS simulators and real phones, with an MCP server, a CLI and SDKs",
   "type": "module",
   "license": "Apache-2.0",

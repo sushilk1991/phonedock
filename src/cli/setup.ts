@@ -40,7 +40,7 @@ const PI_DESCRIPTION = 'Android and iOS phones, emulators and simulators: create
 const MANIFEST = '.phonedock-skill.json';
 export const TRY_PROMPT_IOS = 'Use PhoneDock to create an iPhone simulator, open Settings and turn on Dark Mode.';
 export const TRY_PROMPT_ANDROID = 'Use PhoneDock to create an Android phone, open Settings and turn on Dark Mode.';
-const VERSION = '0.2.5';
+const VERSION = '0.2.6';
 
 export type Exec = (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
@@ -479,6 +479,29 @@ function planSkills(ctx: SetupContext, agents: AgentId[], force: boolean): Chang
     const steps = p.action === 'add' || p.action === 'update' ? [`copy ${tilde(ctx, ctx.skillSrc)}/ → ${tilde(ctx, dir)}/`] : [];
     return { item: 'skill', agents: as, action: p.action, target: dir, detail: `${tilde(ctx, dir)}: ${p.detail}`, steps, forceable: p.action === 'conflict', force };
   });
+}
+
+/**
+ * Bring the skill copies an earlier setup installed up to date with this version. The daemon runs this when it
+ * starts: an app update replaces the MCP server agents run, but not their copies of the skill. Only a folder with
+ * setup's manifest, and only while an agent that reads it is registered to run this CLI, so the skill always
+ * describes the server the agent actually starts. Never installs a missing skill, keeps files the user edited (as
+ * setup does) and backs up what it changes. Returns what it did or left alone; folders already up to date are omitted.
+ */
+export function refreshSkills(ctx: SetupContext): Change[] {
+  const out: Change[] = [];
+  const backups = new Backups(ctx);
+  for (const [dir, as] of skillTargets(ctx, [...AGENTS])) {
+    const users = as.filter((a) => runsThisCli(ctx, readEntry(ctx, a).entry));
+    if (!users.length || !readManifest(dir)) continue;
+    const p = planSkill(ctx, dir, false);
+    const c: Change = { item: 'skill', agents: users, action: p.action, target: dir, detail: `${tilde(ctx, dir)}: ${p.detail}`, steps: [] };
+    if (p.action === 'update') {
+      try { applySkill(ctx, c, backups); } catch (e) { c.action = 'error'; c.detail = `${c.detail}: ${(e as Error).message}`; }
+    }
+    if (c.action !== 'none') out.push(c);
+  }
+  return out;
 }
 
 function planUninstall(ctx: SetupContext, clients: ClientInfo[], agents: AgentId[], force: boolean): Change[] {
