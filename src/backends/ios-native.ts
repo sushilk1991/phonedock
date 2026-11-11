@@ -7,11 +7,13 @@
 // Verified read-only on an iPhone 16 Pro Max (iPhone17,2), iOS 27.0, Wi-Fi paired, 2026-11-03: connect ~1.6 s,
 // status ~0.2 s, screenshot 0.35-0.8 s (PNG size dependent), apps ~0.2 s, uiTree ~1.1-1.7 s fresh.
 import { spawn, type ChildProcess } from 'node:child_process';
+import { assertInputFence } from '../core/input-fence.ts';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { which } from '../core/paths.ts';
+import { pymd3Python } from './pymd3-python.ts';
+import type { PasteBegin, PasteFinish } from './ios-input.ts';
 import { PhoneDockError, type AppInfo, type UiElement, type UiTree } from '../core/types.ts';
 
 const IDLE_MS = Number(process.env.PHONEDOCK_IOS_NATIVE_IDLE_MS ?? 10 * 60_000);
@@ -27,7 +29,7 @@ const STATUS: Record<string, number> = {
   developer_mode_off: 409, ui_automation_off: 409, ios_too_old: 409, ddi_missing: 409, stream_busy: 409,
   stream_failed: 502, busy: 409, locked: 423, local_network_denied: 403, device_timeout: 504, pair_timeout: 408,
   pair_failed: 502, connection_lost: 502, usbmuxd_unavailable: 503, sidecar_crashed: 502, sidecar_unavailable: 503,
-  cancelled: 503, internal: 500,
+  cancelled: 503, clipboard_failed: 502, internal: 500,
 };
 
 /** Per-command timeouts (ms); the sidecar applies its own device timeouts inside these. */
@@ -43,33 +45,12 @@ function timeoutFor(cmd: string, args: Record<string, unknown>): number {
     default: return 30_000;
   }
 }
-const READ_ONLY = new Set(['ping', 'status', 'devices', 'screenshot', 'apps', 'ui', 'clipboard_get']);
+const READ_ONLY = new Set(['ping', 'status', 'devices', 'screenshot', 'apps', 'ui', 'clipboard_get', 'clipboard_snapshot', 'logs']);
 
 // ── discovery ──────────────────────────────────────────────────────────────
 
-let pyCache: string | null | undefined;
-/** The python of the installed pymobiledevice3 (uv/pipx venv), from its launcher's shebang.
- *  `PHONEDOCK_PYMD3_PYTHON` overrides. Handles the `#!/bin/sh` + `'''exec' <python>` trampoline of long paths. */
-export function nativePython(): string | undefined {
-  if (process.env.PHONEDOCK_PYMD3_PYTHON) return process.env.PHONEDOCK_PYMD3_PYTHON;
-  if (pyCache !== undefined) return pyCache ?? undefined;
-  pyCache = null;
-  const cands: string[] = [];
-  const bin = which('pymobiledevice3');
-  if (bin) {
-    try {
-      const head = readFileSync(bin, 'utf8').slice(0, 600).split('\n');
-      const m = /^#!\s*(\S+)/.exec(head[0] ?? '');
-      if (m && !/\/(ba|z)?sh$/.test(m[1])) cands.push(m[1]);
-      const tramp = /^'''exec'\s+'?([^'\s]+)'?/.exec(head[1] ?? '');
-      if (tramp) cands.push(tramp[1]);
-    } catch { /* unreadable launcher */ }
-  }
-  const home = process.env.HOME ?? '';
-  cands.push(join(home, '.local/share/uv/tools/pymobiledevice3/bin/python'), join(home, '.local/pipx/venvs/pymobiledevice3/bin/python'));
-  pyCache = cands.find((c) => existsSync(c)) ?? null;
-  return pyCache ?? undefined;
-}
+/** Shared with the HID/video sidecar, including uv/pipx trampoline launchers. */
+export const nativePython = pymd3Python;
 
 export function nativeSidecarScript(): string | undefined {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -223,6 +204,7 @@ class NativeSidecar {
   async request<T = any>(cmd: string, args: Record<string, unknown> = {}, opts: RequestOptions = {}, retried = false): Promise<T> {
     this.closed = false;
     await this.start();
+    assertInputFence();
     this.touch();
     const id = this.nextId++;
     const child = this.child!;
@@ -358,8 +340,11 @@ export interface NativeSession {
   terminate(bundleId: string): Promise<boolean>;
   openUrl(url: string, bundleId?: string): Promise<void>;
   rotate(orientation: 'portrait' | 'landscape' | 'landscapeLeft' | 'landscapeRight' | 'portraitUpsideDown'): Promise<string | null>;
+  logs(opts?: { lines?: number; filter?: string; appId?: string }): Promise<string>;
   clipboardGet(): Promise<string | null>;
   clipboardSet(text: string): Promise<void>;
+  clipboardBegin(text: string, secret?: boolean): Promise<PasteBegin>;
+  clipboardFinish(token: string, confirmed: boolean): Promise<PasteFinish>;
   appearance(style?: 'dark' | 'light'): Promise<string>;
   close(): void;
 }
@@ -393,8 +378,11 @@ export function nativeSession(udid: string, opts: { transport?: NativeTransport 
     async terminate(bundleId) { return !!(await req<{ terminated: boolean }>('terminate', { bundleId })).terminated; },
     async openUrl(url, bundleId) { await req('open_url', bundleId ? { url, bundleId } : { url }); },
     async rotate(orientation) { return (await req<{ orientation: string | null }>('rotate', { orientation })).orientation; },
+    async logs(o = {}) { return (await req<{ text: string }>('logs', o)).text; },
     async clipboardGet() { return (await req<{ text: string | null }>('clipboard_get')).text; },
     async clipboardSet(text) { await req('clipboard_set', { text }); },
+    clipboardBegin: (text, secret = false) => req('clipboard_begin', { text, secret }),
+    clipboardFinish: (token, confirmed) => req('clipboard_finish', { token, confirmed }),
     async appearance(style) { return (await req<{ style: string }>('appearance', style ? { style } : {})).style; },
     close: () => { sc.stop(); sidecars.delete(sc.key); },
   };
@@ -423,7 +411,7 @@ export function toUiTree(r: NativeUiResult): UiTree {
   if (children.length) app.children = children;
   const renum = (els: UiElement[]) => { for (const e of els) { e.ref = `e${++n}`; if (e.children) renum(e.children); } };
   renum([app]);
-  return { source: 'accessibility', screen: { width, height, scale }, root: [app], capturedAt: new Date(Date.now() - (r.ageMs ?? 0)).toISOString() };
+  return { source: 'accessibility', screen: { width, height, scale }, root: [app], generation: r.generation, complete: r.complete, app: { ...r.app }, capturedAt: new Date(Date.now() - (r.ageMs ?? 0)).toISOString() };
 }
 
 /** Convenience for ios-device.ts: the UI tree of a real iPhone (iOS 27+) without WDA. */
@@ -462,7 +450,7 @@ export async function pairWifi(onCode: (code: string) => void,
 export async function nativeAvailability(): Promise<{ ok: boolean; reason?: string; pymobiledevice3?: string }> {
   const py = nativePython();
   const script = nativeSidecarScript();
-  if (!py) return { ok: false, reason: 'pymobiledevice3 not found (uv tool install pymobiledevice3)' };
+  if (!py) return { ok: false, reason: 'pymobiledevice3 needs Python 3.11 or newer (uv tool install --python 3.12 pymobiledevice3)' };
   if (!script) return { ok: false, reason: 'tools/pd-ios-native.py not found' };
   return await new Promise((res) => {
     const c = spawn(py, ['-I', script, '--check'], { stdio: ['ignore', 'pipe', 'ignore'] });

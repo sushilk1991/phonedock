@@ -3,6 +3,7 @@
 // and every call uses a short-lived connection (robust across daemon restarts and VM reboots).
 import { createConnection } from 'node:net';
 import { PhoneDockError } from '../core/types.ts';
+import { assertInputFence } from '../core/input-fence.ts';
 
 const chains = new Map<string, Promise<unknown>>();
 
@@ -29,7 +30,7 @@ export function qmpBatch(sock: string, cmds: QmpCommand[], timeoutMs = 15_000): 
       if (err) reject(err); else resolve(results);
     };
     const timer = setTimeout(() => finish(new PhoneDockError("The virtual device action timed out", 'timeout', 504, undefined, `QMP timeout (${cmds.map((c) => c.execute).join(',')})`)), timeoutMs);
-    const send = (o: unknown) => conn.write(JSON.stringify(o) + '\n');
+    const send = (o: unknown) => { try { assertInputFence(); conn.write(JSON.stringify(o) + '\n'); } catch (e) { finish(e as Error); } };
     conn.on('error', (e) => finish(new PhoneDockError("Couldn’t connect to the virtual device", 'qmp_unavailable', 409, undefined, `QMP connect ${sock}: ${e.message}`)));
     conn.on('close', () => { if (!done) finish(new PhoneDockError("The virtual device connection closed", 'qmp_closed', 500, undefined, 'QMP connection closed')); });
     conn.on('data', (d) => {

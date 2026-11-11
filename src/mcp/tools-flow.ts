@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { parseFlow } from '../core/flow.ts';
 import { collectFlowFiles, displayPath, junitXml, runFlow, runFlowFiles, type SuiteResult } from '../core/flow-runner.ts';
+import { writeSuiteReport } from '../core/flow-report.ts';
 import { phonedockHome } from '../sdk/client.ts';
 import type { ToolKit } from './server.ts';
 
@@ -58,6 +59,9 @@ export function registerFlowTools(k: ToolKit): void {
     path: z.string().optional().describe('Flow file, or a folder of flows (*.yaml, *.yml, *.json)'),
     flow: z.string().optional().describe('Alternative to path: the flow YAML itself'),
     artifacts_dir: z.string().optional().describe('Where failure artifacts go (default <PhoneDock home>/test-runs/<time>)'),
+    baseline_root: z.string().optional().describe('Approved baseline directory (default current directory); paths and symlinks outside it are refused'),
+    baseline_mode: z.enum(['compare', 'record', 'update']).optional().describe('compare (default): missing baselines fail; record: create missing baselines; update: replace baselines explicitly'),
+    capture_steps: z.boolean().optional().describe('Capture before/after screenshots for actions in the HTML report (default false; adds latency and includes original screen pixels)'),
     junit: z.string().optional().describe('Also write JUnit XML to this file'),
     retries: z.number().int().min(0).max(5).optional().describe('Run a failed flow again up to N times (default 0)'),
     timeout_ms: z.number().int().min(100).max(120_000).optional().describe('Default wait for elements and assertions (default 10000)'),
@@ -75,13 +79,15 @@ export function registerFlowTools(k: ToolKit): void {
         void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++n, message: l.trim().split('\n')[0] } }).catch(() => {});
       }
     };
-    const opts = { deviceId: d.id, artifactsDir, retries: a.retries, timeoutMs: a.timeout_ms, env: a.env, log, signal: extra?.signal };
+    const opts = { deviceId: d.id, artifactsDir, retries: a.retries, timeoutMs: a.timeout_ms, env: a.env, log, signal: extra?.signal,
+      baselineRoot: resolve(expandHome(a.baseline_root ?? process.cwd())), baselineMode: a.baseline_mode, captureSteps: a.capture_steps };
     let suite: SuiteResult;
     if (a.flow) {
       const f = parseFlow(a.flow, join(tmpdir(), 'inline-flow.yaml'));
       f.file = undefined;
       const t0 = Date.now(); const r = await runFlow(c, f, opts);
       suite = { flows: [r], passed: r.status === 'pass' ? 1 : 0, failed: r.status === 'fail' ? 1 : 0, skipped: r.status === 'skip' ? 1 : 0, ms: Date.now() - t0, artifactsDir };
+      suite.report = writeSuiteReport(suite);
       lines.push(`${r.status.toUpperCase()}  ${r.name}${r.message && r.status !== 'pass' ? `: ${r.message.split('\n')[0]}` : ''}`);
     } else {
       const files = collectFlowFiles([resolve(expandHome(a.path!))]);
@@ -91,8 +97,8 @@ export function registerFlowTools(k: ToolKit): void {
     if (a.junit) { const j = resolve(expandHome(a.junit)); mkdirSync(dirname(j), { recursive: true }); writeFileSync(j, junitXml(suite)); lines.push(`JUnit: ${j}`); }
     const ok = suite.failed === 0 && suite.passed > 0;
     const head = `${ok ? 'PASSED' : 'FAILED'}: ${suite.passed} passed, ${suite.failed} failed, ${suite.skipped} skipped on ${d.name} (${(suite.ms / 1000).toFixed(1)} s).`;
-    const arts = suite.flows.filter((f) => f.artifacts).map((f) => `Artifacts for "${f.name}": ${f.artifacts} (failure.png, ui.txt, logs.txt, steps.txt)`);
-    return { content: [text([head, ...arts, '', ...lines].join('\n').trimEnd())], ...(ok ? {} : { isError: true }) };
+    const arts = suite.flows.filter((f) => f.artifacts).map((f) => `Artifacts for "${f.name}": ${f.artifacts} (report.html, screenshots and available diagnostics)`);
+    return { content: [text([head, ...(suite.report ? [`Report: ${suite.report}`] : []), ...arts, '', ...lines].join('\n').trimEnd())], ...(ok ? {} : { isError: true }) };
   });
 }
 

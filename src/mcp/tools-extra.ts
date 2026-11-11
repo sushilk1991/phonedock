@@ -71,7 +71,7 @@ export function registerExtraTools(k: ToolKit): void {
       else txt = t;
     }
     const body: Record<string, unknown> = { value: a.value, clear: a.clear, submit: a.submit, secret: a.secret, match: a.match, index: a.index, type: a.element_type, ...(expect ? { expect } : {}) };
-    if (ref) body.ref = ref;
+    if (ref) { body.ref = ref; const snapshotId = k.ctx.snapshots?.get(d.id); if (snapshotId) body.snapshotId = snapshotId; }
     else if (txt || id || a.element_type) { body.text = txt; body.id = id; }
     else if (a.x !== undefined && a.y !== undefined) { const [x, y] = await toDevice(d, a.x, a.y, a.coordinate_space); body.x = x; body.y = y; }
     else throw new Error('Pass target (or text / ref / element_id), or x and y');
@@ -111,6 +111,11 @@ export function registerExtraTools(k: ToolKit): void {
     const d = await target(a.device);
     if (a.until !== 'idle' && !a.text && !a.element_id && !a.element_type) throw new Error(`until="${a.until}" needs text, element_id or element_type`);
     const r = await c.waitFor(d.id, { until: a.until, text: a.text, id: a.element_id, type: a.element_type, match: a.match, timeoutMs: a.timeout_ms ?? 10_000, intervalMs: a.interval_ms, stableMs: a.stable_ms });
+    if (a.until === 'visible') {
+      k.ctx.snapshots ??= new Map();
+      if (r.snapshotId) k.ctx.snapshots.set(d.id, r.snapshotId); else k.ctx.snapshots.delete(d.id);
+      k.spaceOf(d, r.screen);
+    }
     const sc = await imgScale(d);
     let msg: string;
     if (a.until === 'visible') msg = `Visible after ${secs(r.elapsedMs)}: ${r.match ? describeMatch(r.match, sc) : '?'}${(r.matches?.length ?? 0) > 1 ? ` (+${r.matches!.length - 1} more)` : ''}.`;

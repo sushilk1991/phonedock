@@ -57,7 +57,7 @@ export type Step = StepBase & (
   | { kind: 'sleep'; ms: number }
   | { kind: 'assert_visible' | 'assert_not_visible'; sel: Selector }
   | { kind: 'assert_text'; field: Selector; equals?: string; contains?: string; matches?: string }
-  | { kind: 'screenshot'; name: string; baseline?: string; tolerance?: number }
+  | { kind: 'screenshot'; name: string; baseline?: string; tolerance?: number; comparison?: 'pixel' | 'thumbnail'; pixelThreshold?: number; ignore?: { x: number; y: number; width: number; height: number }[] }
 );
 export type StepKind = Step['kind'];
 
@@ -308,8 +308,22 @@ export function parseStep(raw: unknown): Step {
     }
     case 'screenshot': {
       if (o) {
-        only(o, ['name', 'baseline', 'tolerance'], 'screenshot');
-        return { ...base, kind, name: str(o.name) ?? 'checkpoint', ...(o.baseline !== undefined ? { baseline: str(o.baseline) } : {}), ...(o.tolerance !== undefined ? { tolerance: Number(o.tolerance) } : {}) };
+        only(o, ['name', 'baseline', 'tolerance', 'comparison', 'pixelThreshold', 'ignore'], 'screenshot');
+        const s: Step = { ...base, kind, name: str(o.name) ?? 'checkpoint' };
+        if (o.baseline !== undefined) { if (typeof o.baseline !== 'string' || !o.baseline.trim()) throw new Error('baseline must be a non-empty path'); s.baseline = o.baseline; }
+        if (o.tolerance !== undefined) { const n = Number(o.tolerance); if (!Number.isFinite(n) || n < 0 || n > 1) throw new Error('tolerance must be between 0 and 1'); s.tolerance = n; }
+        if (o.comparison !== undefined) { if (o.comparison !== 'pixel' && o.comparison !== 'thumbnail') throw new Error('comparison must be pixel or thumbnail'); s.comparison = o.comparison; }
+        if (o.pixelThreshold !== undefined) { const n = Number(o.pixelThreshold); if (!Number.isFinite(n) || n < 0 || n > 255) throw new Error('pixelThreshold must be between 0 and 255'); s.pixelThreshold = n; }
+        if (o.ignore !== undefined) {
+          if (!Array.isArray(o.ignore)) throw new Error('ignore must be a list of pixel rectangles');
+          s.ignore = o.ignore.map((r) => {
+            if (!isObj(r)) throw new Error('ignore requires rectangles with x, y, width, height');
+            only(r, ['x', 'y', 'width', 'height'], 'ignored rectangle');
+            if (![r.x, r.y, r.width, r.height].every((n) => typeof n === 'number' && Number.isFinite(n)) || Number(r.width) < 0 || Number(r.height) < 0) throw new Error('ignore requires finite pixel rectangles with non-negative sizes');
+            return { x: Number(r.x), y: Number(r.y), width: Number(r.width), height: Number(r.height) };
+          });
+        }
+        return s;
       }
       return { ...base, kind, name: str(arg) ?? 'checkpoint' };
     }
@@ -370,7 +384,7 @@ export function stepOut(s: Step): unknown {
     case 'sleep': body = s.ms; break;
     case 'assert_visible': case 'assert_not_visible': body = selectorOut(s.sel); break;
     case 'assert_text': body = { field: selectorOut(s.field), ...(s.equals !== undefined ? { equals: s.equals } : {}), ...(s.contains !== undefined ? { contains: s.contains } : {}), ...(s.matches !== undefined ? { matches: s.matches } : {}) }; break;
-    case 'screenshot': body = s.baseline || s.tolerance !== undefined ? { name: s.name, ...(s.baseline ? { baseline: s.baseline } : {}), ...(s.tolerance !== undefined ? { tolerance: s.tolerance } : {}) } : s.name; break;
+    case 'screenshot': body = s.baseline || s.tolerance !== undefined || s.comparison || s.pixelThreshold !== undefined || s.ignore ? { name: s.name, ...(s.baseline ? { baseline: s.baseline } : {}), ...(s.tolerance !== undefined ? { tolerance: s.tolerance } : {}), ...(s.comparison ? { comparison: s.comparison } : {}), ...(s.pixelThreshold !== undefined ? { pixelThreshold: s.pixelThreshold } : {}), ...(s.ignore ? { ignore: s.ignore } : {}) } : s.name; break;
   }
   if (body === null && !Object.keys(mods).length) return s.kind;
   return { [s.kind]: body, ...mods };

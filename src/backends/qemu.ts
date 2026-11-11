@@ -13,7 +13,7 @@ import { stateDir, which, toolEnv } from '../core/paths.ts';
 import { qmp, qmpBatch, hmp, type QmpCommand } from './qmp.ts';
 
 const ID = 'qemu';
-const CAPS: Capability[] = ['boot', 'shutdown', 'delete', 'clone', 'snapshot', 'screenshot', 'tap', 'longPress', 'swipe', 'type', 'key', 'logs', 'window'];
+const CAPS: Capability[] = ['boot', 'shutdown', 'delete', 'clone', 'snapshot', 'screenshot', 'ocr', 'tap', 'longPress', 'swipe', 'type', 'key', 'logs', 'window'];
 const ABS_MAX = 0x7fff;
 
 type Arch = 'aarch64' | 'x86_64';

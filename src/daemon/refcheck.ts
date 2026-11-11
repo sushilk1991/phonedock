@@ -5,7 +5,9 @@
 // the same element is found anew; when that can't be done safely, nothing is tapped (stale_ref). A wrong tap is far
 // worse than a refused one. Used by POST /input (`tap {ref}`) and POST /fill (`ref`).
 import { PhoneDockError, type ScreenInfo, type UiElement, type UiTree } from '../core/types.ts';
-import { lastActionAt, uiCache } from './core.ts';
+import { actionCount, lastActionAt, uiCache } from './core.ts';
+import { inputScope } from './execution.ts';
+import { getSnapshot } from './snapshots.ts';
 import { ocrTree, recentTree, type Dev } from './find.ts';
 import { findRef, flatten, floatingBars, isEditable, shortId, shortType, tapPoint, uncoveredPoint } from './media.ts';
 
@@ -187,8 +189,8 @@ export function staleRef(detail: string): PhoneDockError {
 
 /** The element `ref` names in the tree the client last read, found again on the screen as it is now (see relocateRef).
  *  Throws stale_ref, having tapped nothing, when there is no such tree or ref, or the element can't be told apart. */
-export async function resolveRef(d: Dev, ref: string): Promise<RefTarget> {
-  const tree = uiCache.get(d.id);
+export async function resolveRef(d: Dev, ref: string, snapshotId = inputScope()?.snapshotId): Promise<RefTarget> {
+  const tree = snapshotId ? getSnapshot(d.id, snapshotId) : uiCache.get(d.id);
   if (!tree) throw new PhoneDockError("The screen information is out of date", 'stale_ref', 409, ["Refresh the screen information and try again."], `No UI tree cached for ${d.id}: read the UI first, then tap by ref`);
   const el = findRef(tree, ref);
   if (!el) throw new PhoneDockError("The screen reference is out of date", 'stale_ref', 409, ["Refresh the screen information and try again."], `Unknown ref ${ref}: refs are only valid until the next UI read; read the UI again`);
@@ -207,7 +209,7 @@ async function check(d: Dev, tree: UiTree, el: UiElement, since: number, first: 
   const t0 = Date.now();
   const capturedAt = Date.parse(tree.capturedAt);
   const asRead = (via: RefCheckVia): RefTarget => ({ el, tree, ...uncoveredPoint(el, tapPoint(el), floatingBars(tree)), check: { via, ms: Date.now() - t0 } });
-  if (first && capturedAt >= since && t0 - capturedAt < TRUST_MS) return asRead('recent');
+  if (first && (tree.actionGeneration === undefined || tree.actionGeneration === (actionCount.get(d.id) ?? 0)) && capturedAt >= since && t0 - capturedAt < TRUST_MS) return asRead('recent');
   const ocr = tree.source === 'ocr' || !!el.ocr;
   let fresh: UiTree | undefined; let via: RefCheckVia = 'read'; let err: unknown;
   try {

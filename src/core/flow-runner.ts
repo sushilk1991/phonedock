@@ -3,14 +3,17 @@
 // flow doesn't depend on timing. A failed step fails the flow (unless `optional: true`); the runner then saves a
 // screenshot, the UI tree and recent logs into the artifacts folder, and the message names what was expected and
 // what was on screen instead ("Screen now: …").
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { PhoneDockClient } from '../sdk/client.ts';
 import type { Device, ElementMatch } from './types.ts';
 import {
   FlowError, compareVersions, describeSelector, describeStep, interpolateStep, osVersionNumber, parseFlow,
   type Flow, type Point, type Selector, type Step,
 } from './flow.ts';
+import { compareImages, type ImageComparisonOptions } from './image-comparison.ts';
+import { redactText, redactValue, writeFlowReport, writeSuiteReport } from './flow-report.ts';
 
 /** The part of PhoneDockClient the runner uses (tests pass a fake). */
 export type FlowClient = Pick<PhoneDockClient, 'owner' | 'device' | 'lease' | 'releaseLease' | 'launch' | 'terminate' | 'openUrl' | 'setAppearance'
@@ -19,13 +22,16 @@ export type FlowClient = Pick<PhoneDockClient, 'owner' | 'device' | 'lease' | 'r
   & Partial<Pick<PhoneDockClient, 'apps'>>;
 
 export type StepStatus = 'pass' | 'fail' | 'warn' | 'skip';
-export interface StepResult { index: number; step: Step; description: string; status: StepStatus; ms: number; message?: string }
+export interface StepResult {
+  index: number; step: Step; description: string; status: StepStatus; ms: number; message?: string;
+  beforeScreenshot?: string; screenshot?: string; actionPoint?: { x: number; y: number };
+}
 export interface FlowResult {
   name: string; file?: string; status: 'pass' | 'fail' | 'skip';
   /** Why it failed / was skipped (one paragraph: what was expected, what was on screen). */
   message?: string;
   steps: StepResult[]; ms: number; attempts: number; startedAt: string;
-  artifacts?: string; device?: string;
+  artifacts?: string; device?: string; report?: string;
 }
 export interface RunOptions {
   deviceId: string;
@@ -41,8 +47,14 @@ export interface RunOptions {
   platform?: 'android' | 'ios';
   /** Progress lines (PASS/FAIL per step). */
   log?: (line: string) => void;
-  /** Compare two PNGs: the fraction (0–1) of the image that differs. Without it, screenshot baselines are only saved. */
-  compareImages?: (a: Buffer, b: Buffer) => Promise<number>;
+  /** Optional image engine override. Default: shared full-resolution color comparison (requires ffmpeg). */
+  compareImages?: (a: Buffer, b: Buffer, options?: ImageComparisonOptions) => Promise<number>;
+  /** Approved baseline directory (default cwd), independent of artifactsDir. Symlink escapes are refused. */
+  baselineRoot?: string;
+  /** compare fails for missing baselines; record creates missing files; update explicitly replaces them. */
+  baselineMode?: 'compare' | 'record' | 'update';
+  /** Capture before/after images for every action (default false: avoids observation latency). Original pixels. */
+  captureSteps?: boolean;
   /** Idle settle after each action step (default true; tests turn it off). */
   settle?: boolean;
   signal?: AbortSignal;
@@ -99,21 +111,47 @@ const tapSel = (s: Selector) => {
   return o;
 };
 
+/** Resolve through existing ancestors too: a missing target underneath an escaping directory symlink is unsafe. */
+function baselinePath(path: string, flowFile: string | undefined, approvedRoot = process.cwd()): string {
+  const root = realpathSync(resolve(approvedRoot));
+  if (!statSync(root).isDirectory()) throw new StepFailure('The approved baseline root must be a directory');
+  const target = resolve(flowFile ? dirname(flowFile) : process.cwd(), path);
+  let existing = target; const tail: string[] = [];
+  const hasEntry = (p: string) => { try { lstatSync(p); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false; throw e; } };
+  while (!hasEntry(existing)) { const parent = dirname(existing); if (parent === existing) throw new StepFailure('The baseline path has no accessible parent'); tail.unshift(basename(existing)); existing = parent; }
+  let resolved: string;
+  try { resolved = resolve(realpathSync(existing), ...tail); }
+  catch { throw new StepFailure('The baseline path contains an unresolved symlink or inaccessible parent'); }
+  const rel = relative(root, resolved);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new StepFailure(`Baseline path is outside the approved root ${root}`);
+  return resolved;
+}
+
 /** One flow on one device. */
 export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promise<FlowResult> {
-  const log = o.log ?? (() => {});
+  const env = { ...flowIn.env, ...process.env, ...(o.env ?? {}) };
+  const secrets: string[] = [];
+  for (const s of flowIn.steps) if ((s.kind === 'fill' || s.kind === 'type') && s.secret) {
+    try { const resolved = interpolateStep(s, env); if (resolved.kind === 'fill') secrets.push(resolved.value); else if (resolved.kind === 'type') secrets.push(resolved.text); } catch { /* interpolation is reported by attemptFlow */ }
+  }
+  const log = (line: string) => o.log?.(redactText(line, secrets));
   const retries = Math.max(0, Math.floor(o.retries ?? 0));
   let res: FlowResult | undefined;
   for (let attempt = 1; attempt <= retries + 1; attempt++) {
-    res = await attemptFlow(c, flowIn, o, attempt, retries + 1);
+    res = await attemptFlow(c, flowIn, { ...o, log }, attempt, retries + 1, secrets);
     res.attempts = attempt;
     if (res.status !== 'fail' || o.signal?.aborted) break;
     if (attempt <= retries) log(`  retrying (${attempt}/${retries})…`);
   }
-  return res!;
+  if (!res!.report) {
+    const dir = join(o.artifactsDir, slug(flowIn.name));
+    res!.artifacts ??= dir;
+    res!.report = writeFlowReport(join(dir, 'report.html'), [res!], secrets);
+  }
+  return redactValue(res!, secrets);
 }
 
-async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: number, attempts: number): Promise<FlowResult> {
+async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: number, attempts: number, secrets: string[]): Promise<FlowResult> {
   const log = o.log ?? (() => {});
   const t0 = Date.now(); const startedAt = new Date(t0).toISOString();
   const base: FlowResult = { name: flowIn.name, file: flowIn.file, status: 'pass', steps: [], ms: 0, attempts: attempt, startedAt };
@@ -141,6 +179,16 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   catch (e) { return { ...base, status: 'fail', message: `Could not lease ${device.name}: ${errInfo(e).message}${errInfo(e).detail ? ` (${errInfo(e).detail!.split('\n')[0]})` : ''}`, ms: Date.now() - t0 }; }
 
   const ctx = new Ctx(c, device, flowIn, o);
+  ctx.artifactDir = join(o.artifactsDir, `${slug(flowIn.name)}${attempts > 1 ? `-attempt${attempt}` : ''}`);
+  const capture = async (i: number, phase: 'before' | 'after') => {
+    const dir = ctx.artifactDir;
+    try {
+      const shot = await c.screenshot(device.id, { format: 'png' });
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `step-${String(i).padStart(3, '0')}-${phase}.png`);
+      writeFileSync(path, shot.data); ctx.shots.push(path); return path;
+    } catch { return undefined; } // Evidence capture must not change an action's delivery or assertion outcome.
+  };
   const results: StepResult[] = [];
   let failed: StepResult | undefined;
   try {
@@ -149,30 +197,39 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
       if (o.signal?.aborted) { results.push({ index: i + 1, step: s, description: desc, status: 'skip', ms: 0, message: 'cancelled' }); continue; }
       if (failed) { results.push({ index: i + 1, step: s, description: desc, status: 'skip', ms: 0 }); continue; }
       let r: StepResult;
+      const record = o.captureSteps && !['assert_visible', 'assert_not_visible', 'assert_text', 'sleep', 'wait_for', 'screenshot'].includes(s.kind);
+      const beforeScreenshot = record ? await capture(i + 1, 'before') : undefined;
       try {
+        ctx.lastShot = undefined; ctx.actionPoint = undefined;
         const note = await ctx.run(s);
-        r = { index: i + 1, step: s, description: desc, status: 'pass', ms: Date.now() - st, ...(note ? { message: note } : {}) };
+        r = { index: i + 1, step: s, description: desc, status: 'pass', ms: Date.now() - st, ...(note ? { message: note } : {}), ...(ctx.lastShot ? { screenshot: ctx.lastShot } : {}) };
       } catch (e) {
         const msg = e instanceof StepFailure ? e.message : ctx.explain(s, e);
         r = { index: i + 1, step: s, description: desc, status: s.optional ? 'warn' : 'fail', ms: Date.now() - st, message: msg };
         if (!s.optional) failed = r;
       }
+      if (beforeScreenshot) r.beforeScreenshot = beforeScreenshot;
+      if (record) r.screenshot = await capture(i + 1, 'after');
+      if (ctx.actionPoint) r.actionPoint = ctx.actionPoint;
       results.push(r);
       log(stepLine(r, steps.length));
     }
+    const res: FlowResult = { ...base, steps: results, ms: Date.now() - t0, status: failed ? 'fail' : 'pass', ...(failed ? { message: `step ${failed.index} (${failed.description}): ${failed.message}` } : {}) };
+    if (failed) {
+      const notRun = results.filter((r) => r.status === 'skip').length;
+      if (notRun) log(`${' '.repeat(10 + String(steps.length).length)}(${notRun} later step${notRun === 1 ? '' : 's'} not run)`);
+      res.artifacts = await saveArtifacts(c, device, flowIn, res, ctx.artifactDir, ctx.shots, secrets);
+      log(`${' '.repeat(10 + String(steps.length).length)}Artifacts: ${res.artifacts}`);
+    }
+    if (o.signal?.aborted && res.status === 'pass') { res.status = 'fail'; res.message = 'cancelled'; }
+    res.artifacts ??= ctx.artifactDir;
+    res.report = writeFlowReport(join(ctx.artifactDir, 'report.html'), [res], secrets);
+    writeFileSync(join(ctx.artifactDir, 'result.json'), JSON.stringify(redactValue({ ...res, shots: ctx.shots }, secrets), null, 2));
+    return res;
   } finally {
+    // Keep the lease through evidence capture; a different owner must not alter the failure screen first.
     if (!held) await c.releaseLease(device.id).catch(() => {});
   }
-  const res: FlowResult = { ...base, steps: results, ms: Date.now() - t0, status: failed ? 'fail' : 'pass', ...(failed ? { message: `step ${failed.index} (${failed.description}): ${failed.message}` } : {}) };
-  if (failed) {
-    const dir = join(o.artifactsDir, `${slug(flowIn.name)}${attempts > 1 ? `-attempt${attempt}` : ''}`);
-    const notRun = results.filter((r) => r.status === 'skip').length;
-    if (notRun) log(`${' '.repeat(10 + String(steps.length).length)}(${notRun} later step${notRun === 1 ? '' : 's'} not run)`);
-    res.artifacts = await saveArtifacts(c, device, flowIn, res, dir, ctx.shots);
-    log(`${' '.repeat(10 + String(steps.length).length)}Artifacts: ${res.artifacts}`);
-  }
-  if (o.signal?.aborted && res.status === 'pass') { res.status = 'fail'; res.message = 'cancelled'; }
-  return res;
 }
 
 export function stepLine(r: StepResult, total: number): string {
@@ -189,8 +246,12 @@ export function stepLine(r: StepResult, total: number): string {
 class Ctx {
   c: FlowClient; device: Device; flow: Flow; o: RunOptions;
   timeoutMs: number; idleBroken = false; shots: string[] = [];
+  lastShot?: string;
+  actionPoint?: { x: number; y: number };
+  artifactDir: string;
   constructor(c: FlowClient, device: Device, flow: Flow, o: RunOptions) {
     this.c = c; this.device = device; this.flow = flow; this.o = o;
+    this.artifactDir = join(o.artifactsDir, slug(flow.name));
     this.timeoutMs = o.timeoutMs ?? (device.platform === 'ios' ? 15_000 : 10_000);   // iOS accessibility reads are slower
   }
   get id() { return this.device.id; }
@@ -263,6 +324,7 @@ class Ctx {
         let x: number, y: number; let m: ElementMatch | undefined;
         if (s.at) [x, y] = this.px(s.at);
         else { m = await this.locate(s.sel!, to); x = m.center.x; y = m.center.y; }
+        this.actionPoint = { x, y };
         if (s.kind === 'tap') await c.tap(id, x, y, m ? (m.text || m.label || undefined) : undefined, m ? { selector: tapSel(s.sel!), element: { type: m.type, ...(m.id ? { id: m.id } : {}) } } : undefined);
         else if (s.kind === 'long_press') await c.longPress(id, x, y, s.durationMs);
         else await c.doubleTap(id, x, y);
@@ -347,15 +409,30 @@ class Ctx {
       }
       case 'screenshot': {
         const shot = await c.screenshot(id, { format: 'png' });
-        const dir = join(this.o.artifactsDir, slug(this.flow.name));
+        const dir = this.artifactDir;
         mkdirSync(dir, { recursive: true });
         const out = join(dir, `${slug(s.name)}.png`);
-        writeFileSync(out, shot.data); this.shots.push(out);
+        writeFileSync(out, shot.data); this.shots.push(out); this.lastShot = out;
         if (!s.baseline) return `saved ${out}`;
-        const base = resolve(this.flow.file ? dirname(this.flow.file) : process.cwd(), s.baseline);
-        if (!existsSync(base)) { mkdirSync(dirname(base), { recursive: true }); writeFileSync(base, shot.data); return `baseline created: ${base}`; }
-        if (!this.o.compareImages) return `saved ${out} (no image comparison available; baseline not checked)`;
-        const diff = await this.o.compareImages(readFileSync(base), shot.data);
+        const base = baselinePath(s.baseline, this.flow.file, this.o.baselineRoot);
+        const mode = this.o.baselineMode ?? 'compare';
+        if (!['compare', 'record', 'update'].includes(mode)) throw new StepFailure('baselineMode must be compare, record or update');
+        if (mode === 'update' || (mode === 'record' && !existsSync(base))) {
+          mkdirSync(dirname(base), { recursive: true });
+          // Recheck after directory creation so an existing symlink cannot redirect the write outside the root.
+          const checked = baselinePath(s.baseline, this.flow.file, this.o.baselineRoot);
+          if (mode === 'record') writeFileSync(checked, shot.data, { flag: 'wx' });
+          else {
+            // Replacing the entry atomically avoids mutating another file through an existing hard link.
+            const tmp = join(dirname(checked), `.pd-baseline-${randomUUID()}.tmp`);
+            try { writeFileSync(tmp, shot.data, { flag: 'wx' }); renameSync(tmp, checked); }
+            finally { rmSync(tmp, { force: true }); }
+          }
+          return `baseline ${mode === 'update' ? 'updated' : 'recorded'}: ${base}`;
+        }
+        if (!existsSync(base)) throw new StepFailure(`Baseline is missing: ${base}. Record it explicitly with baselineMode="record" after reviewing the screenshot.`);
+        const diff = await (this.o.compareImages ?? compareImages)(readFileSync(base), shot.data, { mode: s.comparison, pixelThreshold: s.pixelThreshold, ignore: s.ignore });
+        if (!Number.isFinite(diff) || diff < 0 || diff > 1) throw new StepFailure('The image comparison did not return a valid difference fraction');
         const tol = s.tolerance ?? 0.02;
         if (diff > tol) throw new StepFailure(`The screen differs from ${displayPath(base)}: ${(diff * 100).toFixed(1)}% changed (tolerance ${(tol * 100).toFixed(1)}%). Now: ${out}`);
         return `matches the baseline (${(diff * 100).toFixed(1)}% changed)`;
@@ -373,23 +450,23 @@ class Ctx {
   }
 }
 
-async function saveArtifacts(c: FlowClient, device: Device, flow: Flow, res: FlowResult, dir: string, shots: string[]): Promise<string> {
+async function saveArtifacts(c: FlowClient, device: Device, flow: Flow, res: FlowResult, dir: string, shots: string[], secrets: string[]): Promise<string> {
   mkdirSync(dir, { recursive: true });
   const tryWrite = async (name: string, get: () => Promise<string | Buffer>) => {
-    try { writeFileSync(join(dir, name), await get()); } catch (e) { writeFileSync(join(dir, `${name}.error.txt`), `${errInfo(e).message ?? e}\n`); }
+    try { const data = await get(); writeFileSync(join(dir, name), typeof data === 'string' ? redactText(data, secrets) : data); } catch (e) { writeFileSync(join(dir, `${name}.error.txt`), redactText(`${errInfo(e).message ?? e}\n`, secrets)); }
   };
   await tryWrite('failure.png', async () => (await c.screenshot(device.id, { format: 'png' })).data);
   await tryWrite('ui.txt', () => c.uiText(device.id));
-  await tryWrite('ui.json', async () => JSON.stringify(await c.ui(device.id), null, 2));
+  await tryWrite('ui.json', async () => JSON.stringify(redactValue(await c.ui(device.id), secrets), null, 2));
   await tryWrite('logs.txt', () => c.logs(device.id, { lines: 500 }));
   if (flow.appId) await tryWrite('app.log', () => c.logs(device.id, { lines: 300, app: flow.appId }));
-  writeFileSync(join(dir, 'steps.txt'), `${flow.name}${flow.file ? ` (${flow.file})` : ''} on ${res.device}\n${res.steps.map((r) => stepLine(r, res.steps.length)).join('\n')}\n\n${res.message ?? ''}\n`);
-  writeFileSync(join(dir, 'result.json'), JSON.stringify({ ...res, artifacts: dir, shots }, null, 2));
+  writeFileSync(join(dir, 'steps.txt'), redactText(`${flow.name}${flow.file ? ` (${flow.file})` : ''} on ${res.device}\n${res.steps.map((r) => stepLine(r, res.steps.length)).join('\n')}\n\n${res.message ?? ''}\n`, secrets));
+  writeFileSync(join(dir, 'result.json'), JSON.stringify(redactValue({ ...res, artifacts: dir, shots }, secrets), null, 2));
   return dir;
 }
 
 // ── many flows, JUnit ──────────────────────────────────────────────────────
-export interface SuiteResult { flows: FlowResult[]; passed: number; failed: number; skipped: number; ms: number; artifactsDir: string }
+export interface SuiteResult { flows: FlowResult[]; passed: number; failed: number; skipped: number; ms: number; artifactsDir: string; report?: string }
 
 /** Load and run flow files in order. Files that don't parse fail (a broken flow must not pass CI). */
 export async function runFlowFiles(c: FlowClient, files: string[], o: RunOptions): Promise<SuiteResult> {
@@ -415,7 +492,9 @@ export async function runFlowFiles(c: FlowClient, files: string[], o: RunOptions
     if (r.status === 'fail' && !r.steps.length && r.message) log(`      ${r.message}`);
     log('');
   }
-  return { flows, passed: flows.filter((f) => f.status === 'pass').length, failed: flows.filter((f) => f.status === 'fail').length, skipped: flows.filter((f) => f.status === 'skip').length, ms: Date.now() - t0, artifactsDir: o.artifactsDir };
+  const suite: SuiteResult = { flows, passed: flows.filter((f) => f.status === 'pass').length, failed: flows.filter((f) => f.status === 'fail').length, skipped: flows.filter((f) => f.status === 'skip').length, ms: Date.now() - t0, artifactsDir: o.artifactsDir };
+  suite.report = writeSuiteReport(suite);
+  return suite;
 }
 
 const xml = (s: string) => s.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]!)

@@ -1,4 +1,4 @@
-// Physical iPhone/iPad backend (EXPERIMENTAL).
+// Physical iPhone/iPad backend. Native iOS 27+ is stable; WebDriverAgent on older iOS remains beta.
 // - Inventory, apps, info, screenshots, recording, crash logs, app data, location and openURL via
 //   `xcrun devicectl` (CoreDevice; Xcode 26+/27 for capture/orientation/simulate) – no WebDriverAgent needed.
 // - Screenshot order: devicectl `capture screenshot` (verified over Wi-Fi on iOS 27: ~0.9 s, full-res PNG),
@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { run, runBuffer, type RunOptions } from '../core/exec.ts';
+import { assertInputFence } from '../core/input-fence.ts';
 import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
 import {
   PhoneDockError,
@@ -19,8 +20,9 @@ import {
   type ScreenInfo, type UiElement, type UiTree,
 } from '../core/types.ts';
 import { JsonState, ScreenshotRecorder, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize } from './ios-common.ts';
-import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidSwipe, hidTap, hidType, hidTypable, isNativeInputCapable, type Geometry } from './ios-hid.ts';
+import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidPinch, hidSwipe, hidTap, hidType, hidTypable, isNativeInputCapable, type Geometry } from './ios-hid.ts';
 import { isNativeCapable, nativeSession, nativeUiTree } from './ios-native.ts';
+import { pasteUnicode, resolveForegroundApp } from './ios-input.ts';
 import { lockGuard } from './ios-lock.ts';
 import { abortXctrace, startXctrace, stopXctrace } from './ios-trace.ts';
 import { iosFeedStats, iosHevcFeed, iosVideoFrameStream, iosVideoStats, iosVideoStream, startHevcRecording, warmVideoHelper, type HevcRecording, type HevcVideoFeed, type VideoDeps } from './ios-video.ts';
@@ -29,16 +31,16 @@ const ID = 'ios-device';
 // devicectl-only features (no WDA): screenshot, record, crashes, appData, location, openUrl. No 'rotate': devicectl's
 // orientation command is documented as simulated orientation and does nothing on a real iPhone.
 const DC_CAPS: Capability[] = ['screenshot', 'ocr', 'install', 'apps', 'launch', 'openUrl', 'record', 'crashes', 'appData', 'location', 'trace'];
-const CAPS: Capability[] = [...DC_CAPS, 'uiTree', 'tap', 'longPress', 'swipe', 'type', 'key'];
+const CAPS: Capability[] = [...DC_CAPS, 'stream', 'uiTree', 'tap', 'doubleTap', 'longPress', 'swipe', 'type', 'key'];
 const BASE_CAPS: Capability[] = DC_CAPS;
-const WDA_ONLY_CAPS: Capability[] = ['screenshot', 'uiTree', 'ocr', 'tap', 'longPress', 'swipe', 'type', 'key', 'launch', 'openUrl'];
+const WDA_ONLY_CAPS: Capability[] = ['screenshot', 'stream', 'uiTree', 'ocr', 'tap', 'doubleTap', 'longPress', 'swipe', 'type', 'key', 'launch', 'openUrl'];
 // iOS 27+ without WDA: real touch/keyboard/buttons via the CoreDevice HID sidecar (ios-hid.ts) and the accessibility
 // tree via remoteAXService (ios-native.ts, read-only); the daemon falls back to OCR when the tree is unavailable.
 // 'stream': live video from the same sidecar's screen stream (ios-video.ts).
-const NATIVE_CAPS: Capability[] = [...DC_CAPS, 'stream', 'tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap'];
-function nativeCaps(osv?: string): Capability[] { return isNativeCapable(osv) ? [...NATIVE_CAPS, 'uiTree'] : NATIVE_CAPS; }
+const NATIVE_CAPS: Capability[] = [...DC_CAPS, 'stream', 'tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap', 'pinch'];
+function nativeCaps(osv?: string): Capability[] { return isNativeCapable(osv) ? [...NATIVE_CAPS, 'uiTree', 'appearance', 'logs'] : NATIVE_CAPS; }
 /** iOS 27+: the pasteboard through the native sidecar (CoreDevice pasteboard service), with or without WDA. */
-function withClipboard(caps: Capability[], osv?: string): Capability[] { return isNativeCapable(osv) ? [...caps, 'clipboard'] : caps; }
+function withClipboard(caps: Capability[], osv?: string): Capability[] { return isNativeCapable(osv) ? [...new Set<Capability>([...caps, 'clipboard', 'appearance', 'logs'])] : caps; }
 /** iOS 27+: live video (GET /video) from the sidecar's screen stream, with or without WDA. */
 function withVideo(caps: Capability[], osv?: string): Capability[] { return isNativeInputCapable(osv) && !caps.includes('video') ? [...caps, 'video'] : caps; }
 /** The devicectl id of an iOS 27+ phone whose clipboard the native sidecar can reach; not_supported otherwise. */
@@ -52,6 +54,14 @@ async function clipboardPhone(udid: string): Promise<string> {
   const osv = osByUdid.get(dc);
   if (!(Number.parseInt(osv ?? '', 10) >= 27)) throw clipboardUnsupported(`the phone runs iOS ${osv ?? '(unknown)'}; the clipboard needs iOS 27 or later`);
   return dc;
+}
+async function nativeServicePhone(nid: string, feature: string): Promise<string> {
+  try { return await clipboardPhone(nid); }
+  catch (e) {
+    if (!(e instanceof PhoneDockError) || e.code !== 'not_supported') throw e;
+    throw new PhoneDockError(`Native iPhone ${feature} requires a paired iPhone on iOS 27 or later`, 'not_supported', 501,
+      ['Use an iOS simulator or connect an iPhone on iOS 27 or later.']);
+  }
 }
 function clipboardUnsupported(why: string): PhoneDockError {
   return new PhoneDockError('PhoneDock can read and set the clipboard only on iPhones with iOS 27 or later', 'not_supported', 501,
@@ -270,6 +280,7 @@ const sessions = new Map<string, string>();
 
 async function wdaFetch(base: string, method: string, path: string, body?: unknown, timeoutMs = 30_000): Promise<any> {
   let res: Response;
+  assertInputFence();
   try {
     res = await fetch(base + path, {
       method, headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
@@ -747,7 +758,7 @@ export const backend: Backend & {
         meta: {
           coreDeviceId: d.identifier, productType: h.productType, transport: transportOf(d), pairingState: c.pairingState ?? d.connectionProperties?.pairingState,
           tunnelState: readiness.tunnel, developerMode: readiness.developerMode, wdaUrl: url ?? null, wdaReady: ws?.ok ?? null,
-          readiness, experimental: true,
+          readiness, experimental: false,
         },
       });
     }
@@ -765,7 +776,7 @@ export const backend: Backend & {
         connection: 'wifi',
         capabilities: cf.udid ? CAPS : WDA_ONLY_CAPS,
         error: ws.ok ? undefined : `WebDriverAgent not reachable at ${cf.wdaUrl}: ${ws.error}`,
-        meta: { wdaUrl: cf.wdaUrl, wdaReady: ws.ok, address: cf.address, udid: cf.udid ?? null, manual: true, wdaIp: v.ios?.ip, experimental: true },
+        meta: { wdaUrl: cf.wdaUrl, wdaReady: ws.ok, address: cf.address, udid: cf.udid ?? null, manual: true, wdaIp: v.ios?.ip, experimental: false },
       });
     }));
     return out;
@@ -870,20 +881,41 @@ export const backend: Backend & {
     });
   },
 
-  async type(udid, text) {
+  async pinch(udid, x, y, scale, durationMs) {
+    if (!(await ensureNative(udid))) throw new PhoneDockError('Pinch requires native iPhone input on iOS 27 or later', 'not_supported', 501);
+    await locks.refuseIfLocked(dcId(udid));
+    await hidPinch(dcId(udid), nativeGeo(udid), x, y, scale, durationMs || 400);
+  },
+
+  async type(udid, text, opts?: { secret?: boolean; beforeInput?: () => void }) {
     if (await ensureNative(udid)) {
       await locks.refuseIfLocked(dcId(udid));
-      if (hidTypable(text)) { await hidType(dcId(udid), text); return; }
-      // Emoji / accents / non-Latin: put the text on the device pasteboard, then Cmd+V. (iOS may show its
-      // "Allow Paste" prompt the first time an app reads a pasteboard written by another source.)
-      const dir = mkdtempSync(join(tmpdir(), 'pd-paste-'));
-      try {
-        const f = join(dir, 'text.txt'); writeFileSync(f, text, 'utf8');
-        await devicectl(['device', 'pasteboard', 'copy', '--device', dcId(udid), '--type', 'public.utf8-plain-text', '--file', f]);
-      } finally { rmSync(dir, { recursive: true, force: true }); }
-      await hidCombo(dcId(udid), ['cmd'], 'v');
+      if (hidTypable(text)) { opts?.beforeInput?.(); await hidType(dcId(udid), text); return; }
+      // Clipboard payload travels over stdio only. A key acknowledgement is not a paste acknowledgement:
+      // inspect the field before restoring, and never overwrite a newer clipboard copied by the person.
+      const session = nativeSession(dcId(udid));
+      const before = await session.ui({ timeoutSec: 3 }).catch(() => undefined);
+      const fieldKey = (e: { id: string | null; type: string; bounds: { x: number; y: number; width: number; height: number } }) => e.id || [e.type, e.bounds.x, e.bounds.y, e.bounds.width, e.bounds.height].join(':');
+      const fields = new Map((before?.elements ?? []).filter((e) => /(?:TextField|TextView|SearchField|EditText)$/i.test(e.type)).map((e) => [fieldKey(e), e.value]));
+      await pasteUnicode(text, !!opts?.secret, {
+        beforeInput: opts?.beforeInput,
+        begin: (value, secret) => session.clipboardBegin(value, secret),
+        paste: () => hidCombo(dcId(udid), ['cmd'], 'v'),
+        verify: async () => {
+          for (let i = 0; i < 2; i++) {
+            const after = await session.ui({ timeoutSec: 3 });
+            if (before?.app.pid == null || after.app.pid !== before.app.pid) return false;
+            const matches = after.elements.filter((e) => fields.has(fieldKey(e)) && typeof e.value === 'string'
+              && e.value !== fields.get(fieldKey(e)) && (e.value === text || e.value.endsWith(text)));
+            if (matches.length === 1) return true;
+          }
+          return false;
+        },
+        finish: (token, confirmed) => session.clipboardFinish(token, confirmed),
+      });
       return;
     }
+    opts?.beforeInput?.();
     await wdaSession(udid, 'POST', '/wda/keys', { value: [...text] });
   },
 
@@ -1001,17 +1033,32 @@ export const backend: Backend & {
     await devicectl(['device', 'simulate', 'location', 'coordinate', '--device', dcId(nid), `--latitude=${lat}`, `--longitude=${lon}`]);
   },
 
-  /** WDA only: devicectl's process list has no "frontmost" flag, and the accessibility sidecar reports the tree of the
-   *  frontmost app without naming its bundle id. */
+  async getAppearance(nid) {
+    const style = await nativeSession(await nativeServicePhone(nid, 'appearance')).appearance();
+    return style === 'dark' || style === 'light' ? style : 'unknown';
+  },
+  async setAppearance(nid, mode) { await nativeSession(await nativeServicePhone(nid, 'appearance')).appearance(mode); },
+
   async foregroundApp(nid) {
     const base = wdaUrl(nid);
-    if (!base) throw new PhoneDockError('The foreground app can’t be identified on a real iPhone without WebDriverAgent', 'not_supported', 501,
-      ['Read the screen instead: `phonedock ui <id>` shows the frontmost app’s elements, or take a screenshot.', 'Only if you need the bundle id: set up WebDriverAgent (docs/IPHONE-WIFI.md).'],
-      'devicectl lists running processes but does not say which one is in front, and the iOS 27 accessibility channel gives no bundle id; only WebDriverAgent can name the foreground app');
-    const j = await wdaFetch(base, 'GET', '/wda/activeAppInfo', undefined, 15_000);
-    const v = j?.value ?? {};
-    if (!v.bundleId || v.bundleId === 'com.apple.springboard') return null;
-    return { id: String(v.bundleId), name: v.name || undefined } satisfies AppInfo;
+    if (base) {
+      const j = await wdaFetch(base, 'GET', '/wda/activeAppInfo', undefined, 15_000);
+      const v = j?.value ?? {};
+      if (!v.bundleId) throw new PhoneDockError('The iPhone service did not identify a foreground app', 'foreground_unknown', 502);
+      if (v.bundleId === 'com.apple.springboard') return null;
+      return { id: String(v.bundleId), name: v.name || undefined } satisfies AppInfo;
+    }
+    const udid = await nativeServicePhone(nid, 'foreground app detection');
+    const tree = await nativeSession(udid).ui();
+    const [apps, procs] = await Promise.all([
+      devicectl<{ apps?: { bundleIdentifier?: string; name?: string; url?: string; path?: string }[] }>(['device', 'info', 'apps', '--device', udid, '--include-all-apps']),
+      devicectl<{ runningProcesses?: { executable?: string; processIdentifier: number }[] }>(['device', 'info', 'processes', '--device', udid]),
+    ]);
+    return resolveForegroundApp(tree.app.pid, apps.apps ?? [], procs.runningProcesses ?? []);
+  },
+
+  async logs(nid, opts: { lines?: number; filter?: string; appId?: string } = {}) {
+    return nativeSession(await nativeServicePhone(nid, 'logs')).logs(opts);
   },
 
   // ── crash logs: list verified read-only on iOS 27 (802 files, bug_type in xattrs); copy-from verified ──
@@ -1188,6 +1235,6 @@ export const backend: Backend & {
     const summary = live ? infoSummary(d as DcDevice, details as any, displays as any, readiness) : undefined;
     // liveVideo: what the screen stream is doing right now (null while nobody watches)
     const liveVideo = udid ? { frames: iosVideoStats(udid) ?? null, feed: iosFeedStats(udid) ?? null } : null;
-    return { summary, device: d, details, readiness, displays, wdaUrl: base ?? null, wda: wdaInfo, config: cfgFor(nid) ?? null, liveVideo, experimental: true };
+    return { summary, device: d, details, readiness, displays, wdaUrl: base ?? null, wda: wdaInfo, config: cfgFor(nid) ?? null, liveVideo, experimental: false };
   },
 };

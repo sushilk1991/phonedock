@@ -107,12 +107,18 @@ function axePath(): string {
   return p;
 }
 
-function axe(args: string[], opts: RunOptions = {}) {
+const AXE_INPUT = new Set(['touch', 'tap', 'swipe', 'drag', 'type', 'key', 'button', 'key-combo', 'key-sequence', 'gesture', 'batch']);
+async function axe(args: string[], opts: RunOptions = {}) {
+  if (AXE_INPUT.has(args[0])) {
+    const i = args.indexOf('--udid');
+    if (i >= 0 && args[i + 1]) await requireSingleDisplayInput(args[i + 1]);
+  }
   return run(axePath(), args, { env: toolEnv(), timeoutMs: 30_000, failureMessage: 'Couldn’t control the simulator', ...opts });
 }
 
 /** Map an exec failure to a nicer error. */
 function wrapAxeError(e: unknown, what: string): never {
+  if (e instanceof PhoneDockError && e.delivery === 'not_sent') throw e;
   const msg = (e as PhoneDockError).detail ?? (e as Error).message ?? String(e);
   if (/not booted|Shutdown|No booted|state: Shutdown/i.test(msg)) {
     throw new PhoneDockError('Simulator is not running', 'not_running', 409, ['Boot the device first'], msg);
@@ -197,6 +203,7 @@ async function toDevice(runtime: string, d: SimDevice, rts: SimRuntime[], types:
   const dt = types.find((t) => t.identifier === d.deviceTypeIdentifier);
   const m = managed[d.udid];
   const st = mapState(d.state, d.udid);
+  const multiDisplay = captureDisplays.has(d.udid) || d.deviceTypeIdentifier?.endsWith('.iPhone-Duo');
   return {
     id: `${ID}:${d.udid}`,
     backend: ID,
@@ -211,10 +218,11 @@ async function toDevice(runtime: string, d: SimDevice, rts: SimRuntime[], types:
     connection: 'local',
     screen: (st === 'running' ? screenCache.get(d.udid) : undefined) ?? naturalScreen(d.udid),
     spec: m?.spec ?? { backend: ID, name: d.name, image: runtime, profile: d.deviceTypeIdentifier },
-    capabilities: (m ? CAPS : CAPS.filter((c) => c !== 'snapshot' && c !== 'delete')).filter((c) => c !== 'rotate' || canRotate),
+    capabilities: (m ? CAPS : CAPS.filter((c) => c !== 'snapshot' && c !== 'delete')).filter((c) => (c !== 'rotate' || canRotate) && !(multiDisplay && ['tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap'].includes(c))),
     meta: {
       runtime, deviceType: d.deviceTypeIdentifier, family: dt?.productFamily, modelIdentifier: dt?.modelIdentifier,
       dataPath: d.dataPath, lastBootedAt: d.lastBootedAt, ...(m?.clonedFrom ? { clonedFrom: m.clonedFrom } : {}),
+      ...(multiDisplay ? { inputLimitation: 'AXe input routing is not supported on multi-display simulators; use a single-display model.' } : {}),
     },
   };
 }
@@ -250,13 +258,33 @@ function dataDir(udid: string): string {
 
 // ── screen geometry ────────────────────────────────────────────────────────
 
+// AXe's UI and touch APIs address the primary display. Some simulators (Duo) expose
+// a second built-in display, making simctl's otherwise useful default ambiguous.
+const captureDisplays = new Map<string, string>();
+function captureDisplayArgs(udid: string): string[] {
+  const display = captureDisplays.get(udid);
+  return display ? [`--display=${display}`] : [];
+}
+async function requireSingleDisplayInput(udid: string): Promise<void> {
+  await screenInfoOf(udid);
+  if (captureDisplays.has(udid)) throw new PhoneDockError('Input routing is not supported on this multi-display simulator', 'not_supported', 501,
+    ['Use a single-display iPhone model with a compatible runtime. Primary-display screenshots and recording remain available.'],
+    'AXe can acknowledge touches without changing the primary display on iPhone Duo. No input was sent.', 'not_sent');
+}
+
 async function screenshotPng(udid: string): Promise<Buffer> {
   // Always use a private temp file: `simctl io screenshot -` is not reliably stdout — it has been seen
   // creating a literal file named "-" in the daemon's working directory.
   const dir = mkdtempSync(join(tmpdir(), 'pd-sim-shot-'));
   try {
     const f = join(dir, 's.png');
-    const r = await runBuffer('xcrun', ['simctl', 'io', udid, 'screenshot', '--type=png', f], { env: toolEnv(), timeoutMs: 30_000, allowFail: true, cwd: dir });
+    const capture = () => runBuffer('xcrun', ['simctl', 'io', udid, 'screenshot', '--type=png', ...captureDisplayArgs(udid), f], { env: toolEnv(), timeoutMs: 30_000, allowFail: true, cwd: dir });
+    let r = await capture();
+    if (r.code !== 0 && /Cannot choose between \d+ displays/i.test(r.stderr) && !captureDisplays.has(udid)) {
+      captureDisplays.set(udid, 'primary');
+      r = await capture();
+      if (r.code !== 0) captureDisplays.delete(udid);
+    }
     if (r.code !== 0) {
       if (/Shutdown|not booted|Invalid device state/i.test(r.stderr)) throw new PhoneDockError('Simulator is not running', 'not_running', 409, ['Boot the device first'], r.stderr.trim());
       throw new PhoneDockError('Couldn’t take a screenshot', 'screenshot_failed', 500, undefined, `simctl screenshot failed: ${r.stderr.trim().slice(0, 500)}`);
@@ -495,6 +523,7 @@ const HID_TYPABLE = /^[A-Za-z0-9 !@#$%^&*()_+\-={}[\]|\\:";'<>?,./`~\n\t]*$/;
 
 async function typeText(udid: string, text: string): Promise<void> {
   if (!text) return;
+  await requireSingleDisplayInput(udid);
   if (HID_TYPABLE.test(text)) {
     try { await axe(['type', '--stdin', '--udid', udid], { input: text, timeoutMs: 30_000 + text.length * 100 }); return; }
     catch (e) { wrapAxeError(e, 'type'); }
@@ -693,7 +722,7 @@ function runtimeSupports(rt: SimRuntime, profile: string): boolean {
 
 /** The runtimes a create without an image tries, best first: newest version first, and within a version the general
  *  runtime before a device-specific one. Xcode 27.2 also installs "iOS 27.2" for iPhone Duo only
- *  (SimRuntime.iOS-27-2-iPhone19-4); taken first, every new simulator was a two-screen Duo whose screenshots fail.
+ *  (SimRuntime.iOS-27-2-iPhone19-4); prefer a general runtime over a model-specific one.
  *  With a profile, only runtimes that run it. */
 export function runtimeOrder(rts: SimRuntime[], profile?: string): SimRuntime[] {
   const iphones = (r: SimRuntime) => r.supportedDeviceTypes?.filter((t) => t.productFamily === 'iPhone').length ?? 0;
@@ -878,10 +907,12 @@ async function startSimRecording(udid: string, outPath: string, opts: { maxSecon
   if (prev && !prev.done) throw new PhoneDockError('A recording is already running on this device', 'busy', 409, ['Stop it first']);
   simRecordings.delete(udid);
   const maxSeconds = Math.max(1, Math.min(Math.round(opts.maxSeconds ?? 300), 3600));
+  // Resolve the capture display using the same path as screenshots before recording.
+  if (!captureDisplays.has(udid)) await screenshotPng(udid);
   mkdirSync(dirname(outPath), { recursive: true });
   const tmp = mkdtempSync(join(tmpdir(), 'pd-simrec-'));
   const file = join(tmp, 'rec.mp4');
-  const child = spawn('xcrun', ['simctl', 'io', udid, 'recordVideo', '--codec=h264', '--force', file], { env: toolEnv(), cwd: tmp, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('xcrun', ['simctl', 'io', udid, 'recordVideo', '--codec=h264', ...captureDisplayArgs(udid), '--force', file], { env: toolEnv(), cwd: tmp, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = ''; const grab = (d: Buffer) => { if (out.length < 8000) out += d.toString(); };
   child.stdout!.on('data', grab); child.stderr!.on('data', grab);
   const exited = new Promise<number | null>((res) => { child.on('close', (c) => res(c)); child.on('error', () => res(-1)); });

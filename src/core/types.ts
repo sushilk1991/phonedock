@@ -137,6 +137,14 @@ export interface UiTree {
   screen: ScreenInfo;
   root: UiElement[];             // tree
   capturedAt: string;            // ISO time
+  /** Daemon snapshot identity (retained for two minutes). Send snapshotId with ref input to bind it to this read. */
+  snapshotId?: string;
+  /** Daemon action counter when the read began; callers can identify a read that overlapped input. */
+  actionGeneration?: number;
+  /** Native observation provenance, when available; a partial dump must never be mistaken for a complete one. */
+  generation?: number;
+  complete?: boolean;
+  app?: { pid?: number | null; label?: string | null; id?: string };
   /** Filled in by the daemon's GET /ui (not by backends): the system prompt on screen, or null. */
   prompt?: SystemPrompt | null;
   /** Filled in by the daemon's GET /ui: OCR text merged into a partial tree (empty containers, empty web views).
@@ -473,7 +481,7 @@ export interface Backend {
   tap(nativeId: string, x: number, y: number): Promise<void>;
   longPress?(nativeId: string, x: number, y: number, durationMs: number): Promise<void>;
   swipe(nativeId: string, x1: number, y1: number, x2: number, y2: number, durationMs: number): Promise<void>;
-  type(nativeId: string, text: string): Promise<void>;
+  type(nativeId: string, text: string, opts?: { secret?: boolean; beforeInput?: () => void }): Promise<void>;
   key(nativeId: string, key: KeyName): Promise<void>;
 
   // ── apps / system ──────────────────────────────────────────────────────
@@ -486,7 +494,7 @@ export interface Backend {
   shell?(nativeId: string, command: string): Promise<ExecResult>;
   pushFile?(nativeId: string, localPath: string, remotePath: string): Promise<void>;
   pullFile?(nativeId: string, remotePath: string, localPath: string): Promise<void>;
-  logs?(nativeId: string, opts?: { lines?: number; filter?: string }): Promise<string>;
+  logs?(nativeId: string, opts?: { lines?: number; filter?: string; appId?: string }): Promise<string>;
   setLocation?(nativeId: string, lat: number, lon: number): Promise<void>;
   pushNotification?(nativeId: string, appId: string, payload: Record<string, unknown>): Promise<void>;
   /** Resolves once the screen has turned, or once it is clear the app on screen keeps its orientation. */

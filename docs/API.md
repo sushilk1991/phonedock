@@ -26,6 +26,8 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | GET | /v1/health | – | `{ ok, version, pid, uptimeSec }` |
+| GET | /v1/inventory | – | Per-backend discovery status: `{ [backend]: { refreshing, at?, error?, timedOut?, devices } }`; `at` is the last successful refresh time in epoch milliseconds |
+| GET | /v1/doctor | `?device=<full-id>&capabilities=uiTree,appearance` (optional) | Host prerequisite checks and target readiness estimates; optional device diagnosis interprets known metadata. See *Environment & diagnostics* |
 | GET | /v1/backends | – | `[{ id, displayName, stage, platform, kind, capabilities, availability: {ok, reason, hints, version} }]`; `stage` is `stable`, `beta` or `experimental` (show a badge unless `stable`; older services omit it, which means `stable`) ; `?debug=1` → `{ backends, failures, streams, screenSources }` (modules that failed to load; live streams with `kind`, `viewers`, `hasFrame`, `ageMs`, `firstFrameMs`, `fallbackCaptures`; see *Live video*) |
 | GET | /v1/backends/:backend/images | – | `OsImage[]` = `[{ id, backend, platform, name, version?, installed, usable?, profiles?, sizeMB?, notes? }]`. `usable: false` = installed but can't create devices on this Mac, with `notes` saying why. iOS simulator: the runtime's disk image isn't `Ready` (`simctl runtime list`), creating a simulator on that runtime build failed with "runtime is not available" (remembered until a create on it succeeds), or a throwaway probe create fails. Creating a device without `image` skips such runtimes. `profiles` lists the HardwareProfile ids it can run (absent = all) |
 | POST | /v1/backends/:backend/images/install | `{ image }` | `Job` (long-running; poll `/v1/jobs/:id`) |
@@ -37,7 +39,7 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 ## Devices
 | Method | Path | Body / query | Response |
 |---|---|---|---|
-| GET | /v1/devices | `?backend=&platform=&state=` | `Device[]` (all backends, managed + discovered). `osVersion` is display text: `Android 16 (API 36)`, `iOS 26.5 (23F77)` (iOS simulators said `26.5` before) |
+| GET | /v1/devices | `?backend=&platform=&state=&fresh=1` | `Device[]` (all backends, managed + discovered). `osVersion` is display text: `Android 16 (API 36)`, `iOS 26.5 (23F77)` (iOS simulators said `26.5` before) |
 | POST | /v1/devices | `DeviceSpec` (+ `boot?: boolean`) | `202 { job, device? }` – creation is a Job; `job.result` is the Device |
 | POST | /v1/devices/batch | `{ spec: DeviceSpec, count, boot? }` | `202 { jobs: Job[] }` – names get `-1..-N` suffixes |
 | GET | /v1/devices/:id | – | `Device` |
@@ -54,6 +56,17 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | DELETE | /v1/devices/:id/snapshots/:name | – | `{ ok }` |
 | GET | /v1/devices/:id/info | – | backend-specific JSON |
 | GET | /v1/devices/:id/screen | – | `ScreenInfo` |
+
+Discovery is cached independently for each backend. Aggregate requests wait briefly for initial results and can
+return a partial list while a slow provider is still running; absence from that list is not proof of disconnection.
+Previously discovered devices remain available with `meta.stale`, `meta.refreshing` and/or `meta.listError` when
+refreshing or failed. Inspect `/v1/inventory` for providers that have not returned anything yet. `?fresh=1` starts
+or joins a refresh; `?backend=<backend>&fresh=1` waits for that provider within its bounded timeout. Requests for
+a full canonical `backend:nativeId` target its backend directly in both SDKs, so a local simulator lookup need not
+wait for an unrelated cloud provider. Name, native-ID and prefix resolvers instead wait up to five seconds for
+all providers to return their first result before deciding uniqueness or absence. Still-warming discovery returns
+`503 inventory_pending`; a failed/timed-out first discovery returns `503 inventory_incomplete`. Use the canonical
+ID when the intended device is already known.
 
 `Device.handoff` is the device's **pending** `Handoff` (see below) or `null`; a `device` SSE event fires when it changes.
 
@@ -72,15 +85,26 @@ their screen size across shutdowns, so a stopped one still has `screen` (in port
 | GET | /v1/devices/:id/frame | `?maxSize=720`, optional `If-None-Match` | latest JPEG frame from the live stream (starts the stream if needed; falls back to screenshot). Responses include `ETag`; a matching validator returns 304 with no body. `X-Frame-Source` is `stream` or `screenshot`. Stream frames carry `X-Device-Width`/`X-Device-Height`: the screen size the frame shows, which changes the moment the device turns (use it, not an earlier `Device.screen`, to map clicks on that frame). Until the stream's first frame (a new stream gets 250 ms), the screenshot fallback is shared by concurrent requests and refreshed at most once a second, so polls in between get the same `ETag` (and 304). |
 | GET | /v1/devices/:id/video | `?maxSize=1280` (160–4096) | `application/vnd.phonedock.video`: the screen as H.264 or HEVC straight from the device's encoder, framed (see *Live video*). Devices that have it list `video` in their capabilities (Android emulators and phones: H.264; iPhones on iOS 27+: HEVC); `501 not_supported` elsewhere |
 | GET | /v1/devices/:id/ui | `?format=json|text&ocrFallback=1&partialOcr=1` | json: `UiTree` + `prompt: SystemPrompt \| null` (see *System prompts*); text: compact outline, one element per line: `e12 Button "Sign in" @(540,1210) [w×h]`, plus a `# prompt: …` line after the header when a prompt is on screen. See *Partial trees* below |
-| POST | /v1/devices/:id/find | `{ text?, id?, type?, match?: 'contains'\|'exact'\|'regex', index?, limit?: 20, ocrFallback?: true }` (≥1 of text/id/type) | `{ source, total, index, match: ElementMatch \| null, matches: ElementMatch[], screen, capturedAt, ocrTried, ocrError?, summary?, scrollable? }` (`ocrError`: why the OCR fallback could not run). With no match: `summary`, and `scrollable` = can anything on this screen scroll (`true`/`false`; `null` = unknown: iOS, OCR, webviews), so a client only suggests scrolling when it can help |
+| POST | /v1/devices/:id/find | `{ text?, id?, type?, match?: 'contains'\|'exact'\|'regex', index?, limit?: 20, ocrFallback?: true }` (≥1 of text/id/type) | `{ source, total, index, match: ElementMatch \| null, matches: ElementMatch[], screen, capturedAt, snapshotId?, ocrTried, ocrError?, summary?, scrollable? }` (`ocrError`: why the OCR fallback could not run). With no match: `summary`, and `scrollable` = can anything on this screen scroll (`true`/`false`; `null` = unknown: iOS, OCR, webviews), so a client only suggests scrolling when it can help |
 | GET | /v1/devices/:id/focus | `?waitMs=0` (≤10000; polls until a field is focused or a keyboard is up) | `{ known, ok, focused: ElementMatch \| null, keyboard, elapsedMs, reason? }`. `known: false` (with `reason`) when the device can't tell: the iOS simulator's tree has no focus flag, so with a hardware keyboard (no on-screen keyboard) focus is unknown, not absent |
 | GET | /v1/devices/:id/appearance | – | `{ appearance: 'dark'\|'light'\|'unknown' }` |
-| POST | /v1/devices/:id/appearance | `{ appearance: 'dark'\|'light' }` (`mode` also accepted) | `{ ok, appearance, previous, changed }`. System-wide Dark Mode: iOS simulator `simctl ui appearance`, Android `cmd uimode night yes\|no`. Needs the lease like other input; `501` on backends without it (capability `appearance`) |
+| POST | /v1/devices/:id/appearance | `{ appearance: 'dark'\|'light' }` (`mode` also accepted) | `{ ok, appearance, previous, changed }`. System-wide Dark Mode: iOS simulator `simctl ui appearance`, Android `cmd uimode night yes\|no`, and native iOS 27+ CoreDevice where available. Needs the lease like other input; `501` on backends without it (capability `appearance`) |
 | GET | /v1/devices/:id/settings | – | `{ settings, supported }`; `supported` lists the keys this device can set. Unsupported or unreadable fields are omitted. |
 | POST | /v1/devices/:id/settings | Any subset of the settings fields below | `{ ok, settings, supported, previous, changed }`; validates the complete request and requires the device lease. Unsupported fields produce `501 not_supported`. |
 | POST | /v1/devices/:id/settings/reset | `{}` | Same response as POST; restores supported settings to defaults. Android animation scales saved by PhoneDock are restored. |
-| POST | /v1/devices/:id/wait | `{ until: 'visible'\|'gone', text?, id?, type?, match?, timeoutMs?: 10000, intervalMs?: 300, stableMs?: 0 }` | `{ ok, until, elapsedMs, polls, source, match?, matches? }` – `408 wait_timeout` otherwise |
+| POST | /v1/devices/:id/wait | `{ until: 'visible'\|'gone', text?, id?, type?, match?, timeoutMs?: 10000, intervalMs?: 300, stableMs?: 0 }` | `{ ok, until, elapsedMs, polls, source, match?, matches?, snapshotId?, screen? }` – visible results include the matching snapshot identity and screen; `408 wait_timeout` otherwise |
 | POST | /v1/devices/:id/wait | `{ until: 'idle', timeoutMs?, intervalMs?: 200, stableMs?: 1000 }` | `{ ok, until, elapsedMs, frames, changes, stableMs, changedRegion }` – screen unchanged for `stableMs` |
+
+**iPhone Duo simulator.** Primary-display screenshots, UI reads, media import and recording are supported.
+AXe input acknowledgements were observed without effective routing to that display, so affected input now returns
+`501 not_supported` with `delivery: 'not_sent'`; corresponding per-device input capabilities are removed. Use a
+single-display simulator for interaction. Streaming and system gestures have not been validated for Duo.
+
+`UiTree` adds optional `snapshotId`, `actionGeneration`, `generation`, `complete`, and `app` metadata.
+`snapshotId` binds refs to that particular observation; the daemon retains at most 512 snapshots for up to two
+minutes. Another client's read does not rebind that identity. `actionGeneration` is the daemon action counter
+when the read began; native `generation`, `complete`, and `app: { pid?, label?, id? }` carry provenance when the
+backend provides it. An omitted `complete` does not certify a complete tree. Use a new read after ownership changes.
 
 Device settings add the `settings` capability, `SettingKey`, `TextSizeInput`, `SettingsInput`, `DeviceSettings`, `SettingsRead`, and `SettingsResult` types, and optional backend methods `getSettings`, `setSettings`, and `resetSettings`. `appearance` is `light` or `dark`; `textSize` is a positive scale relative to the default, `default`, `smallest`, `largest`, or an iOS content-size category. Responses contain a numeric `textSize` and `textSizeNative` (`category` on iOS or `font_scale` on Android). iOS maps to the nearest Dynamic Type body size (default 17 pt); Android clamps to the range published by its Settings package. Android does not accept iOS category names.
 
@@ -189,16 +213,24 @@ a blinking caret or a status-bar clock tick doesn't count; a spinner, video or a
 ## Input & control
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | /v1/devices/:id/input | `InputAction` or `{ actions: InputAction[] }`, plus optional `expect` (see *expect*) | `{ ok, resolved?, delivery, retrySafe, expect? }` (`tap` with `ref` resolves to the tap point of the element from the last `/ui`/`/find`, found again on a fresh read of the screen first (see *Tap by ref*; `resolved.moved`, `resolved.refCheck`, or `409 stale_ref` with nothing tapped), above a floating bar that covers its centre: then `resolved.coveredBy`, and `resolved.hidden: true` when nothing of it shows above the bar. Android: when the on-screen keyboard is up and its window covers the point of an element tap (`ref`, or `x`,`y` with `label`), it is hidden first and `resolved.keyboardHidden: true` (in landscape Gboard covers the whole app). A bare `x`,`y` is tapped as is, keyboard or not. `tap` with `x`,`y` takes an optional `label`, the name of what was aimed at, plus optional `selector: { text?, id?, type?, match?, index? }` (the find query that chose the point) and `element: { type?, id?, editable? }`; all three only appear in the activity log, and `flow save` turns `selector` into `tap: <text>`) |
-| POST | /v1/devices/:id/fill | `{ value, text? \| id? \| type? \| ref? \| x?,y?, match?, index?, clear?: true, submit?: false, secret?: false, focusTimeoutMs?: 2000, expect? }` | `{ ok, via, element, label?, tapped, moved?, refCheck?, focused, keyboard, cleared, clearMethod, previousValue, finalValue, finalLength, verified, secret, submitted, warnings[], elapsedMs, delivery, retrySafe, expect? }` (`moved`, `refCheck`: added, `ref` fills, as for `tap {ref}`) |
+| POST | /v1/devices/:id/input | `InputAction` or `{ actions: InputAction[] }`, plus optional `expect`, `snapshotId`, `returnUi` (see below) | `{ ok, resolved?, delivery, retrySafe, expect?, requestId?, ui?, observationUnavailable? }` (`tap` with `ref` resolves to the tap point of the element from the last `/ui`/`/find`, found again on a fresh read of the screen first (see *Tap by ref*; `resolved.moved`, `resolved.refCheck`, or `409 stale_ref` with nothing tapped), above a floating bar that covers its centre: then `resolved.coveredBy`, and `resolved.hidden: true` when nothing of it shows above the bar. Android: when the on-screen keyboard is up and its window covers the point of an element tap (`ref`, or `x`,`y` with `label`), it is hidden first and `resolved.keyboardHidden: true` (in landscape Gboard covers the whole app). A bare `x`,`y` is tapped as is, keyboard or not. `tap` with `x`,`y` takes an optional `label`, the name of what was aimed at, plus optional `selector: { text?, id?, type?, match?, index? }` (the find query that chose the point) and `element: { type?, id?, editable? }`; all three only appear in the activity log, and `flow save` turns `selector` into `tap: <text>`) |
+| POST | /v1/devices/:id/fill | `{ value, text? \| id? \| type? \| ref? \| x?,y?, match?, index?, clear?: true, submit?: false, secret?: false, focusTimeoutMs?: 2000, expect?, snapshotId?, returnUi?: false }` | `{ ok, via, element, label?, tapped, moved?, refCheck?, focused, keyboard, cleared, clearMethod, previousValue, finalValue, finalLength, verified, secret, submitted, warnings[], elapsedMs, delivery, retrySafe, expect?, requestId?, ui?, observationUnavailable? }` (`moved`, `refCheck`: added, `ref` fills, as for `tap {ref}`) |
 | POST | /v1/devices/:id/keyboard/hide | – | `{ ok }` |
+| GET | /v1/devices/:id/requests/:requestId | – | Retained input receipt for the same device and owner: `{ requestId, status, delivery, startedAt, completedAt?, result?, resultOmitted?, error?, fingerprint, recorderPid? }`; `status` is `running`, `completed`, `failed`, or `interrupted` |
 | GET | /v1/devices/:id/actions | `?limit=200` | recorded action log `[{ at, owner, action }]` |
 | POST | /v1/devices/:id/replay | `{ actions: {action, delayMs?}[] }` | `202 { job }`; `job.result` = `{ ok, steps, skipped, warnings }` |
 | POST | /v1/devices/:id/lease | `{ owner, ttlSec?, force? }` | `Lease` = `{ owner, acquiredAt, expiresAt, ttlSec?, stale?, preempted?, reclaimedFrom? }` (`409 lease_conflict` if held by someone else and not `force`). `preempted: { owner, ttlSec?, at }` on an `app:human` lease: the agent the person took the device from. `reclaimedFrom` (in this response and `/v1/pool/acquire`'s only) = the owner of the stale lease this one replaced |
 | DELETE | /v1/devices/:id/lease | – | `{ ok, released, heldBy?, note?, returnedTo? }`. When `app:human` releases (Hand Back), the device goes back to the agent it was taken from if that session is still alive (`returnedTo`); if the agent has gone, it's released and `note` says so. Releasing a lease you don't hold is **not** an error: `released: false`, `heldBy` names the holder and nothing changes |
 
 **Leases.** Input/app/shell calls from an owner that doesn't hold an active lease return `409 lease_conflict`. No
-lease = anyone may act. `force: true` from `app:human` = the app's **Take Over**.
+lease = any owner may attempt an input. Each queued input takes a temporary shared claim if it has no explicit
+lease. `force: true` from `app:human` = the app's **Take Over**.
+
+Input requests execute in order per device; independent devices can proceed concurrently. Queue slots cover
+multi-step fill/batch primitives and optional post-input UI reads. Ownership is rechecked before mutations, so a
+human takeover stops remaining steps; work already delivered is not undone. A SQLite ownership store coordinates
+upgraded daemons using the same `PHONEDOCK_HOME`, including daemons on different ports. It does not coordinate
+older daemons, unrelated tools, or instances using different homes.
 * **Lifetime.** Agent leases without `ttlSec` last 10 minutes (`ttlSec: 600`), and every call the owner makes on
   that device (input, `/ui`, screenshots, anything under `/v1/devices/:id`) restarts that time, so an agent that
   is working keeps its device and one that went quiet frees it. `app:human` leases have no TTL: they last until
@@ -267,10 +299,35 @@ again (the same cleaned tree as `/ui`; OCR when the ref came from OCR text) and 
 * `delivery: 'unknown'`: it may have reached the device (a lost helper reply, adb breaking mid-command, a timeout).
   Read the screen before sending it again.
 
-A batch that fails part way is `sent`. The SDKs expose it on errors (`PhoneDockApiError.delivery` / `retrySafe`,
+A batch that fails after confirmed input is `sent`; an uncertain primitive makes the outcome `unknown`. The SDKs expose it on errors (`PhoneDockApiError.delivery` / `retrySafe`,
 Python `.delivery` / `.retry_safe`). They resend an input request only when the connection was refused (the daemon
 wasn't running: nothing was sent); a connection that broke after the request went out is a `daemon_unreachable`
 error with `delivery: 'unknown'`, never a resend.
+
+**Request IDs and recovery.** An input client may send `X-PhoneDock-Request-ID` (1–128 letters, digits, `.`, `_`,
+`-`; not only periods). The TypeScript and Python SDKs generate IDs for their input requests and expose the ID on
+transport errors. The ID is scoped to the exact device and `X-PhoneDock-Owner`; retain that owner identity when
+recovering after a client restart. Duplicate IDs with the same method, path and body join the running request or
+return its retained result/error; a different payload returns `409 request_id_conflict`. A duplicate never starts
+another device action. Clients that omit the header keep their previous response shape.
+
+`GET /v1/devices/:id/requests/:requestId`, SDK `requestResult()` / `request_result()`, CLI `request-result`, or MCP
+`get_request_result` can recover a lost response without resending input. Receipts are shared under
+`PHONEDOCK_HOME/requests`, with 24-hour expiry for completed/dead records and a maximum of 1,024 files; older
+completed receipts may be evicted sooner. A running receipt whose recorder PID is alive is retained beyond
+24 hours, including when persisting completion failed. Full stores apply `503 request_store_full` backpressure
+before a new action, rather than expiring a live receipt and risking replay. Large results can be omitted
+(`resultOmitted: true`). A receipt left running by a dead daemon is `interrupted` with `delivery: 'unknown'`; it is never replayed. Inspect the receipt and the screen when delivery
+is unknown. Never automatically retry uncertain input with a new ID. A missing receipt does not prove no input
+was sent.
+
+**Bind an input to its screen.** Send `snapshotId` alongside `ref` in `/input` or `/fill` to identify the observation
+that supplied the ref. Expired, wrong-device, or ownership-invalidated snapshots return `409 stale_ref` without
+sending that input. Ref re-verification still checks the current screen before acting. Without `snapshotId`,
+legacy clients use the device's latest cached tree. MCP `tap ref=…` carries the latest `get_ui` or successful
+visible `wait_for` snapshot from its own session. `returnUi: true` requests a recent post-input tree in the same response (`ui`); failed observation adds
+`observationUnavailable: true` without changing the input's delivery. It is optional because another screen read
+can add latency.
 
 **`expect` (added).** `/input`, `/fill`, `/swipe` and `/apps/:appId/launch` take an optional `expect`, checked once
 after the input (after the last action of a batch): `{ visible: text }` | `{ gone: text }` | `{ id: id }` |
@@ -425,7 +482,7 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 | POST | /v1/devices/:id/rotate | `{ orientation: 'portrait'\|'landscape' }` | `{ ok, orientation, screen?, note? }` once the screen has turned (see *Rotation*). `orientation` is what the screen shows afterwards; `note` is set when it stayed put |
 | GET | /v1/devices/:id/foreground | – | `{ app: AppInfo \| null }` |
 | GET | /v1/devices/:id/clipboard | – | `{ text: string \| null }` (added): the clipboard's plain text, `null` when it is empty or holds no text. Needs no lease (see *Clipboard*) |
-| PUT | /v1/devices/:id/clipboard | `{ text }` (a string, `""` empties it; at most 100,000 characters) | `{ ok, length }` (added; `POST` also accepted): replaces the clipboard. Needs the lease like other input |
+| PUT | /v1/devices/:id/clipboard | `{ text }` (a string, `""` empties it; at most 100,000 characters) | `{ ok, length, delivery, retrySafe, requestId? }` (`POST` also accepted): replaces the clipboard as serialized input, with ownership checks and optional request receipts |
 | GET | /v1/devices/:id/crashes | `?since=<ISO>&appId=&limit=20` | `CrashReport[]` (newest first) |
 | GET | /v1/devices/:id/crashes/:cid | `?full=1&maxChars=16000` | `{ id, text, truncated, length }`. By default: header + crashed thread (Apple `.ips` JSON is summarised) |
 | POST | /v1/devices/:id/recording/start | `{ maxSeconds?: 300 }` (1–3600) | `{ ok, active, path, startedAt, maxSeconds }` → `<state>/recordings/<name>-<time>.mp4`; `409 recording_active` |
@@ -467,9 +524,23 @@ turns the screen and returns once it has turned (or after ~1.5–2 s if the app 
   delivers `VideoPacket`s (`screen`, `config`, `frame`, `state`, `reset`; `src/core/types.ts`), with optional
   `restart()` and `requestKeyFrame()`.
 
+**Native iPhone additions.** Native sidecars require Python 3.11+ in the pymobiledevice3 environment.
+iOS 27+ native paths expose appearance, two-finger pinch, bounded logs, and
+foreground-app lookup without WDA. Foreground lookup uses the accessibility service's exact PID and the installed
+app/process inventory. Missing or ambiguous PID/app matches return `502 foreground_unknown`; `app: null` means
+SpringBoard was positively identified, not that detection failed. These new paths have fake
+and contract-test coverage; this change has not validated them on a physical iPhone. Native Unicode typing sends
+clipboard payloads over sidecar stdio, replacing the previous temporary plaintext file workaround. A secret paste
+attempts to restore the prior clipboard after insertion is confirmed, and avoids overwriting a newer clipboard.
+Unconfirmed paste returns `paste_unconfirmed` with unknown delivery; failed restoration after confirmed entry
+returns `clipboard_restore_failed` with sent delivery. Inspect the field and clipboard instead of retyping.
+Cable-free `pairWifi`, automatic DDI mounting, and merging the native/HID sidecars remain unexposed work.
+
 **Clipboard.** Devices that can read and set it list `clipboard` in their capabilities: iOS simulators
 (`simctl pbpaste` / `pbcopy`), Android emulators and phones (the helper, below), and iPhones on iOS 27 or later (the
 CoreDevice pasteboard service, through the native sidecar). iPhones before iOS 27 return `501 not_supported`.
+* GET is a read. PUT/POST is an input: writes use the per-device queue and conservative SDK transport behavior,
+  include delivery/retry safety, and may carry an input request ID for recovery after a lost response.
 * Plain text only. A clipboard holding only an image reads as `null`; on an iPhone a copied link (Safari's "Copy Link")
   reads as its URL. Text goes in and out exactly: emoji, newlines and trailing whitespace are kept.
 * Pasting is up to the app: long-press the field and tap Paste. On Android 13+ a set from PhoneDock doesn't show the
@@ -499,6 +570,55 @@ CoreDevice pasteboard service, through the native sidecar). iPhones before iOS 2
 
 `PHONEDOCK_ANDROID_HELPER=0` (daemon environment) turns the helper off: `/ui` uses `uiautomator dump`, apps
 have no `name` unless it came from an install, and reading the clipboard returns `501 not_supported`.
+
+## Environment & diagnostics
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | /v1/devices/:id/environment | – | Supported actions, permission services, biometric prerequisites, status-bar fields, and limitations |
+| POST | /v1/devices/:id/environment | One `EnvironmentAction` below | `{ ok, action, warnings, path?, delivery, retrySafe, requestId? }`; requires ownership like input |
+| GET | /v1/devices/:id/audit | `?includeOffscreen=1` | `{ source, capturedAt, snapshotId?, findings, examined, limitations }` |
+| POST | /v1/devices/:id/webview | `{ appId, action: 'snapshot'\|'network', targetId?, bounds?: {x,y,width,height}, captureMs?: 2000, maxElements?: 200 }` | Read-only debug-enabled Android WebView DOM or bounded network metadata |
+
+Environment actions are deliberately limited to **iOS Simulator and Android Emulator**, with no physical-phone
+permission pre-grants or authentication bypass:
+
+* `{ action: 'permissions', appId, state: 'grant'|'revoke'|'reset', permissions: [...] }`: services must be listed
+  by the capabilities response. Android accepts runtime `android.permission.*` names declared by the app and
+  supported by that API level. iOS uses `simctl privacy`; camera, notifications and pasteboard are not advertised.
+* `{ action: 'biometric', event: 'enroll'|'unenroll'|'match'|'fail', modality?: 'face'|'fingerprint', fingerId? }`:
+  simulator Darwin notifications are experimental private recipes and depend on model/runtime support. Android
+  supports fingerprint `match`/`fail` only; enroll in emulator Settings first and supply an unenrolled `fingerId`
+  for failure. Physical biometric prompts still require the person.
+* `{ action: 'statusBar', mode: 'override'|'clear', time?: '09:41', batteryLevel?, wifiBars?, cellularBars? }`:
+  battery is 0–100, cellular bars 0–4, Wi-Fi bars 0–3 on iOS and 0–4 on Android. Clear overrides after the test.
+* `{ action: 'media', path }`: import a supported local photo/video into the library. This does not inject a
+  virtual camera feed or QR image into a camera.
+
+MCP uses `device_environment` (omit `change` to read capabilities), `audit_ui`, `doctor`, and `inspect_webview`.
+CLI equivalents are `environment`, `permissions`, `biometric`, `status-bar`, `media`, `audit`, `doctor`, and
+`webview`; see `phonedock help` for arguments. Pre-grant tests should be accompanied by separate permission-prompt
+tests, because pre-granting can hide app bugs.
+
+The UI audit is a heuristic read of one UI tree: missing labels, small targets (44 pt on iOS / 48 dp on Android
+when scale/density is known), clipping, offscreen controls and inferred occlusion. OCR cannot establish semantic
+labels or hit areas, so those checks are skipped; unknown scale and incomplete trees are reported as limitations.
+It does not certify accessibility compliance, measure contrast, or run an automatic settings sweep.
+
+`doctor` checks host paths/tools and native Python dependencies without contacting, pairing or booting devices.
+Optional device diagnosis uses metadata known to the daemon; resolving that device can refresh inventory.
+A ready host dependency check does not establish that a particular OS/device/tool combination works.
+
+WebView diagnostics require an already running app with debugging explicitly enabled in its own build. PhoneDock
+matches its process to an Android WebView debugger socket and opens a temporary, serial-scoped ADB forward, which
+it removes afterward. `snapshot` returns DOM text/elements; `network` listens for at most `captureMs` (1–5000 ms)
+and returns bounded method/URL/status/duration/failure metadata. It does not return response bodies, intercept
+native app HTTP, enable debugging, act on the DOM, or implement an iOS WebView bridge. Query strings, fragments and
+URL credentials are stripped; paths and DOM text can still contain private data.
+
+Without confirmed device-pixel WebView `bounds`, `coordinateSpace` is `css`: `cssBounds` cannot be used as device
+tap coordinates. Caller-supplied bounds allow a mapped `bounds` estimate; verify it against the screen. `w…`
+element refs are diagnostic identifiers, not native `e…` refs accepted by `/input` or `/fill`.
 
 ## Human handoff
 An agent hits something it must not or cannot do itself: Face ID, a passcode, a CAPTCHA, an Apple Account
@@ -651,11 +771,30 @@ comment above them.
 | `sleep` | milliseconds (prefer `wait_for`) |
 | `assert_visible` / `assert_not_visible` | selector |
 | `assert_text` | `{ field: selector, equals \| contains \| matches: … }` (the element's value, else its text) |
-| `screenshot` | name, or `{ name, baseline?: path, tolerance?: 0.02 }`: saved in the artifacts folder; with a baseline (relative to the flow file; created when missing), fails when more than `tolerance` of a 64-px-wide grayscale thumbnail differs |
+| `screenshot` | name, or `{ name, baseline?: path, tolerance?: 0.02, comparison?: pixel\|thumbnail, pixelThreshold?: 16, ignore?: [{x,y,width,height}] }`: save a PNG and optionally compare a reviewed baseline; see below |
 
 ### Running
 
-`phonedock test <files|dirs…> [--device ID] [--platform android|ios] [--junit out.xml] [--artifacts DIR] [--retries N] [--timeout MS] [--env NAME=VALUE]…`
+`phonedock test <files|dirs…> [--device ID] [--platform android|ios] [--junit out.xml] [--artifacts DIR] [--retries N] [--timeout MS] [--env NAME=VALUE]… [--baseline-root DIR] [--baseline-mode compare|record|update] [--capture-steps=true]`
+
+CLI and MCP `run_flow` use the same comparison engine. The default `pixel` comparison decodes PNGs with FFmpeg
+and compares full-resolution RGBA channels. A pixel differs if any channel changes by more than `pixelThreshold`
+(default 16 of 255); `tolerance` is the allowed fraction of non-ignored pixels (default 0.02 = 2%). `ignore`
+rectangles use full-resolution screenshot pixels and are excluded from both counts. Dimension changes, missing
+FFmpeg, malformed images, or ignoring every pixel fail explicitly. `comparison: thumbnail` explicitly opts into
+the previous 64-pixel grayscale approximation; it is never a fallback.
+
+Baselines are resolved relative to the flow file (inline flows use the current directory) and must stay within
+`baselineRoot` / `--baseline-root` / MCP `baseline_root` (default current directory), including through symlinks.
+The modes are `compare` (default: a missing baseline fails), `record` (create missing baselines, compare existing
+ones), and `update` (explicitly replace baselines). Use `baselineMode` in the TS runner, `--baseline-mode` in the
+CLI, or `baseline_mode` in MCP after reviewing the screen.
+
+Every flow run writes a self-contained, script-free `report.html`; a suite also writes a combined report.
+`captureSteps` / `--capture-steps=true` / MCP `capture_steps=true` opts into before/after screenshots with action
+markers; it defaults off to avoid screen-capture latency. Known secret text is redacted from textual reports and
+diagnostics. Screenshot pixels remain unchanged and may contain sensitive information; inspect artifacts before
+sharing them.
 
 * Folders are searched for `*.yaml`, `*.yml`, `*.json` (not `*.maestro.yaml`), in name order. A file that doesn't
   parse fails. Without `--device`: `$PHONEDOCK_DEVICE`, else the only running device.
@@ -786,4 +925,6 @@ person), kept between runs and shared by every client of the daemon: one Markdow
 
 ## Performance metrics
 
-`GET /v1/metrics` requires the daemon bearer token. It returns route and backend-operation timing in milliseconds, with lifetime `count` and `max`, and `p50`/`p95` computed from the most recent 1,024 samples per key. Routes are identified by method and route template; backend operations by backend ID and method. Long-lived stream routes measure handler setup rather than stream lifetime. Frame, screenshot, and input responses include a `Server-Timing: route;dur=...` header when headers have not already been sent.
+`GET /v1/metrics` requires the daemon bearer token. It returns `routes`, `backends`, and `phases` timing in milliseconds, with lifetime `count` and `max`, and `p50`/`p95` computed from the most recent 1,024 samples per key. Routes are identified by method and route template; backend operations by backend ID and method. Long-lived stream routes measure handler setup rather than stream lifetime. Frame, screenshot, and input responses include a `Server-Timing: route;dur=...` header when headers have not already been sent.
+
+`phases["input.queue"]` measures time waiting for a device input slot; `phases["input.execute"]` measures the route handler inside that slot. Optional UI enrichment occurs afterward and is not included in `input.execute`. These are daemon timings, not device frame times or evidence of a speedup.

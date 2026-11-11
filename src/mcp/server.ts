@@ -26,6 +26,9 @@ import { registerTraceTools } from './tools-trace.ts';
 
 const VERSION = '0.2.6';
 const DEFAULT_MAX_SIZE = 1024;
+const RUNTIME_TOOLS = new Set(['list_devices', 'acquire_device', 'release_device', 'get_ui', 'screenshot', 'tap',
+  'swipe', 'type_text', 'fill', 'press_key', 'scroll_to', 'go_back', 'system_gesture', 'hide_keyboard', 'wait_for',
+  'batch', 'launch_app', 'open_url', 'request_human', 'handle_alert', 'clipboard', 'get_request_result', 'audit_ui', 'device_environment']);
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string };
 interface ToolResult { content: Content[]; isError?: boolean; [k: string]: unknown }
@@ -43,6 +46,10 @@ export interface McpContext {
   client: PhoneDockClient;
   scales: Map<string, ScaleInfo>;          // the standard (fixed) image space per device
   lastDevice?: string;
+  /** Optional smaller, typed tool catalog. Existing clients keep the complete catalog. */
+  profile?: 'all' | 'runtime';
+  snapshots?: Map<string, string>;
+  outlines?: Map<string, { lines: string[] }>;
   deviceCache?: { at: number; list: Device[] };
   leased?: Set<string>;                    // device ids this server acquired (released when the session ends)
   /** Per device: the last image returned was NOT in the standard space (other max_size): warn on coordinate input. */
@@ -76,7 +83,8 @@ export function errorResult(e: unknown): ToolResult {
     const dl = e.delivery === 'not_sent' ? '\nNot sent: nothing reached the device, so retrying is safe.'
       : e.delivery === 'unknown' ? '\nDelivery unknown: it may have reached the device. Check get_ui or a screenshot before retrying.'
       : e.delivery === 'sent' ? '\nPart of it was sent: check the screen before retrying.' : '';
-    return { isError: true, content: [text(`Error [${e.code}${e.status ? ` ${e.status}` : ''}]: ${e.message}${dl}${hints.length ? '\nHints:\n- ' + hints.slice(0, 3).join('\n- ') : ''}${detail ? '\nDetail: ' + detail : ''}`)] };
+    const receipt = e.requestId ? `\nRequest ID: ${e.requestId}. Recover with get_request_result(request_id=${JSON.stringify(e.requestId)}).` : '';
+    return { isError: true, content: [text(`Error [${e.code}${e.status ? ` ${e.status}` : ''}]: ${e.message}${dl}${receipt}${hints.length ? '\nHints:\n- ' + hints.slice(0, 3).join('\n- ') : ''}${detail ? '\nDetail: ' + detail : ''}`)] };
   }
   return { isError: true, content: [text(`Error: ${(e as Error)?.message ?? String(e)}`)] };
 }
@@ -326,6 +334,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
   /** Every registered handler by name (used by `batch` to dispatch steps). Args are validated like a real call. */
   const handlers = new Map<string, ToolFn>();
   function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, fn: (args: z.infer<z.ZodObject<S>>, extra?: ToolExtra) => Promise<ToolResult>): void {
+    if (ctx.profile === 'runtime' && !RUNTIME_TOOLS.has(name)) return;
     const schema = z.object(shape);
     toolKeys.set(name, Object.keys(shape));
     handlers.set(name, (async (args, extra) => {
@@ -340,6 +349,38 @@ export function createMcpServer(ctx: McpContext): McpServer {
   }
 
   // ── inventory ─────────────────────────────────────────────────────────
+  tool('doctor', 'Check host prerequisites without contacting devices. Optionally diagnose cached metadata for one known device and required capabilities.', {
+    device: deviceParam, capabilities: z.array(z.string()).max(30).optional(),
+  }, async (a) => {
+    const d = a.device ? await target(a.device) : undefined;
+    return { content: [text(JSON.stringify(await c.doctor({ device: d?.id, capabilities: a.capabilities })))] };
+  });
+  const environmentChange = z.discriminatedUnion('action', [
+    z.object({ action: z.literal('permissions'), appId: z.string(), state: z.enum(['grant', 'revoke', 'reset']), permissions: z.array(z.string()).min(1).max(32) }),
+    z.object({ action: z.literal('biometric'), event: z.enum(['enroll', 'unenroll', 'match', 'fail']), modality: z.enum(['face', 'fingerprint']).optional(), fingerId: z.number().int().min(1).max(10000).optional() }),
+    z.object({ action: z.literal('statusBar'), mode: z.enum(['override', 'clear']), time: z.string().optional(), batteryLevel: z.number().int().min(0).max(100).optional(), wifiBars: z.number().int().min(0).max(4).optional(), cellularBars: z.number().int().min(0).max(4).optional() }),
+    z.object({ action: z.literal('media'), path: z.string() }),
+  ]);
+  tool('device_environment', 'Read supported test environment controls, or apply one explicit change on a simulator/emulator: permissions, simulated biometrics, status bar, or photo/video import. Physical phones are unsupported. Private biometric recipes are experimental. Clear status-bar overrides when done; keep separate tests for real permission prompts.', {
+    device: deviceParam, change: environmentChange.optional(),
+  }, async (a) => {
+    const d = await target(a.device);
+    return { content: [text(JSON.stringify(a.change ? await c.setEnvironment(d.id, a.change) : await c.environment(d.id)))] };
+  });
+  tool('audit_ui', 'Read the current UI and return heuristic warnings for labels, touch target sizes, clipping and occlusion. Uses iOS points or Android density when known; this is not an accessibility compliance certification.', {
+    device: deviceParam, include_offscreen: z.boolean().optional(),
+  }, async (a) => { const d = await target(a.device); return { content: [text(JSON.stringify(await c.auditUi(d.id, { includeOffscreen: a.include_offscreen })))] }; });
+  tool('inspect_webview', 'Read DOM elements or bounded network metadata from a debug-enabled Android WebView belonging to app_id. Does not enable debugging or perform DOM actions. Without confirmed WebView bounds, coordinates remain CSS pixels and must not be used for device input. iOS is unsupported.', {
+    device: deviceParam, app_id: z.string(), action: z.enum(['snapshot', 'network']).optional(), target_id: z.string().optional(),
+    bounds: z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() }).optional(),
+    capture_ms: z.number().int().min(1).max(5000).optional(), max_elements: z.number().int().min(1).max(500).optional(),
+  }, async (a) => { const d = await target(a.device); return { content: [text(JSON.stringify(await c.inspectWebView(d.id, { appId: a.app_id, action: a.action ?? 'snapshot', targetId: a.target_id, bounds: a.bounds, captureMs: a.capture_ms, maxElements: a.max_elements })))] }; });
+  tool('get_request_result', 'Inspect the retained outcome of a lost input response. Never resend input just because delivery is unknown; use this receipt and read the screen.', {
+    device: deviceParam, request_id: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
+  }, async (a) => {
+    const d = await target(a.device);
+    return { content: [text(JSON.stringify(await c.requestResult(d.id, a.request_id)))] };
+  });
   tool('list_devices', 'List all phones/VMs PhoneDock knows about (virtual + physical, all backends) with id, platform, state (running/stopped/…), OS, screen size and lease holder. Start here. Devices must be state=running before you can screenshot/tap; use boot_device for stopped ones.', {
     platform: z.enum(['android', 'ios', 'linux', 'other']).optional().describe('Filter by platform'),
     state: z.string().optional().describe('Filter by state, e.g. "running"'),
@@ -561,10 +602,15 @@ export function createMcpServer(ctx: McpContext): McpServer {
     coordinate_space: spaceParam,
     include_all: z.boolean().optional().describe('Include container elements with no text/label/id (default false)'),
     full_text: z.boolean().optional().describe('Show every text, label and value whole (default: cut at about 80 characters, marked …). Use it to read long text without a screenshot'),
+    visible_only: z.boolean().optional().describe('Omit elements wholly outside the screen (default true)'),
+    interactive_only: z.boolean().optional().describe('Only actionable, editable or scrollable elements (default false)'),
+    diff: z.boolean().optional().describe('Only changed outline lines since this session last read this device; otherwise a full outline'),
     max_lines: z.number().int().min(10).max(2000).optional().describe('default 400'),
   }, async (a) => {
     const d = await target(a.device);
     const tree = await c.ui(d.id, { ocrFallback: a.ocr_fallback ?? true });
+    ctx.snapshots ??= new Map();
+    if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
     // the tree's own screen (read with it, as it is turned now) is the space its coordinates are in
     const std = spaceOf(d, tree.screen) ?? await scaleFor(d);
     const s = a.coordinate_space === 'device' ? { ...std, scale: 1 } : std;
@@ -575,8 +621,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const cut = (t: string, n: number) => { if (a.full_text || t.length <= n) return t; cutSome = true; return t.slice(0, n - 3) + '…'; };
     const walk = (els: UiElement[] | undefined, depth: number) => {
       for (const e of els ?? []) {
+        const bounds = e.bounds;
+        const offscreen = bounds && (bounds.x + bounds.width <= 0 || bounds.y + bounds.height <= 0 || bounds.x >= tree.screen.width || bounds.y >= tree.screen.height);
+        if (a.visible_only !== false && offscreen) continue;
         if (e.text || e.label) texts.push(`${e.text ?? ''} ${e.label ?? ''}`);
-        const interesting = a.include_all || e.text || e.label || e.id || e.value || e.placeholder || e.clickable || e.scrollable || e.focused;
+        const interesting = a.interactive_only ? e.clickable || e.scrollable || e.focused || /(?:TextField|EditText|TextInput|SecureTextField)$/.test(e.type)
+          : a.include_all || e.text || e.label || e.id || e.value || e.placeholder || e.clickable || e.scrollable || e.focused;
         if (interesting) {
           total++;
           if (lines.length < max) {
@@ -614,7 +664,16 @@ export function createMcpServer(ctx: McpContext): McpServer {
       + (pr && !(pr.needsHuman && needs) ? `\n${promptWarning(pr)}` : '') + ocrNote
       + (over ? `\n${over} (not in this list)` : '');
     if (!lines.length) return { content: [text(`${head}\nNo UI elements found — take a screenshot to see the screen.`)] };
-    return { content: [text(`${head}\n${lines.join('\n')}`)] };
+    ctx.outlines ??= new Map();
+    const previous = ctx.outlines.get(d.id);
+    ctx.outlines.set(d.id, { lines });
+    // Refs are part of the observation: even an otherwise identical line must be disclosed when renumbered.
+    const old = new Set(previous?.lines); const now = new Set(lines);
+    const shown = a.diff && previous ? [
+      ...previous.lines.filter((l) => !now.has(l)).map((l) => `- ${l.replace(/\be\d+\b/, '(removed)')}`),
+      ...lines.filter((l) => !old.has(l)).map((l) => `+ ${l}`),
+    ] : lines;
+    return { content: [text(`${head}${tree.snapshotId ? ` snapshot=${tree.snapshotId}` : ''}\n${a.diff && previous ? 'Changes (removed lines cannot be targeted):\n' : ''}${shown.join('\n') || '(unchanged)'}`)] };
   });
 
   // ── input ─────────────────────────────────────────────────────────────
@@ -653,7 +712,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
       return act(d, msg, a.return_screenshot, a.settle_ms, undefined, { report: tr?.expect, what: 'tap' });
     }
     if (a.ref) {
-      const r = await c.tapRef(d.id, a.ref, { expect }) as { expect?: ExpectReport; resolved?: { ref: string; x: number; y: number; coveredBy?: string; hidden?: boolean; keyboardHidden?: boolean; moved?: { from: { x: number; y: number } }; element?: { type?: string; text?: string; label?: string; id?: string } } };
+      const snapshotId = ctx.snapshots?.get(d.id);
+      const r = await c.tapRef(d.id, a.ref, { expect, ...(snapshotId ? { snapshotId } : {}) }) as { expect?: ExpectReport; resolved?: { ref: string; x: number; y: number; coveredBy?: string; hidden?: boolean; keyboardHidden?: boolean; moved?: { from: { x: number; y: number } }; element?: { type?: string; text?: string; label?: string; id?: string } } };
       const el = r.resolved?.element; const sc = a.coordinate_space === 'device' ? 1 : (await scaleFor(d)).scale || 1;
       const desc = el && r.resolved ? describeMatch({ ref: r.resolved.ref, type: el.type ?? '', text: el.text, label: el.label, id: el.id, center: { x: r.resolved.x, y: r.resolved.y }, visible: true } as ElementMatch, sc) : a.ref;
       const cov = r.resolved?.coveredBy;
@@ -911,13 +971,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
     await sleep(ms); return { content: [text(`Waited ${ms} ms.`)] };
   });
 
-  registerExtraTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, toDevice, shot, act, text, errorResult,
+  registerExtraTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, spaceOf, toDevice, shot, act, text, errorResult,
     deviceParam, spaceParam, observeParam, settleParam, matchParam, describeMatch, sleep, expectParam });
-  registerFlowTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, toDevice, shot, act, text, errorResult,
+  registerFlowTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, spaceOf, toDevice, shot, act, text, errorResult,
     deviceParam, spaceParam, observeParam, settleParam, matchParam, describeMatch, sleep, expectParam });
-  registerTraceTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, toDevice, shot, act, text, errorResult,
+  registerTraceTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, spaceOf, toDevice, shot, act, text, errorResult,
     deviceParam, spaceParam, observeParam, settleParam, matchParam, describeMatch, sleep, expectParam });
-  registerNotesTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, toDevice, shot, act, text, errorResult,
+  registerNotesTools({ server, ctx, c, tool, handlers, target, deviceList, scaleFor, spaceOf, toDevice, shot, act, text, errorResult,
     deviceParam, spaceParam, observeParam, settleParam, matchParam, describeMatch, sleep, expectParam });
 
   return server;
@@ -931,6 +991,7 @@ export interface ToolKit {
   target: (device?: string) => Promise<Device>;
   deviceList: (maxAgeMs?: number) => Promise<Device[]>;
   scaleFor: (d: Device) => Promise<ScaleInfo>;
+  spaceOf: (d: Device, screen: { width?: number; height?: number } | undefined) => ScaleInfo | undefined;
   toDevice: (d: Device, x: number, y: number, space?: 'image' | 'device') => Promise<[number, number]>;
   shot: (d: Device, maxSize?: number, format?: 'jpeg' | 'png', quality?: number) => Promise<Content[]>;
   act: (d: Device, summary: string, observe?: boolean, settleMs?: number, defaultSettle?: number, expect?: { report?: ExpectReport; what: string }) => Promise<ToolResult>;
@@ -942,7 +1003,7 @@ export interface ToolKit {
 }
 export type { Content, ToolResult, ScaleInfo, ToolExtra, ToolFn };
 
-export interface StartOptions { http?: number; client?: PhoneDockClient; ownerFromFlag?: string }
+export interface StartOptions { http?: number; client?: PhoneDockClient; ownerFromFlag?: string; profile?: 'all' | 'runtime' }
 
 function makeClient(base?: PhoneDockClient): PhoneDockClient {
   return new PhoneDockClient({ autoStart: base?.autoStart ?? true, home: base?.home });
@@ -974,7 +1035,7 @@ export async function releaseSession(ctx: McpContext): Promise<void> {
 export async function startMcpServer(opts: StartOptions = {}): Promise<void> {
   if (!opts.http) {
     const client = opts.client ?? makeClient();
-    const ctx: McpContext = { client, scales: new Map() };
+    const ctx: McpContext = { client, scales: new Map(), profile: opts.profile };
     const server = createMcpServer(ctx);
     setOwnerOnInit(server, client, opts.ownerFromFlag);
     // Warm up the daemon in the background so the first tool call is fast; errors surface per call.
@@ -1008,7 +1069,7 @@ export async function startMcpServer(opts: StartOptions = {}): Promise<void> {
         }
         const t = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), onsessioninitialized: (id) => { sessions.set(id, t); } });
         const client = makeClient(opts.client);
-        const sctx: McpContext = { client, scales: new Map() };
+        const sctx: McpContext = { client, scales: new Map(), profile: opts.profile };
         t.onclose = () => { if (t.sessionId) sessions.delete(t.sessionId); void releaseSession(sctx); };
         const server = createMcpServer(sctx);
         setOwnerOnInit(server, client, opts.ownerFromFlag);

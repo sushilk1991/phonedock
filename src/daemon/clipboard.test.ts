@@ -30,10 +30,11 @@ const plain = { ...base, id: 'fake-noclip', capabilities: [] } as unknown as Bac
 core.backends.push(fake, plain);
 
 const DEV = 'fake-clip:pdtest-clip';
-async function call(method: string, id: string, body?: unknown, owner = 'mcp:test:1'): Promise<any> {
+async function call(method: string, id: string, body?: unknown, owner = 'mcp:test:1', requestId?: string): Promise<any> {
   const m = router.match(method, `/v1/devices/${encodeURIComponent(id)}/clipboard`);
   assert.ok(m && m !== 'method', `${method} route exists`);
-  const c = { params: m.params, owner, body: async () => body ?? {}, q: () => undefined } as unknown as Ctx;
+  const c = { params: m.params, owner, body: async () => body ?? {}, q: () => undefined,
+    ...(requestId ? { req: { method, headers: { 'x-phonedock-request-id': requestId } }, url: new URL(`http://localhost/v1/devices/${encodeURIComponent(id)}/clipboard`) } : {}) } as unknown as Ctx;
   return m.h(c);
 }
 async function fails(p: Promise<unknown>): Promise<PhoneDockError> {
@@ -61,13 +62,13 @@ test('PUT and POST set the exact text (emoji, newlines, 10 KB); the reply and th
   try {
     const secret = 'OTP 493817 — héllo 👋\nsecond line\n';
     const r = await call('PUT', DEV, { text: secret });
-    assert.deepEqual(r, { ok: true, length: [...secret].length });
+    assert.deepEqual(r, { ok: true, length: [...secret].length, delivery: 'sent', retrySafe: false });
     assert.equal(sets.at(-1)?.text, secret);
     assert.equal(sets.at(-1)?.nid, 'pdtest-clip');
     const big = 'x'.repeat(10 * 1024);
-    assert.deepEqual(await call('POST', DEV, { text: big }), { ok: true, length: 10 * 1024 });
+    assert.deepEqual(await call('POST', DEV, { text: big }), { ok: true, length: 10 * 1024, delivery: 'sent', retrySafe: false });
     assert.equal(sets.at(-1)?.text, big);
-    assert.deepEqual(await call('PUT', DEV, { text: '' }), { ok: true, length: 0 });
+    assert.deepEqual(await call('PUT', DEV, { text: '' }), { ok: true, length: 0, delivery: 'sent', retrySafe: false });
     assert.equal(sets.at(-1)?.text, '');
 
     const actions = core.readActions(DEV, 10) as { action: { action: string; length: number; text?: unknown } }[];
@@ -105,7 +106,7 @@ test('set needs the lease; reading does not', async () => {
     const e = await fails(call('PUT', id, { text: 'mine' }, 'mcp:test:1'));
     assert.equal(e.code, 'lease_conflict');
     assert.equal(clip, 'shared');
-    assert.deepEqual(await call('PUT', id, { text: 'theirs' }, 'cli:other'), { ok: true, length: 6 });
+    assert.deepEqual(await call('PUT', id, { text: 'theirs' }, 'cli:other'), { ok: true, length: 6, delivery: 'sent', retrySafe: false });
   } finally { core.clearLeases(); }
 });
 
@@ -126,4 +127,18 @@ test('a failed set is passed on and not logged', async () => {
     assert.equal(e.code, 'clipboard_failed');
   } finally { failSet = undefined; }
   assert.equal(logText(DEV), logged);
+});
+
+test('clipboard writes queue behind a paste and duplicate receipts never overwrite a later copy', async () => {
+  const { inputRoute } = await import('./delivery.ts');
+  let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+  const paste = inputRoute(async () => { await gate; return { ok: true }; })({ params: { id: DEV }, owner: 'mcp:test:1', body: async () => ({}) } as unknown as Ctx);
+  await new Promise((r) => setImmediate(r));
+  const before = sets.length;
+  const write = call('PUT', DEV, { text: 'receipt-copy' }, 'mcp:test:1', 'pdtest-clipboard-once');
+  await new Promise((r) => setImmediate(r)); assert.equal(sets.length, before);
+  release(); await paste; const result = await write;
+  clip = 'a newer user copy';
+  assert.deepEqual(await call('PUT', DEV, { text: 'receipt-copy' }, 'mcp:test:1', 'pdtest-clipboard-once'), result);
+  assert.equal(sets.length, before + 1); assert.equal(clip, 'a newer user copy');
 });

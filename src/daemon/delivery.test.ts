@@ -46,6 +46,59 @@ test('inputRoute: results say sent / not_sent from the actions logged; errors ca
   assert.ok((actionCount.get(id) ?? 0) >= 2);
 });
 
+test('delivery belongs to the request, never a concurrent action or lease event', async () => {
+  const id = 'fake:pdtest-delivery-race';
+  let resume!: () => void;
+  const gate = new Promise<void>((r) => { resume = r; });
+  const pending = run(id, async () => { await gate; throw new PhoneDockError('No input', 'bad_request', 400); });
+  await Promise.resolve();
+  logAction(id, 'other', { action: 'tap', x: 1, y: 2 });
+  logAction(id, 'test', { action: 'lease.acquire' });
+  resume();
+  assert.equal((await pending as PhoneDockError).delivery, 'not_sent');
+});
+
+test('input requests serialize per device, while independent devices proceed', async () => {
+  const calls: string[] = [];
+  let resume!: () => void;
+  const gate = new Promise<void>((r) => { resume = r; });
+  const a = run('fake:pdtest-queue', async () => { calls.push('first'); await gate; calls.push('done'); return {}; });
+  await new Promise((r) => setImmediate(r));
+  const b = run('fake:pdtest-queue', async () => { calls.push('second'); return {}; });
+  await run('fake:pdtest-independent', async () => { calls.push('independent'); return {}; });
+  assert.deepEqual(calls, ['first', 'independent']);
+  resume(); await Promise.all([a, b]);
+  assert.deepEqual(calls, ['first', 'independent', 'done', 'second']);
+});
+
+test('backend validation failures stay not_sent; transport failures stay unknown', async () => {
+  const { guardedBackendCall } = await import('./execution.ts');
+  const id = 'fake:pdtest-preflight';
+  const fail = (error: Error) => run(id, async () => guardedBackendCall('fake', 'tap', ['pdtest-preflight'], () => { throw error; }));
+  assert.equal((await fail(new PhoneDockError('Unavailable', 'not_supported', 501)) as PhoneDockError).delivery, 'not_sent');
+  assert.equal((await fail(new Error('Connection reset')) as PhoneDockError).delivery, 'unknown');
+});
+
+test('human takeover fences the remaining primitives of an input batch', async () => {
+  const core = await import('./core.ts');
+  const { router } = await import('./routes.ts');
+  const { instrumentBackend } = await import('./metrics.ts');
+  const id = 'fake-takeover:pdtest-batch'; let taps = 0;
+  const backend = instrumentBackend({ id: 'fake-takeover', platform: 'ios',
+    async tap() { if (++taps === 1) core.acquireLease(id, core.HUMAN_OWNER, undefined, true); },
+  }, 'fake-takeover');
+  core.backends.push(backend as never);
+  core.acquireLease(id, 'test-agent');
+  const route = router.match('POST', `/v1/devices/${id}/input`);
+  assert.ok(route && route !== 'method');
+  try {
+    await assert.rejects(Promise.resolve(route.h({ params: { id }, owner: 'test-agent',
+      body: async () => ({ actions: [{ action: 'tap', x: 1, y: 2 }, { action: 'tap', x: 3, y: 4 }] }), q: () => undefined,
+    } as unknown as Ctx)), (e: PhoneDockError) => e.code === 'lease_conflict' && e.delivery === 'sent');
+    assert.equal(taps, 1);
+  } finally { core.clearLeases(); core.backends.splice(core.backends.indexOf(backend as never), 1); }
+});
+
 test('parseExpect: one shape for every input, checked before anything is sent', () => {
   assert.deepEqual(parseExpect({ visible: 'Welcome' }), { visible: 'Welcome' });
   assert.deepEqual(parseExpect('Welcome'), { visible: 'Welcome' });

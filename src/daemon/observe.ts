@@ -14,6 +14,8 @@ import type { Observation, Selector } from '../core/flow.ts';
 import type { Ctx, Handler } from './http.ts';
 import { flatten, isEditable, keyboardInfo } from './media.ts';
 import { lastActionAt, safeId, uiCacheListeners } from './core.ts';
+import { inputScope } from './execution.ts';
+import { redactInputValue } from '../core/secrets.ts';
 
 const MAX_BYTES = 2 * 1024 * 1024;   // then observations.jsonl becomes observations.1.jsonl (one old file kept)
 const file = (id: string, n = '') => join(stateDir('devices', safeId(id)), `observations${n}.jsonl`);
@@ -59,7 +61,9 @@ const lastScreen = new Map<string, { sig: string; at: number }>();
  *  tell "tapped, then back to the same screen"). */
 export function noteScreen(id: string, tree: UiTree) {
   if (!tree?.root) return;
-  const { sig, texts } = screenDigest(tree);
+  const { sig, texts: rawTexts } = screenDigest(tree);
+  const scope = inputScope();
+  const texts = redactInputValue(rawTexts, scope?.deviceId === id ? scope.secrets ?? [] : []);
   if (!texts.length) return;   // nothing readable (an app still launching, an empty tree): says nothing about the screen
   const prev = lastScreen.get(id); const now = Date.now();
   if (prev && prev.sig === sig && (lastActionAt.get(id) ?? 0) <= prev.at) return;

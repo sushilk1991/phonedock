@@ -7,11 +7,13 @@
 // writes its HEVC access units to fd 3 and stays up while someone watches.
 // Verified on an iPhone 16 Pro Max, iOS 27.0, Wi-Fi paired (2026-11-03).
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { which } from '../core/paths.ts';
+import { pymd3Python } from './pymd3-python.ts';
+export { pymd3Python } from './pymd3-python.ts';
 import { PhoneDockError } from '../core/types.ts';
+import { assertInputFence } from '../core/input-fence.ts';
 
 // Short: while our stream is open iOS treats the phone as "observed remotely" (camera/mic blocked).
 const IDLE_MS = Number(process.env.PHONEDOCK_IOS_HID_IDLE_MS ?? 45_000);
@@ -35,22 +37,6 @@ export function hidScript(): string | undefined {
   return cands.find((c) => c && existsSync(c));
 }
 
-let pyCache: string | null | undefined;
-/** The python of the installed pymobiledevice3 (uv/pipx venv), read from its launcher's shebang. */
-export function pymd3Python(): string | undefined {
-  if (process.env.PHONEDOCK_PYMD3_PYTHON) return process.env.PHONEDOCK_PYMD3_PYTHON;
-  if (pyCache !== undefined) return pyCache ?? undefined;
-  pyCache = null;
-  const bin = which('pymobiledevice3');
-  if (bin) {
-    try {
-      const first = readFileSync(bin, 'utf8').slice(0, 300).split('\n')[0];
-      const m = /^#!\s*(\S+)/.exec(first);
-      if (m && existsSync(m[1])) pyCache = m[1];
-    } catch { /* unreadable launcher */ }
-  }
-  return pyCache ?? undefined;
-}
 
 export function iosMajor(v?: string): number { return Number.parseInt(String(v ?? '').split('.')[0], 10) || 0; }
 export function isNativeInputCapable(osVersion?: string): boolean {
@@ -140,6 +126,7 @@ class HidChannel {
     const run = async () => {
       await this.ready;
       if (this.dead) throw this.err('iPhone input session is not running');
+      if (input) assertInputFence();
       if (input) this.lastInput = Date.now();
       this.touch();
       const id = this.nextId++;
@@ -241,6 +228,12 @@ export async function hidLongPress(udid: string, geo: Geometry, x: number, y: nu
 export async function hidSwipe(udid: string, geo: Geometry, x1: number, y1: number, x2: number, y2: number, ms: number): Promise<void> {
   const g = await geo();
   await channel(udid).send({ cmd: 'drag', x1: norm(x1, g.width), y1: norm(y1, g.height), x2: norm(x2, g.width), y2: norm(y2, g.height), ms }, 20_000 + ms);
+}
+/** Two simultaneous contacts, implemented by the same stream-backed HID channel as taps. */
+export async function hidPinch(udid: string, geo: Geometry, x: number, y: number, scale: number, ms: number): Promise<void> {
+  if (![x, y, scale, ms].every(Number.isFinite) || scale <= 0 || ms < 0) throw new PhoneDockError('Invalid pinch coordinates, scale or duration', 'bad_request', 400);
+  const g = await geo();
+  await channel(udid).send({ cmd: 'pinch', x: norm(x, g.width), y: norm(y, g.height), scale, ms }, 20_000 + ms);
 }
 /** True when the text can be typed key-by-key on the virtual HID keyboard (printable ASCII, newline, tab). */
 export function hidTypable(text: string): boolean { return !/[^\x20-\x7e\n\t]/.test(text); }

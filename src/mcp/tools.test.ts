@@ -4,9 +4,17 @@ import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { PhoneDockClient, Device, UiTree, UiElement } from '../sdk/client.ts';
-import { createMcpServer } from './server.ts';
+import { createMcpServer, errorResult } from './server.ts';
+import { PhoneDockApiError } from '../sdk/client.ts';
 
 type Fake = Record<string, unknown> & { calls: unknown[][] };
+test('unknown-delivery errors expose the generated request ID for receipt recovery', () => {
+  const error = new PhoneDockApiError('Reply lost', 'delivery_unknown', 502);
+  error.delivery = 'unknown'; error.requestId = 'pdtest-lost-reply';
+  const result = errorResult(error);
+  assert.match(JSON.stringify(result), /pdtest-lost-reply/);
+  assert.match(JSON.stringify(result), /get_request_result/);
+});
 const el = (ref: string, type: string, x: number, y: number, w: number, h: number, more: Partial<UiElement> = {}): UiElement =>
   ({ ref, type, bounds: { x, y, width: w, height: h }, ...more } as UiElement);
 
@@ -21,6 +29,53 @@ async function connect(fake: Fake) {
   };
   return { client, call, close: () => client.close() };
 }
+
+test('runtime profile has fewer typed schemas and keeps required control and human handoff tools', async () => {
+  const sizes: number[] = [];
+  for (const profile of ['all', 'runtime'] as const) {
+    const server = createMcpServer({ client: { owner: 'test' } as PhoneDockClient, scales: new Map(), profile });
+    const [a, b] = InMemoryTransport.createLinkedPair(); const client = new Client({ name: 'profile-test', version: '1' });
+    await Promise.all([server.connect(a), client.connect(b)]);
+    try {
+      const result = await client.listTools(); sizes.push(JSON.stringify(result.tools).length);
+      if (profile === 'runtime') {
+        const names = result.tools.map((t) => t.name);
+        for (const name of ['tap', 'fill', 'get_ui', 'request_human', 'acquire_device']) assert.ok(names.includes(name));
+        assert.ok(!names.includes('create_device')); assert.ok(!names.includes('shell'));
+      }
+    } finally { await client.close(); await server.close(); }
+  }
+  assert.ok(sizes[1] < sizes[0] * 0.75, sizes.join(' -> '));
+});
+
+test('UI diffs disclose renumbered refs and input carries this session snapshot', async () => {
+  let n = 0; let received: unknown;
+  const fake = androidFake({ width: 100, height: 200 }, { width: 100, height: 200 }, []);
+  fake.ui = async () => { n++; return { source: 'accessibility', screen: { width: 100, height: 200 }, snapshotId: `snapshot-${n}`, capturedAt: '', root: [el(n === 1 ? 'e1' : 'e2', 'Button', 10, 20, 40, 40, { text: 'Continue', clickable: true })] }; };
+  fake.tapRef = async (_id: string, _ref: string, opts: unknown) => { received = opts; return { ok: true }; };
+  const s = await connect(fake);
+  try {
+    await s.call('get_ui'); const changed = await s.call('get_ui', { diff: true });
+    assert.match(changed.text, /\+ .*e2.*Continue/);
+    await s.call('tap', { ref: 'e2' });
+    assert.equal((received as { snapshotId: string }).snapshotId, 'snapshot-2');
+  } finally { await s.close(); }
+});
+
+test('wait_for refs replace the session snapshot before tap and fill', async () => {
+  const fake = androidFake({ width: 100, height: 200 }, { width: 100, height: 200 }, []);
+  fake.ui = async () => ({ source: 'accessibility', screen: { width: 100, height: 200 }, snapshotId: 'snapshot-a', capturedAt: '', root: [el('e1', 'Button', 10, 20, 40, 40, { text: 'Old' })] });
+  fake.waitFor = async () => ({ ok: true, until: 'visible', elapsedMs: 1, snapshotId: 'snapshot-b', screen: { width: 200, height: 100 }, match: { ref: 'e1', type: 'TextField', text: 'New', center: { x: 80, y: 40 }, bounds: { x: 60, y: 20, width: 40, height: 40 } } });
+  let tapOptions: any, fillOptions: any;
+  fake.tapRef = async (_id: string, _ref: string, options: unknown) => { tapOptions = options; return { ok: true }; };
+  fake.fill = async (_id: string, options: unknown) => { fillOptions = options; return { element: null, tapped: { x: 80, y: 40 }, warnings: [], elapsedMs: 1, verified: true }; };
+  const s = await connect(fake);
+  try {
+    await s.call('get_ui'); await s.call('wait_for', { until: 'visible', text: 'New' });
+    await s.call('tap', { ref: 'e1' }); await s.call('fill', { ref: 'e1', value: 'Ada' });
+    assert.equal(tapOptions.snapshotId, 'snapshot-b'); assert.equal(fillOptions.snapshotId, 'snapshot-b');
+  } finally { await s.close(); }
+});
 
 function androidFake(listScreen: { width: number; height: number }, realScreen: { width: number; height: number }, root: UiElement[]): Fake {
   const dev = { id: 'android-emulator:pdtest-x', nativeId: 'pdtest-x', name: 'pdtest-x', backend: 'android-emulator', platform: 'android',

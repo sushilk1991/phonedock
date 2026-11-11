@@ -206,6 +206,36 @@ test('handoff: a long wait with nobody reading the lease still ends with the req
   } finally { mock.timers.reset(); }
 });
 
+test('handoff Done and timeout do not steal an active temporary human input claim', () => {
+  mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 });
+  try {
+    for (const resolution of ['done', 'timeout'] as const) {
+      acquireLease(DEV, AGENT, 600);
+      const h = createHandoff(DEV, 'Enter a code', AGENT, 10);
+      const human = core.claimInput(DEV, HUMAN_OWNER);
+      if (resolution === 'done') resolveHandoff(h.id, 'done', HUMAN_OWNER); else mock.timers.tick(10_001);
+      assert.equal(h.state, resolution);
+      human.check(); // The completing handoff did not replace the active input's token.
+      human.release();
+      checkLease(DEV, AGENT);
+      assert.equal(getLease(DEV)?.owner, AGENT);
+      mock.timers.tick(600_001); assert.equal(getLease(DEV), null);
+    }
+  } finally { mock.timers.reset(); }
+});
+
+test('foreign takeover stops lease renewal and input, while read-only calls remain available', async () => {
+  const { DeviceClaims } = await import('./device-claims.ts');
+  acquireLease(DEV, AGENT);
+  const foreign = new DeviceClaims({ path: join(process.env.PHONEDOCK_HOME!, 'device-claims.sqlite'), instance: 'foreign-read' });
+  try {
+    foreign.acquire(DEV, HUMAN_OWNER, { force: true });
+    assert.doesNotThrow(() => touchLease(DEV, AGENT));
+    assert.equal(conflict(() => checkLease(DEV, AGENT)).code, 'lease_conflict');
+    assert.equal(foreign.view(DEV)?.owner, HUMAN_OWNER);
+  } finally { foreign.releaseAll(); foreign.close(); }
+});
+
 test('Hand Back: the device returns to the agent the person took it from, and Activity says so', () => {
   acquireLease(DEV, AGENT, 300);
   const t = acquireLease(DEV, HUMAN_OWNER, undefined, true);                       // Take Over pre-empts the agent

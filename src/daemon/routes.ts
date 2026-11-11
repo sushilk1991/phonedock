@@ -13,7 +13,7 @@ import {
   acquireLease, backends, checkLease, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
   loadFailures, logAction, readActions, record, releaseLease, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
   stopStreamsFor, restartStreamsFor, withTransition, dropLeaseOnStop, streamStats, uiCache, upsertRecord, pollDevices, withTimeout, stopRecordingFor, fallbackFrame, waitForStreamFrame, type Job,
-  assertDeviceAllowed, assertNameAllowed, assertPhysicalAllowed, touchLease, noteScreen,
+  assertDeviceAllowed, assertNameAllowed, assertPhysicalAllowed, touchLease, noteScreen, inventoryStatus,
 } from './core.ts';
 import { HANDLED, Raw, Router, badRequest, notSupported, type Ctx } from './http.ts';
 import { metrics } from './metrics.ts';
@@ -27,6 +27,7 @@ import { ocrUiTree, warmOcr } from '../core/ocr.ts';
 import { inputRoute } from './delivery.ts';
 import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTENT_TYPE, VIDEO_MSG, type VideoSink } from '../core/video.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
+import { requestResult } from './requests.ts';
 
 export const VERSION = '0.2.6';
 const startedAt = Date.now();
@@ -50,6 +51,12 @@ export const truthy = (v: string | undefined) => v === '1' || v === 'true' || v 
 
 // ── service ─────────────────────────────────────────────────────────────────
 r.get('/v1/metrics', () => metrics.snapshot());
+r.get('/v1/inventory', () => inventoryStatus());
+r.get('/v1/devices/:id/requests/:requestId', async (c) => {
+  const { backend } = splitId(c.params.id); assertDeviceAllowed(c.params.id); getBackend(backend);
+  // A lost-response receipt stays readable by its owner after another owner takes the device.
+  return requestResult(c.params.id, c.owner, c.params.requestId);
+});
 r.get('/v1/health', () => ({ ok: true, version: VERSION, pid: process.pid, uptimeSec: Math.round((Date.now() - startedAt) / 1000) }));
 
 let availCache: { at: number; v: unknown[] } | undefined;
@@ -94,7 +101,7 @@ r.get('/v1/events', (c) => {
 
 // ── devices ────────────────────────────────────────────────────────────────
 r.get('/v1/devices', async (c) => {
-  let list = await listDevices(truthy(c.q('fresh')));
+  let list = await listDevices(truthy(c.q('fresh')), c.q('backend'));
   const be = c.q('backend'), pl = c.q('platform'), st = c.q('state');
   if (be) list = list.filter((d) => d.backend === be);
   if (pl) list = list.filter((d) => d.platform === pl);
@@ -521,7 +528,7 @@ export async function runAction(id: string, b: Backend, nid: string, a: InputAct
       await b.swipe(nid, a.x1, a.y1, a.x2, a.y2, a.durationMs ?? 300); return undefined;
     case 'type':
       if (typeof a.text !== 'string') throw badRequest('type needs text');
-      await b.type(nid, a.text); return undefined;
+      await b.type(nid, a.text, { secret: a.secret }); return undefined;
     case 'key':
       if (!a.key) throw badRequest('key needs key');
       await b.key(nid, a.key); return undefined;
@@ -703,6 +710,7 @@ r.get('/v1/devices/:id/logs', async (c) => {
   if (!app) return new Raw(200, await logs(nid, { lines, filter }), { 'Content-Type': 'text/plain; charset=utf-8' });
   // ?app=<package or bundle id>: only that app's lines (its running processes; lines that name it if it isn't running).
   if (!/^[A-Za-z0-9._-]+$/.test(app)) throw badRequest('app must be a package name or bundle id');
+  if (b.id === 'ios-device') return new Raw(200, await logs(nid, { lines, filter, appId: app }), { 'Content-Type': 'text/plain; charset=utf-8' });
   const pids = await appPids(b, nid, app);
   const all = (await logs(nid, { lines: Math.min(lines * 20, 20_000), filter })).split('\n');
   const mine = all.filter((l) => {

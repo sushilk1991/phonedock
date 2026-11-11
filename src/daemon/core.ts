@@ -9,6 +9,11 @@ import { instrumentBackend } from './metrics.ts';
 import { PHONEDOCK_HOME, daemonInfoName, stateDir } from '../core/paths.ts';
 import { PhoneDockError, type Backend, type Device, type DeviceSpec, type FrameStream, type Handoff, type HandoffState, type Lease, type ScreenInfo, type UiTree, type VideoStream } from '../core/types.ts';
 import { VideoFanout } from '../core/video.ts';
+import { inputScope, inputWasSent, ownershipChanged } from './execution.ts';
+import { redactInputValue } from '../core/secrets.ts';
+import { rememberSnapshot } from './snapshots.ts';
+import { DeviceClaims } from './device-claims.ts';
+import { BackendInventory } from './inventory.ts';
 
 // ── backends ────────────────────────────────────────────────────────────────
 export let backends: Backend[] = [];
@@ -99,9 +104,45 @@ export function writeDaemonInfo(port: number, version: string): string {
 export const HUMAN_OWNER = 'app:human';
 export const DEFAULT_AGENT_LEASE_SEC = 600;
 const leases = new Map<string, Lease>();
+const sharedClaims = new DeviceClaims();
+const claimTokens = new Map<string, string>();
+const observedTokens = new Map<string, string>();
+function rememberClaim(id: string, token: string) { claimTokens.set(id, token); observedTokens.set(id, token); }
+function releaseClaim(id: string) {
+  const token = claimTokens.get(id);
+  if (token && sharedClaims.view(id)?.token === token) sharedClaims.release(id);
+  claimTokens.delete(id);
+}
+/** An unleased input still claims the device atomically for its queue slot, then gives it back. */
+export function claimInput(id: string, rawOwner: string): { check(): void; release(): void } {
+  const owner = rawOwner || 'anonymous'; const lease = getLease(id);
+  if (lease?.owner === owner) {
+    const token = claimTokens.get(id);
+    sharedClaims.check(id, owner, token);
+    return { check: () => { sharedClaims.check(id, owner, token); }, release() {} };
+  }
+  const temporaryHuman = owner === HUMAN_OWNER && !!pendingHandoff(id);
+  const requester = temporaryHuman && lease && pendingHandoff(id)?.requestedBy === lease.owner ? lease : undefined;
+  const claim = sharedClaims.acquire(id, owner, { force: temporaryHuman, ttlSec: 600 });
+  return {
+    check: () => { sharedClaims.check(id, owner, claim.token); },
+    release() {
+      if (sharedClaims.view(id)?.token !== claim.token) return;
+      const current = getLease(id);
+      if (current?.owner === owner) return; // it explicitly acquired a lease during this input
+      if (requester && current === requester && !ownerGone(current.owner)) {
+        const waiting = pendingHandoff(id)?.requestedBy === current.owner;
+        const restored = sharedClaims.acquire(id, current.owner, { force: true, ttlSec: waiting ? null : current.ttlSec });
+        rememberClaim(id, restored.token); ownershipChanged(id);
+        setExpiry(current);
+      } else sharedClaims.release(id, owner);
+    },
+  };
+}
+export function closeOwnership() { sharedClaims.releaseAll(); sharedClaims.close(); inventory.close(); }
 /** Test hook: is this pid alive? (process.kill(pid, 0); EPERM = alive, owned by someone else). */
 export let pidAlive = (pid: number): boolean => {
-  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ESRCH'; }
 };
 export function setPidAlive(f: (pid: number) => boolean) { pidAlive = f; }
 /** The pid an owner string carries: `mcp:<client>:<pid>` or `sdk:<pid>`. CLI (`cli:<user>`), app and custom owners have none. */
@@ -122,7 +163,7 @@ export function getLease(id: string): Lease | null {
   if (l.expiresAt && Date.parse(l.expiresAt) < Date.now()) {
     // An agent blocked in request_human makes no device calls: its lease lasts as long as its handoff is pending.
     if (pendingHandoff(id)?.requestedBy === l.owner) { setExpiry(l); return l; }
-    leases.delete(id);
+    leases.delete(id); releaseClaim(id); ownershipChanged(id);
     console.error(`[phonedockd] lease on ${id} held by ${l.owner} expired (${l.ttlSec ?? '?'} s without a call)`);
     logAction(id, 'daemon', { action: 'lease.expired', previousOwner: l.owner, ttlSec: l.ttlSec });
     emit('lease', { deviceId: id, lease: null, reason: 'expired', previousOwner: l.owner });
@@ -133,18 +174,37 @@ export function getLease(id: string): Lease | null {
 }
 /** The lease as clients see it: `stale: true` when its owner process has exited. */
 export function leaseView(id: string): Lease | null {
+  const global = sharedClaims.view(id);
+  if (global && global.instance !== sharedClaims.instance) {
+    const previous = observedTokens.get(id);
+    if (previous && previous !== global.token) ownershipChanged(id);
+    observedTokens.set(id, global.token);
+    return { owner: global.owner, acquiredAt: new Date(global.acquiredAt).toISOString(), expiresAt: global.expiresAt === null ? null : new Date(global.expiresAt).toISOString(), ...(global.ttlSec ? { ttlSec: global.ttlSec } : {}) };
+  }
   const l = getLease(id);
   return l && ownerGone(l.owner) ? { ...l, stale: true } : l;
 }
 /** Renew the owner's sliding lease (called for every device call the owner makes). */
 export function touchLease(id: string, owner: string) {
   const l = getLease(id);
-  if (l && l.owner === owner) setExpiry(l);
+  if (l && l.owner === owner) {
+    try { renewOwnedLease(id, l); }
+    catch (e) {
+      // A different daemon may have preempted this cached lease. Reads stay available;
+      // mutation routes call checkLease separately and must still reject the old owner.
+      if (!(e instanceof PhoneDockError) || e.code !== 'lease_conflict') throw e;
+    }
+  }
+}
+function renewOwnedLease(id: string, lease: Lease): void {
+  sharedClaims.check(id, lease.owner, claimTokens.get(id));
+  sharedClaims.renew(id, lease.owner, pendingHandoff(id)?.requestedBy === lease.owner ? null : lease.ttlSec);
+  setExpiry(lease);
 }
 /** Drop `cur` if its owner process has exited; logs who reclaimed it. */
 function reclaimStale(id: string, cur: Lease, by: string): boolean {
   if (!ownerGone(cur.owner)) return false;
-  leases.delete(id);
+  leases.delete(id); releaseClaim(id); ownershipChanged(id);
   console.error(`[phonedockd] reclaimed the lease on ${id} from ${cur.owner} for ${by}: that process has exited`);
   logAction(id, by, { action: 'lease.reclaim', previousOwner: cur.owner, reason: 'owner process exited' });
   emit('lease', { deviceId: id, lease: null, reason: 'stale', previousOwner: cur.owner, reclaimedBy: by });
@@ -172,6 +232,10 @@ export function acquireLease(id: string, owner: string, ttlSec?: number, force =
   // The person taking the device from an agent remembers the agent, so Hand Back can return it.
   const preempted = owner === HUMAN_OWNER ? (cur && cur.owner !== HUMAN_OWNER ? { owner: cur.owner, ...(cur.ttlSec ? { ttlSec: cur.ttlSec } : {}), at: now.toISOString() } : cur?.preempted) : undefined;
   const l: Lease = { owner, acquiredAt: cur && cur.owner === owner ? cur.acquiredAt : now.toISOString(), expiresAt: null, ...(ttl ? { ttlSec: ttl } : {}), ...(preempted ? { preempted } : {}) };
+  const shared = sharedClaims.acquire(id, owner, { ttlSec: pendingHandoff(id)?.requestedBy === owner ? null : ttl, force });
+  if (claimTokens.has(id) && claimTokens.get(id) !== shared.token) ownershipChanged(id);
+  rememberClaim(id, shared.token);
+  if (!cur || cur.owner !== owner) ownershipChanged(id);
   setExpiry(l, now.getTime());
   leases.set(id, l);
   // Activity: new holders only (not renewals). app:human taking a device = the app's Take Over.
@@ -196,7 +260,7 @@ export function releaseLease(id: string, owner: string, force = false): ReleaseR
   if (cur.owner !== owner && !force) {
     return { ok: true, released: false, heldBy: cur.owner, note: `You don't hold this device's lease (${who(cur.owner)} does), so there was nothing to release.` };
   }
-  leases.delete(id);
+  leases.delete(id); releaseClaim(id); ownershipChanged(id);
   // Hand Back: the device returns to the agent the person took it from, if that session is still alive.
   const back = cur.owner === HUMAN_OWNER ? cur.preempted : undefined;
   const returnTo = back && !ownerGone(back.owner) ? back : undefined;
@@ -218,14 +282,14 @@ export function releaseLease(id: string, owner: string, force = false): ReleaseR
  *  process has exited (reclaimed), or it is the person (`app:human`) while a handoff is pending on the device. */
 export function checkLease(id: string, owner: string) {
   const cur = getLease(id);
-  if (!cur) return;
-  if (cur.owner === owner) { setExpiry(cur); return; }
   if (owner === HUMAN_OWNER && pendingHandoff(id)) return;
+  if (!cur) { sharedClaims.check(id, owner || 'anonymous'); return; }
+  if (cur.owner === owner) { renewOwnedLease(id, cur); return; }
   if (reclaimStale(id, cur, owner)) return;
   throw leaseConflict(id, cur);
 }
 /** Test hook. */
-export function clearLeases() { leases.clear(); }
+export function clearLeases() { for (const id of leases.keys()) ownershipChanged(id); sharedClaims.releaseAll(); claimTokens.clear(); leases.clear(); }
 
 // ── transitions the daemon is carrying out on a device ─────────────────────
 // 'stopping': a shutdown is running (the device shows "stopping" at once, not "running" until it is gone).
@@ -244,14 +308,15 @@ export async function withTransition<T>(id: string, kind: Transition, fn: () => 
 export function dropLeaseOnStop(id: string) {
   const l = leases.get(id);
   if (!l) return;
-  leases.delete(id);
+  leases.delete(id); releaseClaim(id); ownershipChanged(id);
   emit('lease', { deviceId: id, lease: null, reason: 'stopped', previousOwner: l.owner });
 }
 
 // ── devices (aggregated, 2s cache) ──────────────────────────────────────────
 let devCache: { at: number; list: Device[] } | undefined;
-let devPending: Promise<Device[]> | undefined;
-export function invalidateDevices() { devCache = undefined; if (sseClients.size) setTimeout(() => void pollDevices(), 50); }
+const inventory = new BackendInventory({ onUpdate() { devCache = undefined; if (sseClients.size) setTimeout(() => void pollDevices(), 50).unref(); } });
+export const inventoryStatus = () => inventory.status();
+export function invalidateDevices() { devCache = undefined; inventory.invalidate(); if (sseClients.size) setTimeout(() => void pollDevices(), 50).unref(); }
 /** A fresh read of the screen (UI tree, screenshot) has this size: when the cached list says otherwise (the screen
  *  turned since), drop the cache so Device.screen / orientation follow at once instead of up to 2 s later. */
 export function noteScreen(id: string, width?: number, height?: number) {
@@ -259,27 +324,17 @@ export function noteScreen(id: string, width?: number, height?: number) {
   const d = devCache.list.find((x) => x.id === id);
   if (d?.screen?.width && (d.screen.width !== width || d.screen.height !== height)) invalidateDevices();
 }
-const listErrors = new Map<string, string>();
-// Last successful listing per backend. A slow/failed listDevices (e.g. simctl under heavy load) must not
-// make that backend's devices "vanish" mid-task for agents — serve the last good list, marked stale.
-const lastGood = new Map<string, Device[]>();
-export async function listDevices(fresh = false): Promise<Device[]> {
-  if (!fresh && devCache && Date.now() - devCache.at < 2000) return applyFilter(decorate(devCache.list));
-  if (!devPending) {
-    devPending = (async () => {
-      const lists = await Promise.all(backends.map(async (b) => {
-        try { const l = await withTimeout(b.listDevices(), 30_000, `${b.id}.listDevices`); listErrors.delete(b.id); lastGood.set(b.id, l); return l; }
-        catch (e) {
-          listErrors.set(b.id, (e as Error).message);
-          return (lastGood.get(b.id) ?? []).map((d) => ({ ...d, meta: { ...(d.meta ?? {}), stale: true, listError: (e as Error).message } }));
-        }
-      }));
-      const list = lists.flat();
-      devCache = { at: Date.now(), list };
-      return list;
-    })().finally(() => { devPending = undefined; });
+export async function listDevices(fresh = false, backend?: string): Promise<Device[]> {
+  if (!backend && !fresh && devCache && Date.now() - devCache.at < 2000) return applyFilter(decorate(devCache.list));
+  let raw = await inventory.list(backends, { fresh, backend, ...(backend && fresh ? { waitMs: 30_000 } : {}) });
+  // A read invalidated while in flight is discarded. An explicit target waits for its replacement, without
+  // making an unrelated local device wait on a slow cloud provider.
+  const status = backend && fresh ? inventory.status()[backend] : undefined;
+  if (backend && fresh && !status?.refreshing && status?.at === undefined && !status?.error) {
+    raw = await inventory.list(backends, { fresh: true, backend, waitMs: 30_000 });
   }
-  const list = applyFilter(decorate(await devPending));
+  if (!backend) devCache = { at: Date.now(), list: raw };
+  const list = applyFilter(decorate(raw));
   refreshScreens(list);
   return list;
 }
@@ -323,8 +378,8 @@ function decorate(list: Device[]): Device[] {
 export async function getDevice(id: string, fresh = false): Promise<Device> {
   const { backend } = splitId(id);
   getBackend(backend);
-  let d = (await listDevices(fresh)).find((x) => x.id === id);
-  if (!d && !fresh) d = (await listDevices(true)).find((x) => x.id === id);
+  let d = (await listDevices(fresh, backend)).find((x) => x.id === id);
+  if (!d && !fresh) d = (await listDevices(true, backend)).find((x) => x.id === id);
   if (!d && deviceFilter) throw filteredOut(id);
   if (!d) throw new PhoneDockError("Couldn’t find the device", 'not_found', 404, ["Check the list of available devices."], `No device ${id}`);
   return d;
@@ -422,7 +477,9 @@ export const lastActionAt = new Map<string, number>();
 /** Actions logged per device (src/daemon/delivery.ts: did a request send anything?). */
 export const actionCount = new Map<string, number>();
 export function logAction(deviceId: string, owner: string, action: unknown, extra?: Record<string, unknown>) {
-  const entry = { at: new Date().toISOString(), owner, action: maskAction(action), ...extra };
+  inputWasSent(deviceId, owner, action);
+  const scope = inputScope();
+  const entry = redactInputValue({ at: new Date().toISOString(), owner, action: maskAction(action), ...extra }, scope?.deviceId === deviceId ? scope.secrets ?? [] : []);
   lastActionAt.set(deviceId, Date.now());
   actionCount.set(deviceId, (actionCount.get(deviceId) ?? 0) + 1);
   try { appendFileSync(join(stateDir('devices', safeId(deviceId)), 'actions.jsonl'), JSON.stringify(entry) + '\n'); } catch { /* */ }
@@ -445,6 +502,8 @@ export function readActions(deviceId: string, limit: number): unknown[] {
 export const uiCacheListeners: ((deviceId: string, tree: UiTree) => void)[] = [];
 class UiCache extends Map<string, UiTree> {
   set(id: string, tree: UiTree): this {
+    tree.actionGeneration ??= actionCount.get(id) ?? 0;
+    rememberSnapshot(id, tree);
     super.set(id, tree);
     for (const f of uiCacheListeners) { try { f(id, tree); } catch { /* best effort */ } }
     return this;
@@ -629,7 +688,16 @@ function finishHandoff(h: Handoff) {
  *  changes, while getLease still keeps it), so it has the full TTL to carry on. */
 function keepRequesterLease(h: Handoff) {
   const l = getLease(h.deviceId);
-  if (l && l.owner === h.requestedBy) setExpiry(l);
+  if (!l || l.owner !== h.requestedBy) return;
+  setExpiry(l);
+  // A person may still be finishing an input under the handoff's temporary claim.
+  // Do not replace it: claimInput.release restores this lease once that input ends.
+  try {
+    const claim = sharedClaims.view(h.deviceId);
+    if (claim?.instance === sharedClaims.instance && claim.owner === l.owner && claim.token === claimTokens.get(h.deviceId)) {
+      sharedClaims.renew(h.deviceId, l.owner, l.ttlSec);
+    }
+  } catch { /* Handoff completion must not throw from a timer or steal another active claim. */ }
 }
 export function createHandoff(deviceId: string, reason: string, requestedBy: string, timeoutSec = 900): Handoff {
   const cur = pendingHandoff(deviceId);
@@ -643,6 +711,7 @@ export function createHandoff(deviceId: string, reason: string, requestedBy: str
   };
   if (lease?.owner === requestedBy && lease.ttlSec) handoffLeaseTtl.set(h.id, lease.ttlSec);
   handoffs.set(h.id, h);
+  if (lease?.owner === requestedBy) sharedClaims.renew(deviceId, requestedBy, null);
   logAction(deviceId, requestedBy, { action: 'handoff.requested', handoffId: h.id, reason: h.reason, timeoutSec: ttl });
   if (handoffs.size > 200) for (const [k, v] of handoffs) { if (handoffs.size <= 200) break; if (v.state !== 'pending') handoffs.delete(k); }
   const timer = setTimeout(() => {

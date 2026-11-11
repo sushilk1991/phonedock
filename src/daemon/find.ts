@@ -3,7 +3,8 @@
 import { sleep } from '../core/exec.ts';
 import type { Backend, ElementMatch, UiElement, UiTree } from '../core/types.ts';
 import { ocrUiTree, warmOcr } from '../core/ocr.ts';
-import { uiCache } from './core.ts';
+import { actionCount, lastActionAt, uiCache } from './core.ts';
+import { assertInputActive } from './execution.ts';
 import { badRequest, notSupported } from './http.ts';
 import { cleanTree, findElements, type FindQuery, type MatchMode } from './media.ts';
 import { noteScreen } from './observe.ts';
@@ -24,11 +25,15 @@ export async function axTree(d: Dev): Promise<UiTree | undefined> {
 
 // Every backend tree read (GET /ui, axTree) goes through readUiTree, so a tap by ref (refcheck.ts) can use one that is
 // in flight or just done instead of paying for its own read.
-const reading = new Map<string, { startedAt: number; p: Promise<UiTree> }>();
+const reading = new Map<string, { startedAt: number; version: number; p: Promise<UiTree> }>();
 const lastRead = new Map<string, UiTree>();
 /** The backend's raw tree (b.uiTree must exist), noted as in flight while it is read and as the latest read after. */
 export function readUiTree(d: Dev): Promise<UiTree> {
-  const r = { startedAt: Date.now(), p: d.b.uiTree!(d.nid) };
+  assertInputActive();
+  const version = actionCount.get(d.id) ?? 0;
+  const existing = reading.get(d.id);
+  if (existing && existing.version === version && existing.startedAt >= (lastActionAt.get(d.id) ?? 0)) return existing.p;
+  const r = { startedAt: Date.now(), version, p: d.b.uiTree!(d.nid).then((tree) => ({ ...tree, actionGeneration: version })) };
   reading.set(d.id, r);
   void r.p.then((t) => {
     const prev = lastRead.get(d.id);
@@ -43,9 +48,9 @@ export function readUiTree(d: Dev): Promise<UiTree> {
 export async function recentTree(d: Dev, since: number, maxAgeMs: number): Promise<{ tree: UiTree; via: 'recent' | 'joined' | 'read' } | undefined> {
   if (!d.b.uiTree) return undefined;
   const last = lastRead.get(d.id); const at = last ? Date.parse(last.capturedAt) : NaN;
-  if (last && at >= since && Date.now() - at < maxAgeMs) return { tree: cleanTree(last), via: 'recent' };
+  if (last && last.actionGeneration === (actionCount.get(d.id) ?? 0) && at >= since && Date.now() - at < maxAgeMs) return { tree: cleanTree(last), via: 'recent' };
   const r = reading.get(d.id);
-  if (r && r.startedAt >= since) { try { return { tree: cleanTree(await r.p), via: 'joined' }; } catch { /* read it ourselves */ } }
+  if (r && r.version === (actionCount.get(d.id) ?? 0) && r.startedAt >= since) { try { return { tree: cleanTree(await r.p), via: 'joined' }; } catch { /* read it ourselves */ } }
   return { tree: cleanTree(await readUiTree(d)), via: 'read' };
 }
 
@@ -108,6 +113,7 @@ export async function pollFind(d: Dev, q: FindOpts, until: 'visible' | 'gone',
   const t0 = Date.now(); const deadline = t0 + o.timeoutMs; const stableMs = o.stableMs ?? 0;
   let polls = 0; let okSince = 0; let last: FindResult;
   for (;;) {
+    assertInputActive();
     if (o.aborted?.()) throw o.abortError?.() ?? new Error('aborted');
     const at = Date.now();
     last = await findOnce(d, q);

@@ -55,6 +55,7 @@ import contextlib
 import contextvars
 import datetime
 import errno
+import hashlib
 import json
 import logging
 import math
@@ -67,6 +68,7 @@ import sys
 import time
 import traceback
 import uuid
+from urllib.parse import unquote, urlparse
 import zlib
 from typing import Any, Awaitable, Callable, NamedTuple, Optional
 
@@ -341,7 +343,7 @@ def clip_text(snapshot: dict[str, Any]) -> Optional[str]:
     for item in items:
         for uti in CLIP_TEXT_UTIS:
             raw = inline(item, uti)
-            if raw:
+            if raw is not None:
                 with contextlib.suppress(UnicodeDecodeError):
                     return raw.decode("utf-8")
     for item in items:
@@ -350,6 +352,47 @@ def clip_text(snapshot: dict[str, Any]) -> Optional[str]:
         if url:
             return url
     return None
+
+
+def clip_change_id(snapshot: dict[str, Any]) -> Optional[str]:
+    pb = snapshot.get("pasteboard", snapshot)
+    metadata = pb.get("metadata") if isinstance(pb, dict) else None
+    if not isinstance(metadata, dict) or metadata.get("nonce") is None or metadata.get("changeCount") is None:
+        return None
+    return hashlib.sha256(repr((metadata["nonce"], metadata["changeCount"])).encode()).hexdigest()
+
+
+def clip_restore_items(snapshot: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    """Keep immediate representations only; reconstruct promised plain text but never guess rich content."""
+    pb = snapshot.get("pasteboard", snapshot)
+    items = pb.get("items", []) if isinstance(pb, dict) else None
+    if not isinstance(items, list):
+        return None
+    out = []
+    total = 0
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("types"), list):
+            return None
+        kinds, data = item["types"], item.get("data", {})
+        if not isinstance(data, dict):
+            return None
+        plain = next((v.get("data") for k, v in data.items() if k in CLIP_TEXT_UTIS
+                      and isinstance(v, dict) and isinstance(v.get("data"), (bytes, str))), None)
+        restored = {}
+        for kind in kinds:
+            datum = data.get(kind)
+            raw = datum.get("data") if isinstance(datum, dict) else None
+            if not isinstance(raw, (bytes, str)):
+                if kind not in CLIP_TEXT_UTIS or plain is None:
+                    return None
+                raw = plain
+            raw = raw.encode() if isinstance(raw, str) else raw
+            total += len(raw)
+            if total > 4 * 1024 * 1024:
+                return None
+            restored[kind] = {"data": raw}
+        out.append({"types": list(kinds), "data": restored})
+    return out
 
 
 def text_arg(args: dict[str, Any], key: str, *, allow_empty: bool = False) -> str:
@@ -1539,15 +1582,73 @@ class RealApi:
         async with OrientationService(self.rsd) as svc:
             return await asyncio.wait_for(svc.rotate(direction), 10)
 
+    async def logs(self, lines: int, contains: Optional[str], app_id: Optional[str]) -> str:
+        from pymobiledevice3.services.os_trace import OsTraceService
+        if not self.s.has_service(OsTraceService.RSD_SERVICE_NAME):
+            raise SidecarError("not_supported", "This iPhone does not expose the remote log service")
+        pid = -1
+        if app_id:
+            from pymobiledevice3.remote.core_device.app_service import AppServiceService
+            async with AppServiceService(self.rsd) as svc:
+                apps = [app for app in await svc.list_apps() if app.get("bundleIdentifier") == app_id]
+                if len(apps) != 1:
+                    raise SidecarError("not_found", "The requested app is not installed")
+                path = apps[0].get("path") or apps[0].get("url") or ""
+                path = unquote(urlparse(path).path) if str(path).startswith("file:") else str(path)
+                path = path.rstrip("/")
+                matches = []
+                for proc in await svc.list_processes():
+                    exe = proc.get("executableURL")
+                    exe = exe.get("relative") if isinstance(exe, dict) else exe
+                    exe = unquote(urlparse(exe).path) if str(exe).startswith("file:") else str(exe or "")
+                    rest = exe[len(path) + 1:] if path and exe.startswith(path + "/") else ""
+                    if rest and "/" not in rest and isinstance(proc.get("processIdentifier"), int):
+                        matches.append(proc["processIdentifier"])
+                if len(matches) != 1:
+                    return ""  # not running or ambiguous: never substitute another app's logs
+                pid = matches[0]
+        records = []
+        size = 0
+        # Bounded observation of the activity stream, including history offered by the service. Never a daemon.
+        async with OsTraceService(self.rsd) as service:
+            try:
+                async with asyncio.timeout(2.0):
+                    async for entry in service.syslog(pid=pid):
+                        name = os.path.basename(entry.filename) or "process"
+                        line = f"{entry.timestamp.isoformat()} {name}[{entry.pid}:{entry.thread_id or 0}] <{entry.level.name}>: {entry.message}"
+                        if app_id:
+                            line += f" [{app_id}]"
+                        if contains and contains not in line:
+                            continue
+                        line = line[:4096]
+                        records.append(line)
+                        size += len(line)
+                        if len(records) >= lines or size >= 512 * 1024:
+                            break
+            except TimeoutError:
+                pass
+        return "\n".join(records[-lines:])
+
     async def clipboard_get(self) -> Optional[str]:
         from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
         async with PasteboardService(self.rsd) as pb:
             return clip_text(await asyncio.wait_for(pb.get(data_policy=CLIP_POLICY), 15))
 
-    async def clipboard_set(self, text: str) -> None:
+    async def clipboard_snapshot(self) -> dict[str, Any]:
         from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
         async with PasteboardService(self.rsd) as pb:
-            await asyncio.wait_for(pb.set_text(text), 15)
+            return await asyncio.wait_for(pb.get(data_policy=CLIP_POLICY), 15)
+
+    async def clipboard_replace(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
+        async with PasteboardService(self.rsd) as pb:
+            await asyncio.wait_for(pb.set(items), 15)
+            return await asyncio.wait_for(pb.get(data_policy=CLIP_POLICY), 15)
+
+    async def clipboard_set(self, text: str) -> dict[str, Any]:
+        from pymobiledevice3.remote.core_device.pasteboard_service import PasteboardService
+        async with PasteboardService(self.rsd) as pb:
+            return await asyncio.wait_for(pb.set_text(text), 15)
 
     async def appearance(self, style: Optional[str]) -> str:
         from pymobiledevice3.remote.core_device.configuration_service import ConfigurationService
@@ -1580,6 +1681,7 @@ class FakeApi:
         self.width, self.height, self.scale = width, height, scale
         self.log: list[dict[str, Any]] = []
         self.clip: Optional[str] = None
+        self.clip_count = 0
         self.style = "light"
         self.orientation = "portrait"
         self.hid_open = False
@@ -1675,12 +1777,27 @@ class FakeApi:
         self.log.append({"op": "rotate", "direction": direction})
         return {"currentDeviceOrientation": self.orientation, "currentDeviceOrientationLocked": False}
 
+    async def logs(self, lines: int, contains: Optional[str], app_id: Optional[str]) -> str:
+        records = ["2026-11-09T00:00:00+00:00 Example[100:1] <INFO>: Fake device log [com.example.app]"]
+        return "\n".join(line for line in records[-lines:] if (not contains or contains in line)
+                         and (not app_id or app_id in line))
+
     async def clipboard_get(self) -> Optional[str]:
         return self.clip
 
-    async def clipboard_set(self, text: str) -> None:
+    async def clipboard_snapshot(self) -> dict[str, Any]:
+        items = [] if self.clip is None else [{"types": [CLIP_TEXT_UTIS[0]], "data": {CLIP_TEXT_UTIS[0]: {"data": self.clip.encode()}}}]
+        return {"pasteboard": {"items": items, "metadata": {"nonce": "fake", "changeCount": self.clip_count}}}
+
+    async def clipboard_replace(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        self.clip = clip_text({"items": items})
+        self.clip_count += 1
+        return await self.clipboard_snapshot()
+
+    async def clipboard_set(self, text: str) -> dict[str, Any]:
         self.clip = text
-        self.log.append({"op": "clipboard_set", "text": text})
+        self.clip_count += 1
+        return await self.clipboard_snapshot()
 
     async def appearance(self, style: Optional[str]) -> str:
         if style:
@@ -2165,6 +2282,7 @@ class Server:
         self.debug = debug or bool(fake)
         self.session = Session(self, udid, transport, fake)
         self.pair_lock = asyncio.Lock()
+        self.clipboard_pending: dict[str, tuple[float, Optional[list[dict[str, Any]]], Optional[str]]] = {}
         self.stop = asyncio.Event()
         self.tasks: set[asyncio.Task[None]] = set()
         self.commands: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = {
@@ -2172,8 +2290,9 @@ class Server:
             "devices": self.c_devices, "screenshot": self.c_screenshot, "tap": self.c_tap,
             "double_tap": self.c_double_tap, "long_press": self.c_long_press, "swipe": self.c_swipe,
             "pinch": self.c_pinch, "type": self.c_type, "key": self.c_key, "button": self.c_button,
-            "launch": self.c_launch, "terminate": self.c_terminate, "open_url": self.c_open_url, "apps": self.c_apps,
+            "launch": self.c_launch, "terminate": self.c_terminate, "open_url": self.c_open_url, "apps": self.c_apps, "logs": self.c_logs,
             "rotate": self.c_rotate, "clipboard_get": self.c_clipboard_get, "clipboard_set": self.c_clipboard_set,
+            "clipboard_begin": self.c_clipboard_begin, "clipboard_finish": self.c_clipboard_finish,
             "appearance": self.c_appearance, "ui": self.c_ui, "pair_wifi": self.c_pair_wifi,
             "mount_ddi": self.c_mount_ddi, "shutdown": self.c_shutdown,
         }
@@ -2333,7 +2452,7 @@ class Server:
             steps = build(w, h)
             await s.run_steps(steps)
             return {"screen": {"width": w, "height": h}, "reports": sum(1 for st in steps if st[0] != "sleep")}
-        return await s.run(op, retry=True)
+        return await s.run(op, retry=False)  # input may already have arrived: never replay a gesture
 
     async def c_tap(self, a: dict[str, Any]) -> Any:
         x, y = num(a, "x"), num(a, "y")
@@ -2517,7 +2636,67 @@ class Server:
         async def op() -> Any:
             await self.session.api.clipboard_set(text)
             return {"set": True, "length": len(text)}
-        return await self.session.run(op)
+        return await self.session.run(op, retry=False)
+
+    async def c_clipboard_begin(self, a: dict[str, Any]) -> Any:
+        text = text_arg(a, "text", allow_empty=True)
+        secret = bool(a.get("secret"))
+        async def op() -> Any:
+            now = time.monotonic()
+            self.clipboard_pending = {k: v for k, v in self.clipboard_pending.items() if now - v[0] < 120}
+            if len(self.clipboard_pending) >= 8:
+                raise SidecarError("busy", "An earlier paste still needs attention")
+            try:
+                old = await self.session.api.clipboard_snapshot()
+                items = clip_restore_items(old)
+                if secret and (items is None or clip_change_id(old) is None):
+                    raise SidecarError("not_supported", "The existing clipboard cannot be safely restored; copy plain text or clear it before pasting secret text")
+                written = await self.session.api.clipboard_set(text)
+                # Use the SET receipt, never a later PULL that could be the person's intervening copy.
+                change = clip_change_id(written) if isinstance(written, dict) else None
+            except SidecarError:
+                raise
+            except Exception:
+                raise SidecarError("clipboard_failed", "The clipboard could not be prepared for paste") from None
+            token = uuid.uuid4().hex
+            self.clipboard_pending[token] = (now, items, change)
+            return {"token": token, "restorable": items is not None}
+        return await self.session.run(op, retry=False)
+
+    async def c_clipboard_finish(self, a: dict[str, Any]) -> Any:
+        token = text_arg(a, "token")
+        confirmed = a.get("confirmed") is True
+        async def op() -> Any:
+            pending = self.clipboard_pending.pop(token, None)
+            if pending is None or time.monotonic() - pending[0] >= 120:
+                return {"restored": False, "reason": "expired"}
+            if not confirmed:
+                return {"restored": False, "reason": "paste_unconfirmed"}
+            _, items, change = pending
+            if items is None or change is None:
+                return {"restored": False, "reason": "not_restorable"}
+            try:
+                current = await self.session.api.clipboard_snapshot()
+                if clip_change_id(current) != change:
+                    return {"restored": False, "reason": "clipboard_changed"}
+                await self.session.api.clipboard_replace(items)
+                return {"restored": True}
+            except Exception:
+                raise SidecarError("clipboard_failed", "The previous clipboard could not be restored") from None
+        return await self.session.run(op, retry=False)
+
+    async def c_logs(self, a: dict[str, Any]) -> Any:
+        lines = int(num(a, "lines", 300, lo=1, hi=5000))
+        contains = a.get("filter")
+        app_id = a.get("appId")
+        if contains is not None and (not isinstance(contains, str) or len(contains) > 1000):
+            raise bad_request("filter must be a string of at most 1000 characters")
+        if app_id is not None and (not isinstance(app_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", app_id)):
+            raise bad_request("appId must be a bundle identifier")
+        return await self.session.run(lambda: self._wrap_logs(lines, contains, app_id), retry=False)
+
+    async def _wrap_logs(self, lines: int, contains: Optional[str], app_id: Optional[str]) -> Any:
+        return {"text": await self.session.api.logs(lines, contains, app_id), "windowMs": 2000}
 
     async def c_appearance(self, a: dict[str, Any]) -> Any:
         style = a.get("style")
@@ -2662,10 +2841,22 @@ def check() -> dict[str, Any]:
     ok = v is not None and parse_version(v)[:2] >= MIN_PYMD3
     out: dict[str, Any] = {"ok": ok, "sidecar": SIDECAR_VERSION, "python": sys.executable,
                            "pythonVersion": platform.python_version(), "pymobiledevice3": v}
+    if sys.version_info < (3, 11):
+        out.update(ok=False, error="PhoneDock's native sidecar requires Python 3.11 or newer")
+        return out
     if v is None:
         out["error"] = "pymobiledevice3 is not importable by this python"
     elif not ok:
         out["error"] = f"pymobiledevice3 {v} is too old (needs {'.'.join(map(str, MIN_PYMD3))}+): pipx upgrade pymobiledevice3"
+    if ok:
+        try:
+            import importlib
+            for name in ("pymobiledevice3.remote.native_tunnel", "pymobiledevice3.remote.core_device.hid_service",
+                         "pymobiledevice3.remote.core_device.screen_stream", "pymobiledevice3.remote.core_device.pasteboard_service"):
+                importlib.import_module(name)
+        except Exception as e:
+            out["ok"] = False
+            out["error"] = f"Required pymobiledevice3 service module unavailable: {type(e).__name__}"
     return out
 
 

@@ -2,6 +2,7 @@
 import { spawn, type SpawnOptions } from 'node:child_process';
 import type { ExecResult } from './types.ts';
 import { PhoneDockError } from './types.ts';
+import { assertInputFence } from './input-fence.ts';
 
 export interface RunOptions extends SpawnOptions {
   input?: string | Buffer;
@@ -15,6 +16,7 @@ export interface RunOptions extends SpawnOptions {
 export function runBuffer(cmd: string, args: string[], opts: RunOptions = {}): Promise<{ stdout: Buffer; stderr: string; code: number }> {
   const { input, failureMessage = 'Couldn’t complete the operation', timeoutMs = 60_000, allowFail = false, maxBuffer = 256 * 1024 * 1024, ...spawnOpts } = opts;
   return new Promise((resolve, reject) => {
+    assertInputFence();
     const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], ...spawnOpts });
     const out: Buffer[] = []; let outLen = 0; let err = '';
     let timer: NodeJS.Timeout | undefined;

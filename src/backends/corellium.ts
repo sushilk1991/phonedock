@@ -12,9 +12,10 @@ import { basename } from 'node:path';
 import type { Backend, Device, DeviceSpec, OsImage, HardwareProfile, Snapshot, ScreenInfo, Availability, BootOptions, Capability, KeyName, AppInfo, Platform, DeviceState } from '../core/types.ts';
 import { PhoneDockError } from '../core/types.ts';
 import { sleep } from '../core/exec.ts';
+import { assertInputFence } from '../core/input-fence.ts';
 
 const ID = 'corellium';
-const CAPS: Capability[] = ['boot', 'shutdown', 'delete', 'snapshot', 'screenshot', 'tap', 'longPress', 'swipe', 'type', 'key',
+const CAPS: Capability[] = ['boot', 'shutdown', 'delete', 'snapshot', 'screenshot', 'ocr', 'tap', 'longPress', 'swipe', 'type', 'key',
   'install', 'apps', 'launch', 'files', 'logs', 'rotate'];
 
 const apiBase = () => (process.env.CORELLIUM_API_URL ?? 'https://app.corellium.com/api').replace(/\/+$/, '');
@@ -35,6 +36,7 @@ async function api<T = any>(method: string, path: string, o: ApiOpts = {}): Prom
   if (o.raw) { body = new Uint8Array(o.raw); headers['Content-Type'] = o.contentType ?? 'application/octet-stream'; }
   else if (o.body !== undefined) { body = JSON.stringify(o.body); headers['Content-Type'] = 'application/json'; }
   let res: Response;
+  assertInputFence();
   try {
     res = await fetch(apiBase() + path, { method, headers, body, signal: AbortSignal.timeout(o.timeoutMs ?? 60_000) });
   } catch (e) {

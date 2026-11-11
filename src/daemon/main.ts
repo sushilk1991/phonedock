@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { DEFAULT_PORT } from '../core/paths.ts';
 import { PhoneDockError, type BootOptions } from '../core/types.ts';
-import { backends, initBackends, listDevices, loadState, state, writeDaemonInfo, startJob, getBackend } from './core.ts';
+import { backends, closeOwnership, initBackends, listDevices, loadState, state, writeDaemonInfo, startJob, getBackend } from './core.ts';
 import { HANDLED, Raw, readBody, sendError, sendJson, type Ctx } from './http.ts';
 import { router, VERSION } from './routes.ts';
 import { metrics } from './metrics.ts';
@@ -11,6 +11,8 @@ import './routes-extra.ts'; // v0.2 routes (registers onto `router`; must load a
 import './routes-flow.ts'; // POST /v1/devices/:id/flow (flow save)
 import './routes-trace.ts'; // performance traces (same)
 import './routes-notes.ts'; // app notes (same)
+import './routes-environment.ts';
+import './routes-diagnostics.ts';
 import { refreshAgentSkills } from './skills.ts';
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
 
@@ -97,7 +99,7 @@ const shutdown = (sig: string) => {
   if (exiting) return; exiting = true;
   console.log(`[phonedockd] ${sig} – exiting (devices keep running)`); server.close();
   const stopTraces = traces.size ? Promise.race([abortAllTraces(`daemon exiting (${sig})`), new Promise((r) => setTimeout(r, 25_000))]) : Promise.resolve();
-  void stopTraces.finally(() => setTimeout(() => process.exit(0), 300).unref());
+  void stopTraces.finally(() => { closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
 };
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

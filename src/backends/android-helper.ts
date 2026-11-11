@@ -19,6 +19,7 @@
 // UiAutomation connection at a time, so they and the helper's `ui` session cannot overlap).
 // PHONEDOCK_ANDROID_HELPER_INPUT=0 keeps the helper for UI reads but sends input with `adb shell input` again.
 import { spawn, type ChildProcess } from 'node:child_process';
+import { assertInputFence } from '../core/input-fence.ts';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -475,6 +476,7 @@ class UiSession {
    *  died, timeout) resolves as 'unknown': the command is never written again. */
   input(cmd: string, timeoutMs: number): Promise<InputReply> {
     if (this.closed) return Promise.resolve({ seq: -1, delivery: 'not_sent', ms: 0, detail: 'helper closed' });
+    assertInputFence();
     this.touch();
     const seq = ++this.seq;
     return new Promise((resolve) => {

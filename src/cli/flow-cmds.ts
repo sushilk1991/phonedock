@@ -6,7 +6,6 @@ import type { PhoneDockClient } from '../sdk/client.ts';
 import type { Device } from '../core/types.ts';
 import { FlowError, describeStep, parseFlow, toMaestro } from '../core/flow.ts';
 import { collectFlowFiles, displayPath, junitXml, runFlowFiles } from '../core/flow-runner.ts';
-import { diffThumbs, grayThumb } from '../daemon/media.ts';
 import { phonedockHome } from '../sdk/client.ts';
 import { str, num, type ParsedArgs } from './args.ts';
 
@@ -14,7 +13,9 @@ export const FLOW_HELP = `Flows:      flow save <id> [-o file] [--since 10m|ISO]
                    [--assert TEXT]… [--no-assert] [--keep-noise] [--format yaml|json]
             flow check <file|dir…> | flow export --maestro <file> [-o out.yaml]
             test <file|dir…> [--device ID] [--platform android|ios] [--junit out.xml] [--artifacts DIR]
-                 [--retries N] [--timeout MS] [--env NAME=VALUE]…   (exit 0 only if every flow passed)`;
+                 [--retries N] [--timeout MS] [--env NAME=VALUE]…
+                 [--baseline-root DIR] [--baseline-mode compare|record|update] [--capture-steps=true]
+                 (exit 0 only if every flow passed)`;
 
 const err = (msg: string) => { process.stderr.write(`phonedock: ${msg}\n`); return 2; };
 /** Every value of a repeatable flag (`--env A=1 --env B=2`). */
@@ -103,17 +104,13 @@ async function testDevice(c: PhoneDockClient, q: string | undefined, platform: s
     : `No ${platform ? `${platform} ` : ''}device is running: boot one (phonedock boot <id>) or pass --device <id>`);
 }
 
-async function compareImages(a: Buffer, b: Buffer): Promise<number> {
-  const [ta, tb] = await Promise.all([grayThumb(a, 64), grayThumb(b, 64)]);
-  const d = diffThumbs(ta, tb);
-  return d.cells / Math.max(1, tb.width * tb.height);
-}
-
 export async function testCmd(c: PhoneDockClient, a: ParsedArgs, argv: string[], json: boolean): Promise<number> {
   const paths = a.positionals.slice(1);
   if (!paths.length) return err('Usage: phonedock test <flow file|dir…> [--device ID] [--junit out.xml] [--artifacts DIR] [--retries N]');
   const platform = str(a.flags, 'platform');
   if (platform && platform !== 'android' && platform !== 'ios') return err('--platform is android or ios');
+  const baselineMode = str(a.flags, 'baselineMode') ?? 'compare';
+  if (!['compare', 'record', 'update'].includes(baselineMode)) return err('--baseline-mode is compare, record or update');
   let files: string[];
   try { files = collectFlowFiles(paths); } catch (e) { return err((e as Error).message); }
   if (!files.length) return err(`No flow files (*.yaml, *.yml, *.json) in ${paths.join(', ')}`);
@@ -135,7 +132,9 @@ export async function testCmd(c: PhoneDockClient, a: ParsedArgs, argv: string[],
   let suite;
   try {
     suite = await runFlowFiles(c, files, {
-      deviceId: device.id, artifactsDir, platform: platform as 'android' | 'ios' | undefined, env, log, compareImages, signal: ac.signal,
+      deviceId: device.id, artifactsDir, platform: platform as 'android' | 'ios' | undefined, env, log, signal: ac.signal,
+      baselineRoot: resolve(str(a.flags, 'baselineRoot') ?? process.cwd()), baselineMode: baselineMode as 'compare' | 'record' | 'update',
+      captureSteps: a.flags.captureSteps === true || a.flags.captureSteps === 'true',
       retries: num(a.flags, 'retries') ?? 0, timeoutMs: num(a.flags, 'timeout'),
     });
   } finally { process.off('SIGINT', onInt); }
@@ -149,6 +148,7 @@ export async function testCmd(c: PhoneDockClient, a: ParsedArgs, argv: string[],
     process.stdout.write(`${ok ? 'PASSED' : 'FAILED'}: ${suite.passed} passed, ${suite.failed} failed, ${suite.skipped} skipped (${suite.flows.length} flow${suite.flows.length === 1 ? '' : 's'}, ${(suite.ms / 1000).toFixed(1)}s) on ${device.name}\n`);
     if (!ran) process.stdout.write('No flow ran (all skipped): check --platform and the flows\' platform / minOS.\n');
     if (junit) process.stdout.write(`JUnit: ${rel(resolve(junit))}\n`);
+    if (suite.report) process.stdout.write(`Report: ${rel(suite.report)}\n`);
     if (failedWith.length) process.stdout.write(`Artifacts: ${failedWith.map((f) => f.artifacts).join(', ')}\n`);
   }
   return ok ? 0 : 1;

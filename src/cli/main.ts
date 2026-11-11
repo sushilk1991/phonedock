@@ -12,6 +12,7 @@ import { localTime } from '../backends/ios-common.ts';
 import { appNotesDir, appNotesPath } from '../core/app-notes.ts';
 import { FLOW_HELP, flowCmd, testCmd } from './flow-cmds.ts';
 import { TRACE_USAGE, traceCmd } from './trace-cmds.ts';
+import { parseEnvironmentAction } from '../core/environment.ts';
 
 const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | rm <appId> | path [appId]';
 
@@ -68,7 +69,12 @@ App data:   appdata <id> save|restore|ls <appId> [name]
 App notes:  ${NOTES_USAGE}
               What agents learned about an app, shared by every agent on this Mac. save reads --file or stdin.
 ${FLOW_HELP}
-Misc:       jobs [jobId] | watch | mcp [--http PORT] | help
+Diagnostics: doctor [--device ID] | audit <id> | environment <id> | request-result <id> <requestId>
+Test setup: permissions <id> <appId> grant|revoke|reset <service...>
+            biometric <id> enroll|unenroll|match|fail [--modality face|fingerprint] [--finger-id N]
+            status-bar <id> override|clear [--time HH:MM] [--battery N] [--wifi N] [--cellular N]
+            media <id> <image-or-video> | webview <id> <appId> [--network] [--bounds x,y,w,h]
+Misc:       jobs [jobId] | watch | mcp [--http PORT] [--profile all|runtime | --compact] | help
 
 <id> accepts the full device id, the native id, or a unique name / prefix.
 Coordinates are device screenshot pixels. Env: PHONEDOCK_PORT, PHONEDOCK_HOME, PHONEDOCK_OWNER.`;
@@ -287,6 +293,31 @@ export async function run(argv: string[]): Promise<number> {
   const dev = async (i = 1): Promise<Device> => { need(p, i + 1, '<device>'); return c.resolveDevice(p[i]); };
 
   switch (cmd) {
+    case 'doctor': {
+      const name = str(a.flags, 'device');
+      if (name) out(await c.doctor({ device: (await c.resolveDevice(name)).id }));
+      else { const { buildDoctorReport } = await import('../core/doctor.ts'); out(await buildDoctorReport()); }
+      return 0;
+    }
+    case 'request-result': { const d = await dev(); if (!a.positionals[2]) usage('request-result needs a request ID'); out(await c.requestResult(d.id, a.positionals[2])); return 0; }
+    case 'audit': { const d = await dev(); out(await c.auditUi(d.id, { includeOffscreen: !!a.flags.includeOffscreen })); return 0; }
+    case 'environment': { const d = await dev(); out(await c.environment(d.id)); return 0; }
+    case 'permissions': case 'biometric': case 'status-bar': case 'media': {
+      const d = await dev(); let change: unknown;
+      if (cmd === 'permissions') change = { action: 'permissions', appId: a.positionals[2], state: a.positionals[3], permissions: a.positionals.slice(4) };
+      else if (cmd === 'biometric') change = { action: 'biometric', event: a.positionals[2], ...(str(a.flags, 'modality') ? { modality: str(a.flags, 'modality') } : {}), ...(num(a.flags, 'fingerId') !== undefined ? { fingerId: num(a.flags, 'fingerId') } : {}) };
+      else if (cmd === 'media') change = { action: 'media', path: a.positionals[2] ? resolve(a.positionals[2]) : undefined };
+      else change = { action: 'statusBar', mode: a.positionals[2] ?? 'override', ...(str(a.flags, 'time') ? { time: str(a.flags, 'time') } : {}),
+        ...(num(a.flags, 'battery') !== undefined ? { batteryLevel: num(a.flags, 'battery') } : {}), ...(num(a.flags, 'wifi') !== undefined ? { wifiBars: num(a.flags, 'wifi') } : {}), ...(num(a.flags, 'cellular') !== undefined ? { cellularBars: num(a.flags, 'cellular') } : {}) };
+      out(await c.setEnvironment(d.id, parseEnvironmentAction(change))); return 0;
+    }
+    case 'webview': {
+      const d = await dev(); if (!a.positionals[2]) usage('webview needs the app package ID');
+      const values = str(a.flags, 'bounds')?.split(',').map(Number);
+      if (values && (values.length !== 4 || !values.every(Number.isFinite))) usage('--bounds must be x,y,width,height in screenshot pixels');
+      out(await c.inspectWebView(d.id, { appId: a.positionals[2], action: a.flags.network ? 'network' : 'snapshot', targetId: str(a.flags, 'target'), captureMs: num(a.flags, 'captureMs'), maxElements: num(a.flags, 'maxElements'),
+        ...(values ? { bounds: { x: values[0], y: values[1], width: values[2], height: values[3] } } : {}) })); return 0;
+    }
     case 'setup': {
       const { setupCommand, parseAgents } = await import('./setup.ts');
       try { parseAgents(str(a.flags, 'agent')); } catch (e) { usage((e as Error).message); }
@@ -297,7 +328,9 @@ export async function run(argv: string[]): Promise<number> {
     case 'mcp': {
       const { startMcpServer } = await import('../mcp/server.ts');
       const port = num(a.flags, 'http');
-      await startMcpServer({ http: port, client: c, ownerFromFlag: str(a.flags, 'owner') });
+      const profile = a.flags.compact ? 'runtime' : str(a.flags, 'profile') ?? 'all';
+      if (profile !== 'all' && profile !== 'runtime') { process.stderr.write('MCP profile must be all or runtime\n'); return 2; }
+      await startMcpServer({ http: port, client: c, ownerFromFlag: str(a.flags, 'owner'), profile });
       return -1; // keep running
     }
     case 'backends': {

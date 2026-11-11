@@ -285,3 +285,12 @@ test('settings flow validates, round trips and exports as an unsupported Maestro
   assert.match(toMaestro(flow).text, /no portable Maestro device settings command/);
   assert.throws(() => parseFlow('steps:\n  - settings: { boldText: nope }\n'), /boldText must be a boolean/);
 });
+
+test('visual assertion options validate and round trip with ignored pixel regions', () => {
+  const f = parseFlow('steps:\n  - screenshot: { name: home, baseline: home.png, comparison: pixel, pixelThreshold: 8, tolerance: 0.01, ignore: [{ x: 0, y: 0, width: 100, height: 40 }] }\n');
+  const back = parseFlow(writeFlow(f));
+  assert.deepEqual(back.steps, f.steps);
+  for (const bad of ['tolerance: -1', 'tolerance: NaN', 'tolerance: 2', 'comparison: unknown', 'pixelThreshold: 300', 'ignore: [{ x: 0, y: 0, width: -1, height: 1 }]']) {
+    assert.throws(() => parseFlow(`steps:\n  - screenshot: { name: home, ${bad} }\n`));
+  }
+});

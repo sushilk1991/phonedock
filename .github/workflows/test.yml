@@ -1,0 +1,44 @@
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PHONEDOCK_NO_AUTOSTART: '1'
+      PHONEDOCK_PORT: '47591'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PHONEDOCK_REQUIRE_SIDECAR_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - name: Sidecar protocol test dependency (no device access)
+        run: python3 -m pip install pymobiledevice3==11.49.2
+      - name: Image comparison dependencies
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - run: npx tsc --noEmit -p .
+      - run: npm test
+      - run: python3 -m unittest discover -s sdk/python/tests -v
+      - name: Validate Python sidecar syntax without writing bytecode
+        run: python3 -c 'import ast,pathlib; [ast.parse(p.read_text(), filename=str(p)) for p in pathlib.Path("tools").glob("*.py")]'
+      - run: npm run bundle

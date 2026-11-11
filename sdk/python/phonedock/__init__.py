@@ -7,14 +7,18 @@ screenshot pixels; `screenshot()` returns the scale so you can map downscaled im
 from __future__ import annotations
 
 import json
+import errno
+import http.client
 import os
 import re
 import shutil
+import socket
 import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 __all__ = ["PhoneDock", "PhoneDockApiError", "phonedock_home", "read_daemon_info"]
@@ -31,7 +35,7 @@ class PhoneDockApiError(Exception):
     """An API error. Input calls also say how far the input got: `delivery` is "sent", "not_sent" or "unknown", and
     `retry_safe` is True only when nothing reached the device (never resend an input whose delivery is unknown)."""
     def __init__(self, message: str, code: str = "error", status: int = 0, hints: Optional[List[str]] = None, detail: Optional[str] = None,
-                 delivery: Optional[str] = None):
+                 delivery: Optional[str] = None, request_id: Optional[str] = None):
         super().__init__(message)
         self.message = message
         self.code = code
@@ -40,6 +44,7 @@ class PhoneDockApiError(Exception):
         self.detail = detail
         self.delivery = delivery
         self.retry_safe = delivery == "not_sent" if delivery else None
+        self.request_id = request_id
 
     def __str__(self) -> str:
         s = f"{self.message} [{self.code}]"
@@ -69,6 +74,21 @@ def _q(s: str) -> str:
 
 
 _APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+_INPUT_PATH = re.compile(r"/v1/devices/[^/]+/(?:input|fill|scroll-to|swipe|back|gesture|keyboard/hide|alert|environment|clipboard|apps/[^/]+/launch)/?$")
+
+
+def _never_connected(error: BaseException) -> bool:
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return isinstance(reason, (ConnectionRefusedError, socket.gaierror)) or (
+        isinstance(reason, OSError) and reason.errno in (errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH))
+
+
+def _local_url(url: str) -> bool:
+    try:
+        return urllib.parse.urlsplit(url).hostname in ("127.0.0.1", "localhost", "::1")
+    except ValueError:
+        return False
 
 
 def _notes_path(app_id: str) -> str:
@@ -122,6 +142,28 @@ class PhoneDock:
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/v1/health", retry=False)
 
+    def doctor(self, device_id: Optional[str] = None, capabilities: Optional[List[str]] = None) -> Dict[str, Any]:
+        return self._request("GET", "/v1/doctor", query={"device": device_id, "capabilities": ",".join(capabilities) if capabilities else None})
+
+    def inventory_status(self) -> Dict[str, Any]:
+        return self._request("GET", "/v1/inventory")
+
+    def environment(self, device_id: str) -> Dict[str, Any]:
+        return self._request("GET", self._dev(device_id, "/environment"))
+
+    def set_environment(self, device_id: str, action: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
+        return self._request("POST", self._dev(device_id, "/environment"), action, request_id=request_id)
+
+    def audit_ui(self, device_id: str, include_offscreen: bool = False) -> Dict[str, Any]:
+        return self._request("GET", self._dev(device_id, "/audit"), query={"includeOffscreen": include_offscreen})
+
+    def inspect_webview(self, device_id: str, app_id: str, action: str = "snapshot", target_id: Optional[str] = None,
+                        bounds: Optional[Dict[str, float]] = None, capture_ms: Optional[int] = None,
+                        max_elements: Optional[int] = None) -> Dict[str, Any]:
+        body = {k: v for k, v in {"appId": app_id, "action": action, "targetId": target_id, "bounds": bounds,
+                                "captureMs": capture_ms, "maxElements": max_elements}.items() if v is not None}
+        return self._request("POST", self._dev(device_id, "/webview"), body)
+
     def is_running(self) -> bool:
         try:
             return bool(self.health().get("ok"))
@@ -133,6 +175,8 @@ class PhoneDock:
         if self.is_running():
             self._load_info(refresh=True)
             return
+        if self._base_url and not _local_url(self._base_url):
+            raise PhoneDockApiError(f"PhoneDock daemon at {self._base_url} is not reachable", "daemon_unreachable", 0)
         entry = os.environ.get("PHONEDOCK_DAEMON_ENTRY")
         here = os.path.dirname(os.path.abspath(__file__))
         repo_entry = os.path.normpath(os.path.join(here, "..", "..", "..", "src", "daemon", "main.ts"))
@@ -150,6 +194,10 @@ class PhoneDock:
         log_dir = os.path.join(self.home, "logs")
         os.makedirs(log_dir, exist_ok=True)
         env = dict(os.environ, PHONEDOCK_HOME=self.home)
+        if self._base_url:
+            explicit_port = urllib.parse.urlsplit(self._base_url).port
+            if explicit_port is not None:
+                env["PHONEDOCK_PORT"] = str(explicit_port)
         with open(os.path.join(log_dir, "daemon.log"), "ab") as log:
             subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env, start_new_session=True, cwd=self.home)
         deadline = time.time() + timeout
@@ -162,15 +210,28 @@ class PhoneDock:
                                 [f"See {os.path.join(log_dir, 'daemon.log')}"])
 
     def _request(self, method: str, path: str, body: Any = None, query: Optional[Dict[str, Any]] = None,
-                 raw: bool = False, retry: bool = True, timeout: Optional[float] = None) -> Any:
+                 raw: bool = False, retry: bool = True, timeout: Optional[float] = None,
+                 request_id: Optional[str] = None) -> Any:
+        is_input = method.upper() in ("POST", "PUT") and _INPUT_PATH.fullmatch(path) is not None
+        if request_id is not None and (not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id) or re.fullmatch(r"\.+", request_id)):
+            raise PhoneDockApiError("Invalid request id: use 1–128 letters, digits, periods, underscores or hyphens",
+                                    "bad_request", 400, delivery="not_sent")
+        if is_input and request_id is None:
+            request_id = str(uuid.uuid4())
         q = {k: ("1" if v is True else "0" if v is False else str(v)) for k, v in (query or {}).items() if v is not None}
         url = self.base_url + path + (("?" + urllib.parse.urlencode(q)) if q else "")
         headers = {"X-PhoneDock-Owner": self.owner}
+        if request_id is not None:
+            headers["X-PhoneDock-Request-ID"] = request_id
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         data = None
         if body is not None:
-            data = json.dumps(body).encode()
+            try:
+                data = json.dumps(body).encode()
+            except (TypeError, ValueError):
+                raise PhoneDockApiError("The request body cannot be serialized as JSON", "bad_request", 400,
+                                        delivery="not_sent" if is_input else None, request_id=request_id) from None
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
@@ -179,22 +240,53 @@ class PhoneDock:
             if e.code == 401 and retry and not self._token:
                 before = (self._info or {}).get("token")
                 if (self._load_info(refresh=True) or {}).get("token") != before:
-                    return self._request(method, path, body, query, raw, retry=False, timeout=timeout)
-            raise self._to_error(e)
-        except urllib.error.URLError as e:
-            if retry and self.auto_start:
-                self.ensure_daemon()
-                return self._request(method, path, body, query, raw, retry=False, timeout=timeout)
-            raise PhoneDockApiError(f"PhoneDock daemon not reachable at {self.base_url}: {e.reason}", "daemon_unreachable", 0,
-                                    ["Start it with `phonedock daemon start`"])
+                    e.close()
+                    return self._request(method, path, body, query, raw, retry=False, timeout=timeout, request_id=request_id)
+            err = self._to_error(e)
+            if is_input and err.delivery is None:
+                err.delivery = "not_sent" if e.code == 401 else "unknown"
+                err.retry_safe = err.delivery == "not_sent"
+            err.request_id = request_id
+            raise err from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            fresh = _never_connected(e)
+            # An input is never replayed after a reset/timeout/drop: the device may already have acted.
+            if retry and self.auto_start and (fresh or (not is_input and isinstance(e, urllib.error.URLError))):
+                try:
+                    self.ensure_daemon()
+                except PhoneDockApiError as start_error:
+                    if is_input:
+                        start_error.delivery = "not_sent"
+                        start_error.retry_safe = True
+                    start_error.request_id = request_id
+                    raise
+                return self._request(method, path, body, query, raw, retry=False, timeout=timeout, request_id=request_id)
+            delivery = ("not_sent" if fresh else "unknown") if is_input else None
+            raise self._transport_error(e, delivery, request_id) from None
         if raw:
             return resp
-        payload = resp.read()
-        ctype = resp.headers.get("Content-Type", "")
-        if "application/json" in ctype:
-            return json.loads(payload or b"null")
-        text = payload.decode("utf-8", "replace")
-        return text
+        try:
+            with resp:
+                payload = resp.read()
+                ctype = resp.headers.get("Content-Type", "")
+            if "application/json" in ctype:
+                try:
+                    return json.loads(payload)
+                except (ValueError, UnicodeError):
+                    raise PhoneDockApiError("PhoneDock returned invalid JSON", "invalid_response", getattr(resp, "status", 200),
+                                            delivery="unknown" if is_input else None, request_id=request_id) from None
+            return payload.decode("utf-8", "replace")
+        except (OSError, http.client.HTTPException) as e:
+            raise self._transport_error(e, "unknown" if is_input else None, request_id) from None
+
+    def _transport_error(self, error: BaseException, delivery: Optional[str], request_id: Optional[str]) -> PhoneDockApiError:
+        if delivery == "unknown":
+            return PhoneDockApiError("The connection to PhoneDock broke after the input may have been sent", "daemon_unreachable", 0,
+                                     ["The input may have reached the device: look at the screen before sending it again."],
+                                     delivery=delivery, request_id=request_id)
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        return PhoneDockApiError(f"PhoneDock daemon not reachable at {self.base_url}: {reason}", "daemon_unreachable", 0,
+                                 ["Start it with `phonedock daemon start`"], delivery=delivery, request_id=request_id)
 
     @staticmethod
     def _to_error(e: urllib.error.HTTPError) -> PhoneDockApiError:
@@ -205,9 +297,17 @@ class PhoneDock:
             return PhoneDockApiError(err.get("message", f"HTTP {e.code}"), err.get("code", f"http_{e.code}"), e.code, err.get("hints") or [], err.get("detail"), dl)
         except Exception:
             return PhoneDockApiError(f"HTTP {e.code} {e.reason}", f"http_{e.code}", e.code)
+        finally:
+            e.close()
 
     def _dev(self, device_id: str, sub: str = "") -> str:
         return f"/v1/devices/{_q(device_id)}{sub}"
+
+    def request_result(self, device_id: str, request_id: str) -> Dict[str, Any]:
+        """Recover a recorded input result after its response was lost. Never sends input again."""
+        if not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id) or re.fullmatch(r"\.+", request_id):
+            raise PhoneDockApiError("Invalid request id", "bad_request", 400)
+        return self._request("GET", self._dev(device_id, f"/requests/{_q(request_id)}"))
 
     # ── jobs ──────────────────────────────────────────────────────────────
     def jobs(self) -> List[Dict[str, Any]]:
@@ -255,7 +355,32 @@ class PhoneDock:
 
     def resolve_device(self, query: str) -> Dict[str, Any]:
         """Full id, native id, exact name, or unique prefix → Device."""
+        query = query.strip()
+        if re.match(r"^(android-emulator|android-device|ios-simulator|ios-device|qemu|corellium):.+", query):
+            return self.device(query)
         devs = self.devices()
+        deadline = time.monotonic() + 5
+        status_known = False
+        while True:
+            try:
+                status = self.inventory_status()
+                status_known = True
+            except PhoneDockApiError as error:
+                if error.status == 404:  # older daemon
+                    break
+                raise
+            unresolved = [(name, s) for name, s in status.items() if s.get("at") is None]
+            if not unresolved:
+                break
+            if any(s.get("error") or s.get("timedOut") for _, s in unresolved):
+                raise PhoneDockApiError("Device discovery is incomplete", "inventory_incomplete", 503,
+                                        ["Use the full backend:nativeId. Unresolved backends: " + ", ".join(name for name, _ in unresolved)])
+            if time.monotonic() >= deadline:
+                raise PhoneDockApiError("Device discovery is still warming", "inventory_pending", 503,
+                                        ["Use the full backend:nativeId or retry after discovery completes."])
+            time.sleep(0.1)
+        if status_known:
+            devs = self.devices()
         for pred in (lambda d: d["id"] == query, lambda d: d.get("nativeId") == query, lambda d: d.get("name") == query,
                      lambda d: d["id"].startswith(query) or d.get("nativeId", "").startswith(query) or d.get("name", "").lower().startswith(query.lower())):
             m = [d for d in devs if pred(d)]
@@ -331,7 +456,8 @@ class PhoneDock:
         return self._request("GET", self._dev(device_id, "/ui"), query={"format": "text", "ocrFallback": ocr_fallback})
 
     # ── input ─────────────────────────────────────────────────────────────
-    def input(self, device_id: str, action: Union[Dict[str, Any], List[Dict[str, Any]]], expect: Expect = None) -> Dict[str, Any]:
+    def input(self, device_id: str, action: Union[Dict[str, Any], List[Dict[str, Any]]], expect: Expect = None,
+              snapshot_id: Optional[str] = None, return_ui: bool = False, request_id: Optional[str] = None) -> Dict[str, Any]:
         """One action or several in a row. The result has `delivery` ("sent" / "not_sent") and `retrySafe`; with
         `expect` (checked once, after the last action) also `expect`: {ok, outcome, message, …}, where outcome is
         "verified", "screen_unchanged" or "changed_not_found". expect: "text" (visible), {"visible": t},
@@ -339,7 +465,11 @@ class PhoneDock:
         body: Dict[str, Any] = {"actions": action} if isinstance(action, list) else dict(action)
         if expect is not None:
             body["expect"] = expect
-        return self._request("POST", self._dev(device_id, "/input"), body)
+        if snapshot_id is not None:
+            body["snapshotId"] = snapshot_id
+        if return_ui:
+            body["returnUi"] = True
+        return self._request("POST", self._dev(device_id, "/input"), body, request_id=request_id)
 
     def tap(self, device_id: str, x: float, y: float, label: Optional[str] = None,
             selector: Optional[Dict[str, Any]] = None, element: Optional[Dict[str, Any]] = None, expect: Expect = None) -> Dict[str, Any]:
@@ -355,8 +485,8 @@ class PhoneDock:
             body["element"] = {k: v for k, v in element.items() if v is not None}
         return self.input(device_id, body, expect)
 
-    def tap_ref(self, device_id: str, ref: str, expect: Expect = None) -> Dict[str, Any]:
-        return self.input(device_id, {"action": "tap", "ref": ref.lstrip("@")}, expect)
+    def tap_ref(self, device_id: str, ref: str, expect: Expect = None, snapshot_id: Optional[str] = None) -> Dict[str, Any]:
+        return self.input(device_id, {"action": "tap", "ref": ref.lstrip("@")}, expect, snapshot_id=snapshot_id)
 
     def long_press(self, device_id: str, x: float, y: float, duration_ms: Optional[int] = None, expect: Expect = None) -> Dict[str, Any]:
         return self.input(device_id, {"action": "longPress", "x": round(x), "y": round(y), "durationMs": duration_ms}, expect)
@@ -421,13 +551,15 @@ class PhoneDock:
 
     def fill(self, device_id: str, value: str, text: Optional[str] = None, ref: Optional[str] = None, id: Optional[str] = None,
              type: Optional[str] = None, match: Optional[str] = None, index: Optional[int] = None, x: Optional[float] = None,
-             y: Optional[float] = None, clear: bool = True, submit: bool = False, secret: bool = False, expect: Expect = None) -> Dict[str, Any]:
+             y: Optional[float] = None, clear: bool = True, submit: bool = False, secret: bool = False, expect: Expect = None,
+             snapshot_id: Optional[str] = None, return_ui: bool = False, request_id: Optional[str] = None) -> Dict[str, Any]:
         """Tap a field (by text/ref/id or device-pixel x,y), wait for focus, clear it, type value, re-read and verify.
         Returns {element, cleared, clearMethod, previousValue, finalValue, verified, warnings, elapsedMs, delivery, …};
         with expect (see input()) also `expect`."""
         body = self._query(text, id, type, match, value=value, ref=ref, index=index, clear=clear, submit=submit, secret=secret,
-                           x=None if x is None else round(x), y=None if y is None else round(y), expect=expect)
-        return self._request("POST", self._dev(device_id, "/fill"), body)
+                           x=None if x is None else round(x), y=None if y is None else round(y), expect=expect,
+                           snapshotId=snapshot_id, returnUi=True if return_ui else None)
+        return self._request("POST", self._dev(device_id, "/fill"), body, request_id=request_id)
 
     def focus(self, device_id: str, wait_ms: Optional[int] = None) -> Dict[str, Any]:
         """{known, ok, focused, keyboard, elapsedMs}: the focused text field / whether a keyboard is up."""
@@ -657,9 +789,9 @@ class PhoneDock:
         iOS simulators, Android, iPhones on iOS 27+)."""
         return self._request("GET", self._dev(device_id, "/clipboard")).get("text")
 
-    def set_clipboard(self, device_id: str, text: str) -> Dict[str, Any]:
+    def set_clipboard(self, device_id: str, text: str, request_id: Optional[str] = None) -> Dict[str, Any]:
         """Replace the device clipboard with `text` (needs the lease): {"ok": True, "length": N}. Only the length is logged."""
-        return self._request("PUT", self._dev(device_id, "/clipboard"), {"text": text})
+        return self._request("PUT", self._dev(device_id, "/clipboard"), {"text": text}, request_id=request_id)
 
     def logs(self, device_id: str, lines: Optional[int] = None, filter: Optional[str] = None) -> str:
         return self._request("GET", self._dev(device_id, "/logs"), query={"lines": lines, "filter": filter})

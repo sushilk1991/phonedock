@@ -25,6 +25,7 @@ import { axTree, describe, findOnce, ocrTree, parseFind, pollFind, queryText, ty
 import { resolveRef, type RefTarget } from './refcheck.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 import { inputRoute } from './delivery.ts';
+import { inputScope } from './execution.ts';
 
 // ── shared: trees, find, focus (find.ts) ─────────────────────────────────────
 r.post('/v1/devices/:id/find', async (c) => {
@@ -38,7 +39,7 @@ r.post('/v1/devices/:id/find', async (c) => {
   const miss = matches.length <= index ? { summary: screenSummary(tree), scrollable: canScroll(tree, (await getDevice(d.id)).platform) } : {};
   return {
     source: tree.source, total: matches.length, index, match: matches[index] ?? null, matches: matches.slice(0, limit),
-    screen: tree.screen, capturedAt: tree.capturedAt, ocrTried, ...(ocrError ? { ocrError } : {}), ...miss,
+    screen: tree.screen, capturedAt: tree.capturedAt, snapshotId: tree.snapshotId, ocrTried, ...(ocrError ? { ocrError } : {}), ...miss,
   };
 });
 
@@ -121,7 +122,7 @@ r.post('/v1/devices/:id/wait', observeWait(async (c) => {
   const q = parseFind(body);
   const p = await pollFind(d, q, until as 'visible' | 'gone', { timeoutMs, intervalMs, stableMs, aborted: () => closed, abortError: gone });
   const last = p.last; const vis = p.visible;
-  if (p.ok) return { ok: true, until, elapsedMs: Date.now() - t0, polls: p.polls, source: last.tree.source, ...(until === 'visible' ? { match: vis[0], matches: vis.slice(0, 5) } : {}) };
+  if (p.ok) return { ok: true, until, elapsedMs: Date.now() - t0, polls: p.polls, source: last.tree.source, ...(until === 'visible' ? { match: vis[0], matches: vis.slice(0, 5), snapshotId: last.tree.snapshotId, screen: last.tree.screen } : {}) };
   const hidden = last.matches.filter((m) => !m.visible);
   const hints = [`Screen now (${last.tree.source}): ${screenSummary(last.tree)}`];
   if (until === 'visible' && hidden.length) hints.unshift(`${hidden.length} match(es) exist but are not visible (off-screen or under the keyboard): ${hidden.slice(0, 3).map(describe).join('; ')}`);
@@ -357,7 +358,7 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
   if (clearMethod === 'already empty (placeholder)') afterClear = before;
 
   // 5. type
-  if (value) { await d.b.type(d.nid, value); log({ action: 'type', text: value, secret }); }
+  if (value) { await d.b.type(d.nid, value, { secret }); log({ action: 'type', text: value, secret }); }
 
   // 6. re-read + verify (one retry when typing was dropped, which happens under load)
   let finalValue: string | undefined; let verified: boolean | undefined;
@@ -381,7 +382,7 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
       const n2 = [...finalValue].length;
       try { await d.b.key(d.nid, 'end'); } catch { /* optional */ }
       for (let i = 0; i < n2 + 1; i++) { await d.b.key(d.nid, 'delete'); log({ action: 'key', key: 'delete' }); }
-      await d.b.type(d.nid, value); log({ action: 'type', text: value, secret });
+      await d.b.type(d.nid, value, { secret }); log({ action: 'type', text: value, secret });
       clearMethod = `${n2 + 1}× delete key (Cmd+A had no effect)`;
       finalValue = await reread();
     }
@@ -390,7 +391,7 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
       const n2 = [...finalValue].length;
       await d.b.shell(d.nid, `input keyevent 123 ${Array(n2 + 2).fill('67').join(' ')}`);
       log({ action: 'key', key: 'KEYCODE_MOVE_END' }); for (let i = 0; i < n2 + 2; i++) log({ action: 'key', key: 'delete' });
-      await d.b.type(d.nid, value); log({ action: 'type', text: value, secret });
+      await d.b.type(d.nid, value, { secret }); log({ action: 'type', text: value, secret });
       clearMethod = `move-end + ${n2 + 2}× delete (select all had no effect)`;
       finalValue = await reread();
     }
@@ -402,7 +403,7 @@ r.post('/v1/devices/:id/fill', inputRoute(async (c) => {
         if (!secret && value.startsWith(got)) rest = value.slice(got.length);
         else if (secret && got === '') rest = value;
         if (rest) {
-          await d.b.type(d.nid, rest); log({ action: 'type', text: rest, secret });
+          await d.b.type(d.nid, rest, { secret }); log({ action: 'type', text: rest, secret });
           warnings.push(`Typing was ${got ? 'partly ' : ''}dropped; retyped ${secret ? `${[...rest].length} chars` : JSON.stringify(rest)}`);
           finalValue = await reread();
           if (finalValue !== undefined) verified = check(finalValue);
@@ -539,25 +540,27 @@ async function setClipboard(c: Ctx) {
   const body = await c.body();
   if (typeof body?.text !== 'string') throw badRequest('text must be a string: the clipboard’s new contents ("" empties it)');
   const text: string = body.text;
+  inputScope()?.secrets?.push(text); // Clipboard contents are private even without a secret flag.
   const length = [...text].length;
   if (length > MAX_CLIPBOARD_CHARS) throw badRequest(`text is too long: ${length} characters (at most ${MAX_CLIPBOARD_CHARS})`);
   await clipboardFn(d.b, 'clipboardSet')(d.nid, text);
   logAction(d.id, c.owner, { action: 'clipboard.set', length });
   return { ok: true, length };
 }
-r.add('PUT', '/v1/devices/:id/clipboard', setClipboard);
-r.post('/v1/devices/:id/clipboard', setClipboard);
+r.add('PUT', '/v1/devices/:id/clipboard', inputRoute(setClipboard));
+r.post('/v1/devices/:id/clipboard', inputRoute(setClipboard));
 
 // ── foreground app / keyboard ───────────────────────────────────────────────
 r.get('/v1/devices/:id/foreground', async (c) => {
   const { b, nid } = dev(c);
   return { app: (await need(b, 'foregroundApp', 'foreground app')(nid)) ?? null };
 });
-r.post('/v1/devices/:id/keyboard/hide', async (c) => {
+r.post('/v1/devices/:id/keyboard/hide', inputRoute(async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);
   await need(b, 'hideKeyboard', 'hide keyboard')(nid);
+  logAction(id, c.owner, { action: 'keyboard.hide' });
   return { ok: true };
-});
+}));
 
 // ── crashes ─────────────────────────────────────────────────────────────────
 r.get('/v1/devices/:id/crashes', async (c) => {
@@ -1019,7 +1022,7 @@ function alertAction(body: Record<string, unknown>): AlertAction {
   if (raw === 'accept' || raw === 'dismiss') return raw;
   throw badRequest('action must be accept | dismiss | button=<label> (or pass { button: "<label>" })');
 }
-r.post('/v1/devices/:id/alert', async (c) => {
+r.post('/v1/devices/:id/alert', inputRoute(async (c) => {
   const d = dev(c); checkLease(d.id, c.owner);
   const body = await c.body();
   const action = alertAction(body);
@@ -1063,4 +1066,4 @@ r.post('/v1/devices/:id/alert', async (c) => {
     tapped: { text: btn.text, ...(btn.ref ? { ref: btn.ref } : {}), ...(btn.role ? { role: btn.role } : {}), bounds: btn.bounds, x, y },
     dismissed: gone, after: after ?? null, elapsedMs: Date.now() - t0,
   };
-});
+}));

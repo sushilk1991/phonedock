@@ -52,6 +52,7 @@ import base64
 import collections
 import contextlib
 import json
+import math
 import os
 import threading
 import struct
@@ -76,6 +77,7 @@ from pymobiledevice3.remote.core_device.hid_service import (
     TOUCHSCREEN_STATE_RELEASE,
     IndigoHIDService,
     UniversalHIDServiceService,
+    TouchscreenContact,
 )
 from pymobiledevice3.remote.core_device.display_service import DisplayService
 from pymobiledevice3.remote.core_device.screen_stream import (
@@ -422,6 +424,31 @@ class Channel:
                 await self.touch.send_touchscreen(TOUCHSCREEN_STATE_CONTACT, x2, y2)
         await self.touch.send_touchscreen(TOUCHSCREEN_STATE_RELEASE, x2, y2)
 
+    async def pinch(self, x: int, y: int, scale: float, seconds: float) -> None:
+        """Two contacts move together; never reconnect/replay after the first contact is sent."""
+        if not math.isfinite(scale) or scale <= 0 or not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("scale and duration must be finite and positive")
+        if not 0 <= x <= 65535 or not 0 <= y <= 65535:
+            raise ValueError("pinch center must be in the HID coordinate range")
+        big = 65535 * 0.7
+        start = max(65535 * 0.08, big / scale) if scale >= 1 else big
+        end = big if scale >= 1 else max(65535 * 0.08, big * scale)
+        steps = max(8, min(120, round(seconds * 60)))
+        def contacts(t: float, touching: bool = True):
+            distance = (start + (end - start) * t) / (2 * math.sqrt(2))
+            return [TouchscreenContact(identity=i, x=round(min(65535, max(0, x + sign * distance))),
+                                       y=round(min(65535, max(0, y + sign * distance))), touching=touching)
+                    for i, sign in enumerate((-1, 1))]
+        try:
+            await self.touch.send_multitouch(contacts(0))
+            for i in range(1, steps + 1):
+                await asyncio.sleep(seconds / steps)
+                await self.touch.send_multitouch(contacts(i / steps))
+        finally:
+            # Release contacts even when a move fails; releasing is cleanup, never replaying the gesture.
+            with contextlib.suppress(Exception):
+                await self.touch.send_multitouch(contacts(1, False))
+
     async def keyboard(self) -> int:
         if self.kb is None:
             self.kb = await self.touch.create_keyboard_service()
@@ -521,6 +548,8 @@ async def handle(ch: Channel, req: dict) -> dict | None:
         await ch.tap(int(req["x"]), int(req["y"]), hold=max(0.1, float(req.get("ms", 800)) / 1000))
     elif cmd == "drag":
         await ch.drag(int(req["x1"]), int(req["y1"]), int(req["x2"]), int(req["y2"]), max(0.05, float(req.get("ms", 300)) / 1000), bool(req.get("fling", False)))
+    elif cmd == "pinch":
+        await ch.pinch(int(req["x"]), int(req["y"]), float(req["scale"]), max(0.05, float(req.get("ms", 400)) / 1000))
     elif cmd == "combo":
         await ch.combo([str(m).lower() for m in req.get("mods", [])], str(req["key"]).lower())
     elif cmd == "type":

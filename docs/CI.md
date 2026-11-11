@@ -9,16 +9,90 @@ phonedock test flows/ --device <id> --junit junit.xml --artifacts phonedock-arti
 
 * Exit code **0** only when every flow that ran passed (and at least one ran), **1** otherwise, **2** for usage errors.
 * `--junit` writes one `<testcase>` per flow (the steps go in `<system-out>`), which most CI systems display.
+* Every run writes a self-contained, script-free `report.html`; suite runs also write a combined report at the
+  artifacts root. `--capture-steps=true` adds before/after screenshots and action markers; leave it off when the
+  extra screenshot latency is unnecessary.
 * On failure, `<artifacts>/<flow name>/` holds `failure.png`, `ui.txt` / `ui.json` (the UI tree), `logs.txt` (device
   log), `app.log` (the flow's app), `steps.txt` and `result.json`. Upload that folder.
 * Flows with `platform: ios` are skipped on Android devices and the other way round; `minOS` skips older systems.
   `--platform android|ios` runs only one platform's flows.
 * `${VAR}` in a flow comes from the environment (or `--env NAME=VALUE`). Typed secrets that `flow save` saw are
-  written as `${SECRET_1}`, …: set them from CI secrets.
+  written as `${SECRET_1}`, …: set them from CI secrets. Known secret text is redacted in textual reports and
+  diagnostics, but screenshot pixels remain unchanged. Review artifacts before publishing them.
 * `--retries 1` re-runs a failed flow once. Use it for a flaky backend, not to hide a flaky app.
 
 The example flows in [`fixtures/flows/`](../fixtures/flows) were saved from agent sessions on the sample app
 (`fixtures/android-sample`) and on iOS Settings, and pass with `phonedock test`.
+
+## Repository checks and native Python
+
+The repository test workflow is configured for Node 24/26 with Python 3.12, installs `pymobiledevice3==11.49.2`, and sets
+`PHONEDOCK_REQUIRE_SIDECAR_TESTS=1` so missing dependencies cannot silently skip fake sidecar protocol tests.
+It also runs typechecking, TS tests, Python SDK transport tests, sidecar syntax validation and bundling.
+Native iPhone sidecars require Python 3.11+ because they use `asyncio.timeout`; installing pymobiledevice3 into
+an older system Python does not satisfy that requirement. Fake protocol tests do not validate physical hardware.
+
+## Visual baselines and deterministic setup
+
+CLI and MCP `run_flow` share the visual engine. FFmpeg is required: the default compares full-resolution RGBA,
+not a grayscale thumbnail. `tolerance: 0.02` permits 2% changed pixels after ignored regions; `pixelThreshold: 16`
+is the per-channel difference threshold. Use full-resolution screenshot pixels for ignore rectangles:
+
+```yaml
+- screenshot:
+    name: welcome
+    baseline: baselines/welcome.png
+    tolerance: 0.02
+    pixelThreshold: 16
+    ignore:
+      - { x: 0, y: 0, width: 1200, height: 90 }
+```
+
+Baseline paths are relative to the flow file; inline flows use the current directory. `--baseline-root` (default
+current directory) confines reads and writes, including symlink targets. Missing baselines fail in the default
+`compare` mode. Record reviewed initial baselines explicitly, and use `update` only when accepting changed output:
+
+```sh
+phonedock test flows/ --device <full-id> --baseline-root . --baseline-mode record
+phonedock test flows/ --device <full-id> --baseline-root . --baseline-mode compare
+# After reviewing an intentional visual change:
+phonedock test flows/ --device <full-id> --baseline-root . --baseline-mode update
+```
+
+MCP uses `baseline_root`, `baseline_mode` and `capture_steps`; TS `runFlowFiles` uses `baselineRoot`, `baselineMode`
+and `captureSteps`. `record` creates missing baselines and compares existing ones. `comparison: thumbnail`
+explicitly selects the previous 64-pixel grayscale approximation. Missing FFmpeg, dimension changes, malformed
+images and a mask that excludes every pixel fail the comparison rather than skipping it.
+
+On a dedicated simulator/emulator, read `phonedock environment <id>` before applying permission grants,
+status-bar overrides or media-library imports. Clear overrides and restore the intended test state afterward.
+Only advertised services are supported. There are no physical-phone pre-grants, virtual-camera/QR injection, or
+physical biometric bypasses. iOS biometric simulation uses experimental private notification recipes; Android
+fingerprint match/fail requires enrollment first. Run separate permission-prompt tests so pre-granting does not
+hide application bugs.
+
+`phonedock doctor` checks host prerequisites without contacting devices. `phonedock audit <id>` supplies heuristic
+UI warnings, not an accessibility compliance result. Debug-enabled Android WebView diagnostics are read-only and
+limited to that WebView; they do not intercept native app HTTP or inspect iOS WebViews.
+
+For shared hosts, isolate jobs by device and use upgraded daemons sharing one `PHONEDOCK_HOME` for SQLite ownership
+coordination. Different homes, older daemons and external tools are outside that protection. A different port alone
+does not isolate the physical device. Inventory can be partial while a provider is pending: inspect `/v1/inventory`
+and use full canonical IDs to target a known backend directly. TS/Python friendly name, native-ID and prefix
+resolution waits up to five seconds for initial provider results, then reports `inventory_pending` if warming or
+`inventory_incomplete` after failed/timed-out initial discovery.
+
+If input loses its response, preserve the request ID and owner, read `request-result <id> <requestId>`, and inspect
+the screen. Receipts are device/owner-scoped: completed/dead records expire after 24 hours, while live running
+receipts remain protected beyond that (including failed completion persistence). The 1,024-file bound returns
+`503 request_store_full` before new input instead of evicting live receipts and risking replay. Unknown or interrupted
+delivery must not automatically retry the input under a new ID. Whole-flow `--retries` is also a new execution:
+use it only when resetting/repeating the workflow is safe.
+
+For iPhone Duo simulators, primary-display screenshots, UI reads, media import and recording work. AXe input
+routing was observed ineffective; affected input now returns `501 not_supported` / `not_sent`, with corresponding
+per-device input capabilities removed. Use a single-display simulator for interactive CI. Duo streaming and
+system gestures have not been validated.
 
 ## Before you push (local)
 
@@ -152,8 +226,8 @@ jobs:
 
 Notes:
 * Devices boot headless (no window). Boot takes 30–90 s; `create … --boot` waits until the device is usable.
-* `phonedock test` leases the device for the run, so a second job or agent on the same Mac can't send input to it
-  meanwhile. On a shared self-hosted Mac, give each job its own device name.
+* `phonedock test` leases the device for the run. Upgraded daemons sharing its PhoneDock home enforce ownership;
+  unrelated tools, older daemons and separate homes do not. On a shared self-hosted Mac, give each job its own device.
 * Show JUnit results in the PR with any JUnit reporter action (for example `mikepenz/action-junit-report`).
 
 ## Reading a failure
@@ -178,3 +252,5 @@ FAILED: 0 passed, 1 failed, 0 skipped (1 flow, 14.8s) on pdtest-flow-pixel
 artifacts: here the app greeted "Ada", not "Bob". Open `failure.png` and `app.log` when the screen is unexpected.
 If the app was never installed on the device, the `launch` step says so (`… isn’t installed on ci-pixel. Install it
 before the run: phonedock install …`).
+
+Use `GET /v1/metrics` to distinguish `phases["input.queue"]` from `phases["input.execute"]` and backend/route latency. Optional post-input UI enrichment is outside `input.execute`; compare the same workload before calling a change faster.

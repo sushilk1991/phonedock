@@ -2,6 +2,7 @@
 // Discovery: $PHONEDOCK_HOME/daemon.json ({ port, token }); PHONEDOCK_PORT / PHONEDOCK_URL / PHONEDOCK_TOKEN override.
 // With autoStart (default true) the client spawns the daemon detached when it isn't reachable.
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -14,6 +15,11 @@ import type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
 } from '../core/types.ts';
 import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
+import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
+import type { UiAuditResult } from '../core/ui-audit.ts';
+import type { DoctorReport, DeviceDiagnosis } from '../core/doctor.ts';
+import type { WebViewOptions, WebViewResult } from '../backends/android-webview.ts';
+export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult };
 
 export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
@@ -25,14 +31,15 @@ export type {
 
 /** Every input result: how far it got (`delivery`: sent / not_sent), whether sending it again is safe (`retrySafe`:
  *  only when nothing was sent), and with `expect` the check of what the screen showed afterwards. */
-export interface InputDelivery { delivery?: Delivery; retrySafe?: boolean; expect?: ExpectReport }
+export interface InputDelivery { delivery?: Delivery; retrySafe?: boolean; expect?: ExpectReport; requestId?: string; ui?: UiTree }
 export interface InputResult extends InputDelivery { ok: boolean; resolved?: unknown }
 /** Options of every input call: `expect` waits (after the input) for what the screen should show. */
-export interface InputOptions { expect?: Expect | string }
+export interface InputOptions { expect?: Expect | string; snapshotId?: string; returnUi?: boolean; requestId?: string }
 
 /** Element query for find / waitFor / fill / tapText. `match` applies to text and id (default contains, case-insensitive). */
 export interface FindOptions { text?: string; id?: string; type?: string; match?: 'contains' | 'exact' | 'regex'; index?: number; ocrFallback?: boolean; limit?: number }
 export interface FindResult {
+  snapshotId?: string;
   source: 'accessibility' | 'ocr'; total: number; index: number; match: ElementMatch | null; matches: ElementMatch[];
   screen: ScreenInfo; capturedAt: string; ocrTried: boolean; summary?: string;
   /** No match only: can scrolling reveal more? true: something on screen scrolls; false: nothing does; null: can't tell. */
@@ -44,11 +51,12 @@ export interface WaitForOptions extends Omit<FindOptions, 'index' | 'limit'> {
   until: 'visible' | 'gone' | 'idle'; timeoutMs?: number; intervalMs?: number; stableMs?: number;
 }
 export interface WaitForResult {
+  snapshotId?: string; screen?: ScreenInfo;
   ok: true; until: 'visible' | 'gone' | 'idle'; elapsedMs: number; polls?: number; frames?: number; changes?: number;
   source?: 'accessibility' | 'ocr'; match?: ElementMatch; matches?: ElementMatch[]; changedRegion?: Bounds | null; stableMs?: number;
 }
 /** Target the field by `ref` (from the last ui()/find()), by `text`/`id`/`type` (+ match/index), or by device-pixel `x`,`y`. */
-export interface FillOptions extends Omit<FindOptions, 'limit'> {
+export interface FillOptions extends Omit<FindOptions, 'limit'>, InputOptions {
   value: string; ref?: string; x?: number; y?: number; clear?: boolean; submit?: boolean; secret?: boolean; focusTimeoutMs?: number;
   expect?: Expect | string;
 }
@@ -238,6 +246,8 @@ export class PhoneDockApiError extends Error {
   /** Input calls: how far the input got; `retrySafe` is true only when nothing reached the device. */
   delivery?: Delivery;
   retrySafe?: boolean;
+  /** Id of the input request; requestResult() can recover a response lost in transport. */
+  requestId?: string;
   constructor(message: string, code = 'error', status = 0, hints: string[] = [], detail?: string, delivery?: Delivery) {
     super(message);
     this.name = 'PhoneDockApiError';
@@ -310,7 +320,17 @@ function neverConnected(e: unknown): boolean {
 type Query = Record<string, string | number | boolean | undefined | null>;
 /** input: an input request. It is sent again (after starting the daemon) only when the connection was refused; a
  *  connection that broke after the request went out is a 'delivery unknown' error, never a resend. */
-interface ReqOpts { query?: Query; body?: unknown; raw?: boolean; signal?: AbortSignal; noRetry?: boolean; input?: boolean }
+export interface ReqOpts {
+  query?: Query; body?: unknown; raw?: boolean; signal?: AbortSignal; noRetry?: boolean; input?: boolean;
+  /** Reuse only for the same input payload. Generated automatically for input calls. */
+  requestId?: string;
+}
+const REQUEST_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+function isLocalUrl(value: string): boolean {
+  try { return ['127.0.0.1', 'localhost', '[::1]'].includes(new URL(value).hostname); }
+  catch { return false; }
+}
 
 export class PhoneDockClient {
   owner: string;
@@ -352,6 +372,16 @@ export class PhoneDockClient {
   }
 
   async health(): Promise<HealthInfo> { return this.request('GET', '/v1/health', { noRetry: true }); }
+  doctor(opts: { device?: string; capabilities?: string[] } = {}): Promise<DoctorReport & { device?: DeviceDiagnosis }> {
+    return this.request('GET', '/v1/doctor', { query: { device: opts.device, capabilities: opts.capabilities?.join(',') } });
+  }
+  inventoryStatus(): Promise<Record<string, { refreshing: boolean; devices: number; at?: number; error?: string; timedOut?: boolean }>> { return this.request('GET', '/v1/inventory'); }
+  environment(id: string): Promise<EnvironmentCapabilities> { return this.request('GET', this.dev(id, '/environment')); }
+  setEnvironment(id: string, action: EnvironmentAction, opts: { requestId?: string } = {}): Promise<EnvironmentResult & InputDelivery> {
+    return this.request('POST', this.dev(id, '/environment'), { body: action, input: true, requestId: opts.requestId });
+  }
+  auditUi(id: string, opts: { includeOffscreen?: boolean } = {}): Promise<UiAuditResult> { return this.request('GET', this.dev(id, '/audit'), { query: opts }); }
+  inspectWebView(id: string, opts: WebViewOptions): Promise<WebViewResult> { return this.request('POST', this.dev(id, '/webview'), { body: opts }); }
 
   async isRunning(): Promise<boolean> {
     try { const h = await this.health(); return !!h?.ok; } catch { return false; }
@@ -360,7 +390,7 @@ export class PhoneDockClient {
   /** Make sure a daemon answers /v1/health, spawning one (detached) if needed. Waits up to 10s. */
   async ensureDaemon(timeoutMs = 10_000): Promise<void> {
     if (await this.isRunning()) { this.loadInfo(true); return; }
-    if (this.explicitBaseUrl && !/^https?:\/\/(127\.0\.0\.1|localhost)/.test(this.explicitBaseUrl)) {
+    if (this.explicitBaseUrl && !isLocalUrl(this.explicitBaseUrl)) {
       throw new PhoneDockApiError(`PhoneDock daemon at ${this.explicitBaseUrl} is not reachable`, 'daemon_unreachable', 0);
     }
     if (!this.starting) {
@@ -398,40 +428,81 @@ export class PhoneDockClient {
 
   /** Low-level request. Returns parsed JSON, text (text/*), or the Response when `raw`. */
   async request<T = any>(method: string, path: string, opts: ReqOpts = {}): Promise<T> {
+    const requestId = opts.input ? opts.requestId ?? randomUUID() : undefined;
+    if (requestId !== undefined && (!REQUEST_ID.test(requestId) || /^\.+$/.test(requestId))) {
+      throw new PhoneDockApiError('Invalid request id: use 1–128 letters, digits, periods, underscores or hyphens', 'bad_request', 400, [], undefined, 'not_sent');
+    }
+    const failure = (e: unknown, delivery?: Delivery): PhoneDockApiError => {
+      const err = this.unreachable(e, delivery);
+      if (delivery && !err.delivery) { err.delivery = delivery; err.retrySafe = delivery === 'not_sent'; }
+      if (requestId) err.requestId = requestId;
+      return err;
+    };
+    if (opts.signal?.aborted) {
+      const err = new PhoneDockApiError('The request was cancelled before sending', 'aborted', 0, [], undefined, opts.input ? 'not_sent' : undefined);
+      err.requestId = requestId;
+      throw err;
+    }
+    // Prepare the URL and body before entering fetch: serialization errors cannot have sent input.
+    const u = new URL(this.baseUrl + path);
+    for (const [k, v] of Object.entries(opts.query ?? {})) {
+      if (v !== undefined && v !== null) u.searchParams.set(k, typeof v === 'boolean' ? (v ? '1' : '0') : String(v));
+    }
+    const hasBody = opts.body !== undefined;
+    let body: string | undefined;
+    try { body = hasBody ? JSON.stringify(opts.body) : undefined; }
+    catch { throw new PhoneDockApiError('The request body cannot be serialized as JSON', 'bad_request', 400, [], undefined, opts.input ? 'not_sent' : undefined); }
     const doFetch = () => {
-      const u = new URL(this.baseUrl + path);
-      for (const [k, v] of Object.entries(opts.query ?? {})) {
-        if (v === undefined || v === null) continue;
-        u.searchParams.set(k, typeof v === 'boolean' ? (v ? '1' : '0') : String(v));
-      }
-      const hasBody = opts.body !== undefined;
-      return fetch(u, { method, headers: this.headers(hasBody), body: hasBody ? JSON.stringify(opts.body) : undefined, signal: opts.signal });
+      const headers = this.headers(hasBody);
+      if (requestId) headers['X-PhoneDock-Request-ID'] = requestId;
+      return fetch(u, { method, headers, body, signal: opts.signal });
     };
     let res: Response;
     try {
       res = await doFetch();
     } catch (e) {
-      if ((e as Error).name === 'AbortError') throw e;
       const fresh = neverConnected(e);
-      if (opts.input && !fresh) throw this.unreachable(e, 'unknown');
-      if (!isConnError(e) || opts.noRetry) throw this.unreachable(e, opts.input ? 'not_sent' : undefined);
-      if (!this.autoStart) throw this.unreachable(e, opts.input ? 'not_sent' : undefined);
-      await this.ensureDaemon();
-      try { res = await doFetch(); } catch (e2) { throw this.unreachable(e2, opts.input ? (neverConnected(e2) ? 'not_sent' : 'unknown') : undefined); }
+      if (opts.input && !fresh) throw failure(e, 'unknown');
+      if (!isConnError(e) || opts.noRetry || !this.autoStart) throw failure(e, opts.input ? 'not_sent' : undefined);
+      try { await this.ensureDaemon(); }
+      catch (startError) { throw failure(startError, opts.input ? 'not_sent' : undefined); }
+      try { res = await doFetch(); } catch (e2) { throw failure(e2, opts.input ? (neverConnected(e2) ? 'not_sent' : 'unknown') : undefined); }
     }
     if (res.status === 401 && !this.explicitToken && !opts.noRetry) {
       // Daemon restarted with a new token – re-read daemon.json once.
       const before = this.daemonInfo?.token;
-      if (this.loadInfo(true)?.token !== before) res = await doFetch();
+      if (this.loadInfo(true)?.token !== before) {
+        // Authentication was rejected before dispatch; consuming its body also releases the HTTP connection.
+        await res.arrayBuffer().catch(() => undefined);
+        try { res = await doFetch(); } catch (e) { throw failure(e, opts.input ? (neverConnected(e) ? 'not_sent' : 'unknown') : undefined); }
+      }
     }
-    if (!res.ok) throw await this.toError(res);
+    if (!res.ok) {
+      let err: PhoneDockApiError;
+      try { err = await this.toError(res); } catch (e) { throw failure(e, opts.input ? 'unknown' : undefined); }
+      if (opts.input && !err.delivery) {
+        err.delivery = res.status === 401 ? 'not_sent' : 'unknown';
+        err.retrySafe = err.delivery === 'not_sent';
+      }
+      err.requestId = requestId;
+      throw err;
+    }
     if (opts.raw) return res as unknown as T;
     const ct = res.headers.get('content-type') ?? '';
     if (res.status === 204) return undefined as T;
-    if (ct.includes('application/json')) return (await res.json()) as T;
-    const text = await res.text();
-    if (!ct && text) { try { return JSON.parse(text) as T; } catch { /* plain text */ } }
-    return text as unknown as T;
+    try {
+      if (ct.includes('application/json')) return (await res.json()) as T;
+      const text = await res.text();
+      if (!ct && text) { try { return JSON.parse(text) as T; } catch { /* plain text */ } }
+      return text as unknown as T;
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        const err = new PhoneDockApiError('PhoneDock returned invalid JSON', 'invalid_response', res.status, [], undefined, opts.input ? 'unknown' : undefined);
+        err.requestId = requestId;
+        throw err;
+      }
+      throw failure(e, opts.input ? 'unknown' : undefined);
+    }
   }
 
   private unreachable(e: unknown, delivery?: Delivery): PhoneDockApiError {
@@ -445,7 +516,7 @@ export class PhoneDockClient {
   }
 
   private async toError(res: Response): Promise<PhoneDockApiError> {
-    const text = await res.text().catch(() => '');
+    const text = await res.text();
     try {
       const j = JSON.parse(text);
       const e = j?.error ?? j;
@@ -457,6 +528,12 @@ export class PhoneDockClient {
   }
 
   private dev(id: string, sub = ''): string { return `/v1/devices/${enc(id)}${sub}`; }
+
+  /** Recover the recorded result of an input after its HTTP response was lost. This never resends input. */
+  requestResult(id: string, requestId: string): Promise<Record<string, unknown>> {
+    if (!REQUEST_ID.test(requestId) || /^\.+$/.test(requestId)) throw new PhoneDockApiError('Invalid request id', 'bad_request', 400);
+    return this.request('GET', this.dev(id, `/requests/${enc(requestId)}`));
+  }
 
   // ── service ────────────────────────────────────────────────────────────
   backends(): Promise<BackendInfo[]> { return this.request('GET', '/v1/backends'); }
@@ -532,8 +609,27 @@ export class PhoneDockClient {
 
   /** Resolve a full id, nativeId, exact name, or unique id/name prefix to a Device. */
   async resolveDevice(query: string): Promise<Device> {
-    const list = await this.devices();
     const q = query.trim(); const ql = q.toLowerCase();
+    if (/^(android-emulator|android-device|ios-simulator|ios-device|qemu|corellium):.+/.test(q)) {
+      return this.device(q);
+    }
+    let list = await this.devices();
+    // An initially partial list cannot establish either absence or a unique name/prefix.
+    const deadline = Date.now() + 5000;
+    let statusKnown = false;
+    for (;;) {
+      let status: Awaited<ReturnType<PhoneDockClient['inventoryStatus']>>;
+      try { status = await this.inventoryStatus(); statusKnown = true; }
+      catch (e) { if (e instanceof PhoneDockApiError && e.status === 404) break; throw e; } // older daemon
+      const unresolved = Object.entries(status).filter(([, s]) => s.at === undefined);
+      if (!unresolved.length) break;
+      if (unresolved.some(([, s]) => s.error || s.timedOut)) throw new PhoneDockApiError('Device discovery is incomplete', 'inventory_incomplete', 503,
+        ['Use the full backend:nativeId to target a known device. Unresolved backends: ' + unresolved.map(([id]) => id).join(', ')]);
+      if (Date.now() >= deadline) throw new PhoneDockApiError('Device discovery is still warming', 'inventory_pending', 503,
+        ['Use the full backend:nativeId to target a known device, or retry after discovery completes.']);
+      await sleep(100);
+    }
+    if (statusKnown) list = await this.devices();
     const exact = list.filter((d) => d.id === q) ;
     if (exact.length) return exact[0];
     // A phone on several connections is one device; its other transports (e.g. ip:port) still find it.
@@ -628,8 +724,8 @@ export class PhoneDockClient {
   // ── input ──────────────────────────────────────────────────────────────
   /** One action or several in a row; `expect` is checked once, after the last. */
   input(id: string, action: InputAction | InputAction[], opts: InputOptions = {}): Promise<InputResult> {
-    const ex = opts.expect !== undefined ? { expect: opts.expect } : {};
-    return this.request('POST', this.dev(id, '/input'), { body: Array.isArray(action) ? { actions: action, ...ex } : { ...action, ...ex }, input: true });
+    const ex = { ...(opts.expect !== undefined ? { expect: opts.expect } : {}), ...(opts.snapshotId ? { snapshotId: opts.snapshotId } : {}), ...(opts.returnUi ? { returnUi: true } : {}) };
+    return this.request('POST', this.dev(id, '/input'), { body: Array.isArray(action) ? { actions: action, ...ex } : { ...action, ...ex }, input: true, requestId: opts.requestId });
   }
   /** `label` names what the tap is aimed at (e.g. a matched element's text); it only shows in the activity log. */
   tap(id: string, x: number, y: number, label?: string, meta?: { selector?: TapSelector; element?: { type?: string; id?: string; editable?: boolean }; expect?: Expect | string }) {
@@ -641,11 +737,11 @@ export class PhoneDockClient {
     return this.input(id, { action: 'swipe', x1: Math.round(x1), y1: Math.round(y1), x2: Math.round(x2), y2: Math.round(y2), durationMs }, opts);
   }
   /** `secret: true` keeps the text out of the action log (stored as '•••'; replay skips it). */
-  type(id: string, text: string, opts: { secret?: boolean } & InputOptions = {}) { return this.input(id, opts.secret ? { action: 'type', text, secret: true } : { action: 'type', text }, { expect: opts.expect }); }
+  type(id: string, text: string, opts: { secret?: boolean } & InputOptions = {}) { return this.input(id, opts.secret ? { action: 'type', text, secret: true } : { action: 'type', text }, opts); }
   doubleTap(id: string, x: number, y: number, opts: InputOptions = {}) { return this.input(id, { action: 'doubleTap', x: Math.round(x), y: Math.round(y) }, opts); }
   /** scale < 1 pinches in (zoom out), > 1 spreads (zoom in). */
   pinch(id: string, x: number, y: number, scale: number, durationMs?: number) { return this.input(id, { action: 'pinch', x: Math.round(x), y: Math.round(y), scale, durationMs }); }
-  hideKeyboard(id: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/keyboard/hide'), { body: {} }); }
+  hideKeyboard(id: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/keyboard/hide'), { body: {}, input: true }); }
   key(id: string, key: KeyName, opts: InputOptions = {}) { return this.input(id, { action: 'key', key }, opts); }
   actions(id: string, opts: { limit?: number } = {}): Promise<ActionRecord[]> { return this.request('GET', this.dev(id, '/actions'), { query: opts }); }
   async replay(id: string, actions: (InputAction & { delayMs?: number })[], opts: WaitOptions = {}): Promise<Job> {
@@ -666,7 +762,7 @@ export class PhoneDockClient {
   /** Block until an element is visible / gone, or the screen is idle. Throws `wait_timeout` (408) with a screen summary. */
   waitFor(id: string, opts: WaitForOptions): Promise<WaitForResult> { return this.request('POST', this.dev(id, '/wait'), { body: opts }); }
   /** Tap a field, wait for focus, clear it, type `value`, re-read and verify. */
-  fill(id: string, opts: FillOptions): Promise<FillResult> { return this.request('POST', this.dev(id, '/fill'), { body: opts, input: true }); }
+  fill(id: string, opts: FillOptions): Promise<FillResult> { const { requestId, ...body } = opts; return this.request('POST', this.dev(id, '/fill'), { body, input: true, requestId }); }
   /** Focused text field / keyboard state, optionally waiting up to waitMs for one to appear. */
   focus(id: string, opts: { waitMs?: number } = {}): Promise<FocusResult> { return this.request('GET', this.dev(id, '/focus'), { query: opts }); }
   /** Slow swipes (≈600 ms, ≈60 % of the screen) until an element matching `text` is on screen; stops when a swipe
@@ -695,7 +791,7 @@ export class PhoneDockClient {
    *  Refuses (403 needs_human) passcode, biometric, credential, profile and "Allow Paste" prompts. Never types. */
   handleAlert(id: string, action: AlertActionInput = 'accept', opts: { verify?: boolean; ocrFallback?: boolean } = {}): Promise<AlertResult> {
     const body = typeof action === 'object' ? { action: 'button', button: action.button } : { action };
-    return this.request('POST', this.dev(id, '/alert'), { body: { ...body, ...opts } });
+    return this.request('POST', this.dev(id, '/alert'), { body: { ...body, ...opts }, input: true });
   }
 
   // ── human handoff ──────────────────────────────────────────────────────
@@ -809,8 +905,8 @@ export class PhoneDockClient {
    *  Android, iPhones on iOS 27+). */
   async getClipboard(id: string): Promise<string | null> { return (await this.request<{ text: string | null }>('GET', this.dev(id, '/clipboard'))).text; }
   /** Replace the device clipboard with `text` (needs the lease). The daemon logs only its length, never the text. */
-  setClipboard(id: string, text: string): Promise<{ ok: boolean; length: number }> {
-    return this.request('PUT', this.dev(id, '/clipboard'), { body: { text } });
+  setClipboard(id: string, text: string, opts: { requestId?: string } = {}): Promise<{ ok: boolean; length: number } & InputDelivery> {
+    return this.request('PUT', this.dev(id, '/clipboard'), { body: { text }, input: true, requestId: opts.requestId });
   }
   pushFile(id: string, local: string, remote: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/files/push'), { body: { local, remote } }); }
   pullFile(id: string, remote: string, local: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/files/pull'), { body: { remote, local } }); }

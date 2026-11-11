@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { parseFlow } from './flow.ts';
 import { junitXml, runFlow, runFlowFiles, screenNow, type FlowClient } from './flow-runner.ts';
 import type { ElementMatch } from './types.ts';
@@ -97,7 +97,7 @@ test('runner: a passing flow, lease taken and given back, taps carry their selec
     assert.ok(calls.some((x) => x.startsWith('tap Greet {"selector":{"text":"Greet"}')), calls.join('\n'));
     assert.match(lines.join('\n'), /PASS {2}1 {2}launch dev\.phonedock\.sample/);
     assert.match(lines.join('\n'), /PASS {2}7 {2}assert_text id=notifyStatus = "Notifications on"/);
-    assert.equal(existsSync(join(dir, 'greet')), false, 'no artifacts for a pass');
+    assert.ok(existsSync(join(dir, 'greet', 'report.html')), 'passing flows have a reviewable report');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -173,5 +173,109 @@ test('runner: launching an app that is not installed says so', async () => {
     fc.apps = async () => [{ id: 'dev.phonedock.sample', system: false }];
     const r2 = await runFlow(c, flow, { deviceId: 'd', artifactsDir: dir, settle: false });
     assert.match(r2.message!, /Couldn’t launch the app/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: baseline assertions fail closed and never record implicitly', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  try {
+    const flow = parseFlow('name: Baseline\nsteps:\n  - screenshot: { name: home, baseline: missing.png }\n', join(dir, 'flow.yaml'));
+    const r = await runFlow(c, flow, { deviceId: 'd', artifactsDir: join(dir, 'artifacts'), baselineRoot: dir, settle: false });
+    assert.equal(r.status, 'fail');
+    assert.match(r.message!, /baseline.*missing|missing.*baseline/i);
+    assert.equal(existsSync(join(dir, 'missing.png')), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: explicit baseline recording, comparison and update share one confined root', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  try {
+    mkdirSync(join(dir, 'flows'));
+    const flow = parseFlow('name: Baseline\nsteps:\n  - screenshot: { name: home, baseline: ../baselines/home.png }\n', join(dir, 'flows', 'flow.yaml'));
+    const opts = { deviceId: 'd', artifactsDir: join(dir, 'artifacts'), baselineRoot: dir, settle: false };
+    const recorded = await runFlow(c, flow, { ...opts, baselineMode: 'record' });
+    assert.equal(recorded.status, 'pass', recorded.message ?? '');
+    assert.ok(existsSync(join(dir, 'baselines', 'home.png')));
+    let compared = 0;
+    const bad = await runFlow(c, flow, { ...opts, compareImages: async () => { compared++; return 0.5; } });
+    assert.equal(bad.status, 'fail'); assert.equal(compared, 1);
+    writeFileSync(join(dir, 'baselines', 'home.png'), 'old');
+    const updated = await runFlow(c, flow, { ...opts, baselineMode: 'update' });
+    assert.equal(updated.status, 'pass');
+    assert.deepEqual(readFileSync(join(dir, 'baselines', 'home.png')), Buffer.from('\x89PNG fake'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: baseline traversal and symlink escapes are rejected before a baseline is written', async () => {
+  const { c } = fakeApp(); const dir = tmp(); const outside = tmp();
+  try {
+    symlinkSync(outside, join(dir, 'escape'));
+    symlinkSync(join(outside, 'missing.png'), join(dir, 'dangling.png'));
+    for (const baseline of [`../${basename(outside)}/out.png`, 'escape/out.png', 'dangling.png']) {
+      const flow = parseFlow(`name: Escape\nsteps:\n  - screenshot: { name: home, baseline: ${baseline} }\n`, join(dir, 'flow.yaml'));
+      const r = await runFlow(c, flow, { deviceId: 'd', artifactsDir: join(dir, 'artifacts'), baselineRoot: dir, baselineMode: 'record', settle: false });
+      assert.equal(r.status, 'fail'); assert.match(r.message!, /baseline.*root|outside.*root|unresolved symlink/i);
+    }
+    assert.equal(existsSync(join(outside, 'out.png')), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('runner: updating a baseline replaces its entry without changing another hard link', async () => {
+  const { c } = fakeApp(); const dir = tmp(); const outside = tmp();
+  try {
+    writeFileSync(join(outside, 'original.png'), 'do not change');
+    linkSync(join(outside, 'original.png'), join(dir, 'baseline.png'));
+    const flow = parseFlow('steps:\n  - screenshot: { name: home, baseline: baseline.png }\n', join(dir, 'flow.yaml'));
+    const r = await runFlow(c, flow, { deviceId: 'd', artifactsDir: join(dir, 'artifacts'), baselineRoot: dir, baselineMode: 'update', settle: false });
+    assert.equal(r.status, 'pass');
+    assert.equal(readFileSync(join(outside, 'original.png'), 'utf8'), 'do not change');
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('runner: reports and result artifacts redact secret steps and escape HTML', async () => {
+  const { c } = fakeApp(); const dir = tmp(); const secret = 'pd-private-"493\\827\n';
+  try {
+    c.type = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+    c.logs = async () => `error ${secret} </script><script>alert(1)</script>`;
+    const oldUi = c.ui;
+    c.ui = async (id) => ({ ...await oldUi(id), app: { label: secret } });
+    const flow = parseFlow(JSON.stringify({ name: '<script>bad()</script>', steps: [{ type: { text: secret, secret: true } }, { assert_visible: 'missing' }] }));
+    const r = await runFlow(c, flow, { deviceId: 'd', artifactsDir: dir, settle: false, timeoutMs: 0 });
+    assert.equal(r.status, 'fail');
+    for (const file of ['report.html', 'result.json', 'steps.txt', 'logs.txt', 'ui.json']) {
+      const body = readFileSync(join(r.artifacts!, file), 'utf8');
+      assert.ok(!body.includes(secret), `${file} leaked a secret`);
+      assert.ok(!body.includes('493'), `${file} leaked an escaped secret`);
+    }
+    const report = readFileSync(join(r.artifacts!, 'report.html'), 'utf8');
+    assert.ok(!report.includes('<script>bad()'));
+    assert.match(report, /&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+    assert.match(report, /data:image\/png;base64,/);
+    assert.ok(!JSON.stringify(r).includes(secret), 'returned result leaked a secret');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: optional per-action evidence captures before and after with an action point', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  try {
+    const r = await runFlow(c, parseFlow('name: Evidence\nsteps:\n  - tap: { at: "50%,50%" }\n'), { deviceId: 'd', artifactsDir: dir, settle: false, captureSteps: true });
+    assert.equal(r.status, 'pass');
+    assert.ok(existsSync(r.steps[0].beforeScreenshot!));
+    assert.ok(existsSync(r.steps[0].screenshot!));
+    assert.deepEqual(r.steps[0].actionPoint, { x: 540, y: 1200 });
+    const html = readFileSync(r.report!, 'utf8');
+    assert.match(html, /<figcaption>Before<\/figcaption>/);
+    assert.match(html, /<figcaption>After<\/figcaption>/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: failure evidence is captured before releasing ownership', async () => {
+  const { c } = fakeApp(); const dir = tmp(); let released = false; let captured = false;
+  const release = c.releaseLease.bind(c), screenshot = c.screenshot.bind(c);
+  c.releaseLease = async (...args) => { released = true; return release(...args); };
+  c.screenshot = async (...args) => { assert.equal(released, false, 'failure screen can change after release'); captured = true; return screenshot(...args); };
+  try {
+    const r = await runFlow(c, parseFlow('steps:\n  - assert_visible: missing\n'), { deviceId: 'd', artifactsDir: dir, settle: false, timeoutMs: 0 });
+    assert.equal(r.status, 'fail'); assert.equal(captured, true); assert.equal(released, true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

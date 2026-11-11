@@ -120,12 +120,21 @@ Optional env: `PHONEDOCK_PORT` / `PHONEDOCK_HOME` (point at a non-default daemon
 | Input | `tap` (`text`, `ref` or x,y), `fill`, `type_text` (`submit`, `secret`), `press_key`, `long_press`, `double_tap`, `swipe` (coords or `direction`), `scroll_to`, `pinch`, `hide_keyboard` |
 | Navigation | `go_back`, `system_gesture` (go_home / app_switcher / control_center / notification_center), `handle_alert` (accept / dismiss / button=…) |
 | Sequencing | `batch` (several tool calls in one round trip), `request_human` (hand the device to a person and wait) |
-| Regression tests | `save_flow` (your session → a flow file: YAML steps + assertions), `run_flow` (run flow files: PASS/FAIL per step, artifacts on failure) |
+| Regression tests | `save_flow` (your session → a flow file: YAML steps + assertions), `run_flow` (PASS/FAIL per step, HTML report every run, artifacts on failure) |
 | Performance | `start_trace`, `stop_trace` (iOS: xctrace hangs + main-thread hot spots; Android: perfetto + janky frames / frame-time percentiles; compares with the previous run) |
 | Apps/system | `list_apps`, `install_app`, `uninstall_app`, `launch_app`, `terminate_app`, `open_url`, `shell` (runs inside the device), `get_logs`, `set_location`, `set_appearance` (dark/light), `device_settings` (text size, contrast, bold text, reduce motion), `rotate`, `clipboard` (get / set the device clipboard's text), `push_file`, `pull_file`, `push_notification`, `wait` (plain sleep) |
 | Debug/state | `list_crashes`, `get_crash`, `record_screen` (start/stop/status → .mp4), `app_data` (save/restore/list an app's data container) |
 | App notes | `app_notes` (read / save / list / delete what agents learned about an app, shared by every agent on this Mac; `launch_app` says when an app has some) |
 | Physical | `discover_devices` (iPhones), `connect_device`, `discover_android_phones`, `pair_android_phone` |
+| Diagnostics / test setup | `doctor`, `get_request_result`, `audit_ui`, `device_environment`, `inspect_webview` (debug-enabled Android only) |
+
+### Smaller MCP catalog
+
+`phonedock mcp --compact` is an alias for `--profile runtime`. It publishes a smaller subset of the same typed
+tool schemas for reading, input, leasing, handoff, receipt recovery, UI audit and environment controls. It does not
+combine tools into a generic untyped dispatcher. `--profile all` is the default and includes lifecycle, install,
+flows, traces and diagnostics such as `doctor` / `inspect_webview`; use it when those tools are needed. Savings
+in schema size depend on the client and version; no fixed token reduction is promised.
 
 ### Connecting an Android phone over Wi-Fi
 
@@ -156,7 +165,10 @@ Every tool has a `title` and MCP annotations. `readOnlyHint` is set only for inv
 with the action sent before them, and a screen read has to see that action's result.
 
 * **`device`** accepts a full id (`android-emulator:Pixel_9`), a native id (AVD name / simulator UDID / adb
-  serial) or a unique name/prefix. It may be omitted: the server uses the device you used or acquired last,
+  serial) or a unique name/prefix. Name/native-ID/prefix resolution waits up to five seconds for all initial
+  providers before deciding uniqueness or absence: `inventory_pending` means still warming, and
+  `inventory_incomplete` means a first discovery failed/timed out. A full canonical `backend:nativeId` directly
+  targets its provider in TS/Python. It may be omitted: the server uses the device you used or acquired last,
   or the only running device.
 * **Coordinates: one fixed space per device.** `tap`/`swipe`/`long_press`/`double_tap`/`pinch` take x,y in the
   pixels of a *standard* screenshot of the device, whose longest side is 1024 px (or the full size, if the screen
@@ -171,12 +183,44 @@ with the action sent before them, and a screen read has to see that action's res
     clients that already scale.
 * **Observation.** Action tools accept `return_screenshot: true` to get a fresh screenshot after a short
   settle delay (`settle_ms`, default 700 ms), which saves a round trip. `get_ui` cuts texts longer than about 80
-  characters (marked `…`, and the header says so); `full_text: true` prints them whole.
+  characters (marked `…`, and the header says so); `full_text: true` prints them whole. `visible_only` defaults
+  true; `interactive_only=true` narrows to actionable/editable/scrollable elements. `diff=true` returns changed
+  outline lines since this session's previous read, including changed refs. Removed lines cannot be targeted.
+  The latest `get_ui` or successful visible `wait_for` snapshot is kept in the MCP session; `tap ref=…` binds to
+  that read instead of another client's latest read. A snapshot expires after up to two minutes or on ownership invalidation: re-read on `stale_ref`.
 * Long operations (`create_device`, `boot_device`, `install_os_image`, `clone_device`) wait up to
   `wait_seconds`. If the job is still running when that time is up, they return a job id for `get_job`.
 * Errors come back as `isError` results with a code and hints (e.g. `lease_conflict`, `not_found`, `no_match`,
   `wait_timeout`, `device_required`), never as protocol failures. "Not found" errors include a one-line summary of
   what *is* on screen, so you rarely need another `get_ui`.
+
+### Recover a lost input reply
+
+Input errors include delivery status and, when available, a request ID. `get_request_result request_id="…"`
+reads the receipt without repeating the action. Keep the same device and owner identity: receipts are scoped to
+both. Completed/dead records expire after 24 hours; live running receipts survive longer, including failed
+completion persistence. At 1,024 protected records, new input receives `503 request_store_full` instead of risking
+replay. Unknown or interrupted delivery must never trigger automatic input retries, even with a new ID. Inspect the receipt and screen first;
+a missing receipt is not proof that the input was not sent.
+
+### Prepare and diagnose a test device
+
+* `doctor` checks host prerequisites without contacting devices. Its optional device diagnosis interprets known
+  metadata; device resolution may refresh inventory. A tool found on disk is not a tested hardware/runtime pair.
+* `device_environment` with no `change` lists supported controls. On a simulator/emulator, pass an explicit
+  `change`, for example `{action:"permissions",appId:"com.example.app",state:"grant",permissions:["location"]}`
+  or `{action:"statusBar",mode:"override",time:"09:41",batteryLevel:100,wifiBars:3}`. Clear status-bar overrides
+  afterward. Only listed services are supported; iOS camera, notification and pasteboard pre-grants are absent.
+  Keep separate tests for real permission prompts. Physical-phone pre-grants are unsupported.
+* Biometric simulation is for owned test devices: iOS recipes are experimental private notifications; Android
+  supports fingerprint match/fail with prior enrollment, and failure requires an unenrolled `fingerId`.
+  Physical authentication still goes to `request_human`. Media import adds library files; it is not camera/QR injection.
+* `audit_ui` returns heuristic label, touch-target, clipping and occlusion warnings. Size checks need known native
+  scale/density, and OCR cannot prove accessibility semantics. It does not certify compliance or run a settings sweep.
+* `inspect_webview app_id="com.example.app"` reads an already debug-enabled Android WebView. `action="network"`
+  observes bounded HTTP metadata from that WebView only. It neither enables debugging nor intercepts native HTTP;
+  iOS is unsupported. Without confirmed device-pixel WebView bounds, coordinates are CSS pixels. Diagnostic `w…`
+  refs are not native input refs. Read the result's coordinate space before considering a device tap.
 
 ### Acting by text: `tap text=`, `fill`, `wait_for`
 
@@ -300,9 +344,21 @@ Recipe: **explore, then `save_flow`, then `run_flow`.**
 3. `run_flow path="flows/sign-in.yaml"` replays it the way CI will: `PASS`/`FAIL` per step with timings, every element
    step waits for its element (10 s, iOS 15 s), and the screen settles between steps. On failure the result names the
    step, what was expected and what was on screen, and a folder with `failure.png`, `ui.txt` and `logs.txt`.
+   Every run also writes a self-contained, script-free `report.html`. `capture_steps=true` opts into before/after
+   screenshots with action markers and adds observation latency.
 4. Commit the file; CI runs `phonedock test flows/ --junit junit.xml` (`docs/CI.md`).
 
 Typed secrets are saved as `${SECRET_1}`; set that variable when the flow runs (`run_flow env={…}`, `--env`).
+Known secret text is redacted from reports and diagnostics; screenshot pixels are unchanged, so inspect artifacts
+before sharing them.
+
+Screenshot baselines use the same full-resolution RGBA comparison in CLI and MCP, decoded by FFmpeg. `tolerance`
+is the changed-pixel fraction after optional device-pixel `ignore` rectangles; `pixelThreshold` defaults to 16
+per channel. The old grayscale thumbnail check requires `comparison: thumbnail` explicitly. Missing FFmpeg,
+dimension changes and invalid images fail the assertion. `baseline_mode="compare"` (default) fails if a baseline
+is missing; use `record` to create a missing reviewed baseline or `update` to replace it. `baseline_root` confines
+all baseline reads/writes, including symlinks, and defaults to the current directory. Flow-file paths remain
+relative to the flow file; inline flows use the current directory.
 
 ### `start_trace`, `stop_trace`: measure, change, measure again
 Recipe for unattended performance work on one slow flow:
@@ -370,7 +426,11 @@ that were open are closed.
 * `acquire_device {platform, backend, ttl_sec, create_if_none}` picks a running unleased device, boots a
   stopped one, or creates one. It also takes a lease for your owner id.
 * While a lease is active, input/app/shell calls from other owners get `409 lease_conflict`. Devices
-  without a lease are open to everyone.
+  without a lease can be used by any owner, but each input holds a temporary claim for its queued execution.
+* Inputs are ordered per device; unrelated devices can proceed independently. An ownership change fences later
+  primitives of a batch/fill without undoing earlier input. SQLite claims coordinate upgraded daemons sharing
+  the same `PHONEDOCK_HOME`, including different ports; they do not protect against older daemons, other tools
+  or different PhoneDock homes.
 * **How long a lease lasts.** It lasts 10 minutes by default (`ttl_sec` to change it), and every call you make on the device
   restarts that time. You don't need to renew it while you work. Call `release_device` at the end. When your MCP
   session ends (the client exits or closes the server's stdio, or the server gets SIGTERM/SIGINT), the server
@@ -391,6 +451,14 @@ MCP) can take a device from another owner with `phonedock lease <id> --force`.
 ## 5. CLI
 
 ```sh
+phonedock doctor                         # host prerequisites; no device contact
+phonedock environment pdtest-a           # supported test controls
+phonedock permissions pdtest-a com.example.app grant location
+phonedock status-bar pdtest-a override --time 09:41 --battery 100 --wifi 3
+phonedock status-bar pdtest-a clear
+phonedock audit pdtest-a                 # heuristic UI warnings
+phonedock webview pdtest-a com.example.app --network
+phonedock request-result pdtest-a <requestId>
 phonedock backends                       # which backends work on this Mac
 phonedock devices                        # or: ls --json
 phonedock create --backend android-emulator --name pdtest-a --profile pixel_9 --boot
@@ -474,6 +542,31 @@ pd.save_flow(dev["id"], owner=pd.owner, assertions=["Welcome"], path="flows/sign
 pd.start_trace(dev["id"], "com.example.app"); ...; print(pd.stop_trace(dev["id"])["text"])  # summary + compare
 pd.release(dev["id"])
 ```
+
+The HTTP and SDK input/fill options also accept `snapshotId` / Python `snapshot_id` to bind a ref to its
+observation, and `returnUi` / `return_ui` to request a post-input UI tree. Receipt recovery uses TS
+`requestResult(id, requestId)` or Python `request_result(device_id, request_id)`. Input IDs are generated by the
+SDKs; retain `.requestId` / `.request_id` from errors and keep the owner identity stable when recovering.
+
+For daemon latency, `GET /v1/metrics` separates route/backend timing from `phases["input.queue"]` and
+`phases["input.execute"]`; the latter excludes optional post-input UI enrichment. `GET /v1/inventory` exposes
+pending/failed providers when device enumeration returns a partial list. Prefer full device IDs for targeted
+lookup without waiting on unrelated providers.
+
+Clipboard setting (PUT/POST) is serialized input with delivery/retry safety and optional request IDs; clipboard
+GET remains a read. `/find` includes `snapshotId`; a successful visible `/wait` includes it and the matching screen.
+
+The iPhone Duo simulator supports primary-display screenshots, UI reads, media import and recording. AXe input
+routing was observed to be ineffective: affected input returns `501 not_supported` / `not_sent` and its per-device
+capabilities are removed. Use a single-display model for interaction. Duo streaming and gestures are unvalidated.
+
+Native sidecars need Python 3.11+ in the pymobiledevice3 environment. CI uses Python 3.12 with pinned
+`pymobiledevice3==11.49.2` and mandatory fake sidecar protocol tests. Native foreground detection returns
+`foreground_unknown` on missing/ambiguous PID resolution; null means confirmed SpringBoard.
+
+Native iOS 27+ appearance, pinch, exact-PID foreground detection, logs and transactional Unicode paste have new
+fake/contract-tested paths. They have not been validated on a physical iPhone in this change. Cable-free iPhone
+pairing, automatic DDI mounting and a merged sidecar remain unexposed.
 
 ## 7. Safety notes for agents
 

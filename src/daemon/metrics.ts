@@ -1,3 +1,4 @@
+import { guardedBackendCall } from './execution.ts';
 // Bounded, in-memory latency samples. Percentiles describe the most recent samples;
 // count and maximum cover the lifetime of the daemon.
 export class Histogram {
@@ -27,7 +28,8 @@ export class Histogram {
 export class Metrics {
   private routes = new Map<string, Histogram>();
   private backends = new Map<string, Histogram>();
-  record(kind: 'routes' | 'backends', key: string, ms: number) {
+  private phases = new Map<string, Histogram>();
+  record(kind: 'routes' | 'backends' | 'phases', key: string, ms: number) {
     const map = this[kind];
     let histogram = map.get(key);
     if (!histogram) { histogram = new Histogram(); map.set(key, histogram); }
@@ -35,7 +37,7 @@ export class Metrics {
   }
   snapshot() {
     const entries = (map: Map<string, Histogram>) => Object.fromEntries([...map].map(([key, h]) => [key, h.snapshot()]));
-    return { unit: 'ms', sampleWindow: 1024, routes: entries(this.routes), backends: entries(this.backends) };
+    return { unit: 'ms', sampleWindow: 1024, routes: entries(this.routes), backends: entries(this.backends), phases: entries(this.phases) };
   }
 }
 export const metrics = new Metrics();
@@ -53,7 +55,7 @@ export function instrumentBackend<T extends object>(backend: T, id: string, coll
         const start = performance.now();
         const record = () => collector.record('backends', `${id}.${String(key)}`, performance.now() - start);
         try {
-          const result = Reflect.apply(original, target, args);
+          const result = guardedBackendCall(id, key, args, () => Reflect.apply(original, target, args));
           if (result && typeof result.then === 'function') return Promise.resolve(result).finally(record);
           record(); return result;
         } catch (error) { record(); throw error; }
