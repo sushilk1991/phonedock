@@ -457,7 +457,6 @@ struct InfoTab: View {
                 label(k)
                 Text(v).textSelection(.enabled).lineLimit(lines).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.trailing, Theme.Space.s)
             }
         }
     }
@@ -580,7 +579,7 @@ struct InfoTab: View {
                     Toggle("Start automatically", isOn: Binding(get: { autoStart }, set: { setAutoStart($0) }))
                         .labelsHidden()
                         .toggleStyle(.switch)
-                        .controlSize(.mini)
+                        .controlSize(.small)
                 }
                 .help("Start \(device.name) when PhoneDock starts")
                 .testAnchor("Start automatically")
@@ -715,6 +714,7 @@ private struct SnapshotRow: View {
             .accessibilityElement(children: .combine)
             Spacer(minLength: Theme.Space.s)
             Button("Restore…", action: onRestore)
+                .controlSize(.small)
                 .disabled(busy)
                 .help("Restore \(snapshot.name)")
                 .accessibilityLabel("Restore \(snapshot.name)")
@@ -1714,11 +1714,13 @@ struct ActivityTab: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(groups) { g in
-                        Label {
-                            Text(g.actor)
-                        } icon: {
+                        // Match the 16 pt gutter + 6 pt gap (= 22 pt) of item rows below so glyphs and text columns align.
+                        HStack(spacing: Theme.Space.s) {
                             Image(systemName: g.symbol)
                                 .foregroundStyle(g.tint)
+                                .frame(width: 16)
+                                .accessibilityHidden(true)
+                            Text(g.actor)
                         }
                         .font(Theme.Fonts.headline)
                         .foregroundStyle(Theme.Ink.primary)

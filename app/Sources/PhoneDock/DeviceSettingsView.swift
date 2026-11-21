@@ -40,7 +40,7 @@ struct DeviceSettingsView: View {
                     if has("appearance") {
                         Picker("Appearance", selection: Binding(get: { result.settings.appearance ?? "light" }, set: { apply(["appearance": $0]) })) {
                             Text("Light").tag("light"); Text("Dark").tag("dark")
-                        }.pickerStyle(.segmented).testAnchor("Device appearance")
+                        }.pdSegmented().testAnchor("Device appearance")
                     }
                     if has("textSize") {
                         HStack {
@@ -60,7 +60,7 @@ struct DeviceSettingsView: View {
                     if has("colorFilter") {
                         Picker("Color Filter", selection: Binding(get: { result.settings.colorFilter ?? "none" }, set: { apply(["colorFilter": $0]) })) {
                             Text("None").tag("none"); Text("Grayscale").tag("grayscale"); Text("Invert").tag("invert")
-                        }.pickerStyle(.segmented).testAnchor("Color Filter")
+                        }.pdSegmented().testAnchor("Color Filter")
                     }
                 }
                 .font(Theme.Fonts.callout).padding(.horizontal, Theme.Space.l)

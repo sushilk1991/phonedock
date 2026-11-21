@@ -704,7 +704,12 @@ struct SidebarView: View {
                 rows(managed)
                 if managed.isEmpty, model.creating.isEmpty {
                     Button { model.showCreate = true } label: {
-                        Label("New Device…", systemImage: "plus.circle").foregroundStyle(.secondary)
+                        HStack(spacing: Theme.Space.m) {
+                            Image(systemName: "plus.circle").frame(width: 20)
+                            Text("New Device…")
+                        }
+                        .font(Theme.Fonts.body)
+                        .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
                     .disabled(!model.connection.isConnected)
