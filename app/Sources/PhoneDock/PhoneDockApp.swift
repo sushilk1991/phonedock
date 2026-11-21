@@ -359,6 +359,7 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
     @State private var columns: NavigationSplitViewVisibility = .all
+    @State private var inspectorPresented = false
     @State private var inspectorTab: InspectorTab = .initial
     @State private var highlight: CGRect?
     /// Once the app has reached the daemon, a lost connection reads as "Reconnecting…", not first launch.
@@ -403,9 +404,7 @@ struct ContentView: View {
                 .onGeometryChange(for: Bool.self) { $0.size.width < Self.narrowToolbarBelow } action: { narrowDetail = $0 }
         }
         // Nothing to inspect without devices: the empty state gets the whole window (the toggle comes back with them).
-        // Keep the binding true until the first refresh finishes so SwiftUI opens the inspector at its ideal width
-        // instead of toggling false -> true mid-launch (which can leave the split item uncollapsed at width 0).
-        .inspector(isPresented: Binding(get: { model.inspectorVisible && (!everConnected || !model.devices.isEmpty) }, set: { model.inspectorVisible = $0 })) {
+        .inspector(isPresented: $inspectorPresented) {
             Group {
                 if let d = model.selectedDevice {
                     InspectorView(device: d, tab: $inspectorTab, highlight: $highlight)
@@ -439,6 +438,18 @@ struct ContentView: View {
         .onChange(of: model.selection) { highlight = nil }
         .onChange(of: model.sidebarVisible) { _, v in columns = v ? .all : .detailOnly }
         .onChange(of: columns) { _, c in model.sidebarVisible = c != .detailOnly }
+        .onChange(of: wantsInspector, initial: true) { _, v in
+            guard inspectorPresented != v else { return }
+            // Disable the split-view animation when syncing programmatic inspector visibility: on macOS 26/27
+            // animated `.inspector(isPresented:)` transitions can stall mid-flight and leave the inspector column
+            // stuck open (at 320 pt) or stuck closed (at 0 pt) out of sync with the toolbar.
+            var tx = Transaction(animation: nil)
+            tx.disablesAnimations = true
+            withTransaction(tx) { inspectorPresented = v }
+        }
+        .onChange(of: inspectorPresented) { _, v in
+            if !model.devices.isEmpty, model.inspectorVisible != v { model.inspectorVisible = v }
+        }
         .onChange(of: model.requestedInspectorTab) { _, t in
             guard let t else { return }
             inspectorTab = t; model.inspectorVisible = true; model.requestedInspectorTab = nil
@@ -495,6 +506,8 @@ struct ContentView: View {
         Button { model.inspectorVisible.toggle() } label: { Label(model.inspectorVisible ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing") }
             .help(model.inspectorVisible ? "Hide Inspector (⌃⌘I)" : "Show Inspector (⌃⌘I)")
     }
+
+    private var wantsInspector: Bool { model.inspectorVisible && !model.devices.isEmpty }
 
     private var connectionHealth: ConnectionPill.Health? {
         switch model.connection {
