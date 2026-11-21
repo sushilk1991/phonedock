@@ -117,19 +117,21 @@ strong { font-weight: 650; }
 /* ---------- Nav ---------- */
 .nav {
   position: fixed; inset: 0 0 auto 0; z-index: 20;
-  display: flex; align-items: center; gap: 24px;
-  height: 64px; padding-inline: var(--gutter);
+  height: 64px;
   transition: background-color 0.3s var(--ease-out), border-color 0.3s var(--ease-out);
   border-bottom: 1px solid transparent;
 }
 .nav.is-scrolled { background: color-mix(in oklab, var(--ground) 90%, transparent); border-bottom-color: var(--line); -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2); }
-.brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 720; font-stretch: 112%; font-size: 1.0625rem; letter-spacing: -0.01em; }
+.nav-inner {
+  max-width: var(--wrap); height: 100%; margin: 0 auto; padding-inline: var(--gutter);
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; column-gap: 16px;
+}
+.brand { justify-self: start; display: inline-flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 720; font-stretch: 112%; font-size: 1.0625rem; letter-spacing: -0.01em; white-space: nowrap; }
 .brand img { border-radius: 7px; }
-.nav-links { display: flex; gap: 4px; margin: 0 auto; padding: 0; list-style: none; }
-.nav-links a { display: block; padding: 8px 12px; border-radius: 8px; color: var(--ink-2); text-decoration: none; font-size: 0.9375rem; font-weight: 520; }
+.nav-links { justify-self: center; display: flex; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.nav-links a { display: block; padding: 8px 11px; border-radius: 8px; color: var(--ink-2); text-decoration: none; font-size: 0.9375rem; font-weight: 520; white-space: nowrap; }
 .nav-links a:hover { color: var(--ink); background: var(--line); }
-.nav-end { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.nav-links + .nav-end { margin-left: 0; }
+.nav-end { justify-self: end; display: flex; align-items: center; gap: 8px; }
 .theme-toggle, .nav-gh {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px;
   border: 1px solid var(--line-2); border-radius: 9px; background: transparent; color: var(--ink);
@@ -159,13 +161,13 @@ strong { font-weight: 650; }
   -webkit-mask-image: linear-gradient(180deg, #000 60%, transparent); mask-image: linear-gradient(180deg, #000 60%, transparent);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
 .hero-inner {
-  position: relative; max-width: 1480px; min-height: max(700px, 100svh); margin: 0 auto;
+  position: relative; max-width: var(--wrap); min-height: max(700px, 100svh); margin: 0 auto;
   padding: 104px var(--gutter) 56px;
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: clamp(32px, 4vw, 72px);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: clamp(28px, 3vw, 48px);
 }
 .hero-copy { max-width: 36rem; }
 .hero h1 {
-  font-size: clamp(2.5rem, 4.7vw, 4.875rem);
+  font-size: clamp(2.5rem, 3.8vw, 3.5rem);
   line-height: 0.98;
   max-width: 9.5em;
   font-weight: 800;
@@ -176,8 +178,8 @@ strong { font-weight: 650; }
 .hero .actions { margin-top: 32px; }
 .hero-meta { margin-top: 18px; color: var(--ink-2); font-size: 0.875rem; font-stretch: 92%; }
 
-.demo { margin: 0; display: flex; align-items: center; gap: clamp(20px, 2.4vw, 36px); }
-.demo-side { width: clamp(300px, 25vw, 380px); display: grid; gap: 12px; }
+.demo { margin: 0; display: flex; align-items: center; gap: clamp(20px, 2.2vw, 28px); }
+.demo-side { width: clamp(288px, 22.5vw, 328px); display: grid; gap: 12px; }
 .demo-note { padding: 0 2px; color: var(--ink-2); font-size: 0.8125rem; line-height: 1.5; }
 
 /* Task tabs: one per recording, each with a rail that fills as its run plays. */
@@ -491,8 +493,8 @@ strong { font-weight: 650; }
   .book-flow { padding-right: 176px; }
   .margin-notes { width: 120px; }
   .pencil { right: 146px; }
+  .nav-inner { grid-template-columns: auto auto; justify-content: space-between; }
   .nav-links { display: none; }
-  .nav-end { margin-left: auto !important; }
   .plain-grid { grid-template-columns: 1fr 1fr; }
   .plain-title { grid-column: 1 / -1; }
   .runs { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 64px; }
