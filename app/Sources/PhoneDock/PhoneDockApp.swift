@@ -375,7 +375,6 @@ struct ContentView: View {
         @Bindable var model = model
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView()
-                .navigationSplitViewColumnWidth(min: 225, ideal: 250, max: 360)
                 // The sidebar toggle sits at the trailing end of the sidebar's toolbar band (top right of the
                 // sidebar, as in Mail and Notes), mirroring the inspector toggle at the top right of the inspector.
                 // The system one would sit next to the traffic lights. With the sidebar hidden the system puts its
@@ -385,6 +384,7 @@ struct ContentView: View {
                     if #available(macOS 26.0, *) { ToolbarSpacer(.flexible) }
                     ToolbarItem(placement: .automatic) { sidebarToggle }
                 }
+                .navigationSplitViewColumnWidth(min: 225, ideal: 250, max: 360)
         } detail: {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -403,7 +403,9 @@ struct ContentView: View {
                 .onGeometryChange(for: Bool.self) { $0.size.width < Self.narrowToolbarBelow } action: { narrowDetail = $0 }
         }
         // Nothing to inspect without devices: the empty state gets the whole window (the toggle comes back with them).
-        .inspector(isPresented: Binding(get: { model.inspectorVisible && !model.devices.isEmpty }, set: { model.inspectorVisible = $0 })) {
+        // Keep the binding true until the first refresh finishes so SwiftUI opens the inspector at its ideal width
+        // instead of toggling false -> true mid-launch (which can leave the split item uncollapsed at width 0).
+        .inspector(isPresented: Binding(get: { model.inspectorVisible && (!everConnected || !model.devices.isEmpty) }, set: { model.inspectorVisible = $0 })) {
             Group {
                 if let d = model.selectedDevice {
                     InspectorView(device: d, tab: $inspectorTab, highlight: $highlight)
@@ -414,19 +416,20 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
             // The inspector's own toolbar band holds its tabs and, at the trailing end (top right, as in Xcode), the
             // inspector toggle. That frees room in the content toolbar, which overflowed into » at the minimum
             // window width. With the inspector hidden the toggle is back at the end of the main toolbar.
             .toolbar {
                 if model.inspectorVisible, !model.devices.isEmpty {
                     if model.selectedDevice != nil {
+                        if #available(macOS 26.0, *) { ToolbarSpacer(.flexible) }
                         ToolbarItem(placement: .automatic) { InspectorTabPicker(tab: $inspectorTab) }
                     }
                     if #available(macOS 26.0, *) { ToolbarSpacer(.flexible) }
                     ToolbarItem(placement: .automatic) { inspectorToggle }
                 }
             }
+            .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
         .sheet(isPresented: $model.showCreate) { CreateDeviceSheet().environment(model) }
@@ -457,6 +460,8 @@ struct ContentView: View {
     // MARK: Toolbar
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        let hasDeviceActions = model.selectedDevice != nil && model.connection.isConnected
+        let hasTrailingChrome = !model.sidebarVisible || (!model.inspectorVisible && !model.devices.isEmpty)
         if let health = connectionHealth {
             ToolbarItem(placement: .status) { ConnectionPill(health: health) }
         }
@@ -465,7 +470,7 @@ struct ContentView: View {
                 DeviceToolbarActions(device: d, narrow: narrowDetail)
             }
         }
-        if #available(macOS 26.0, *) {
+        if #available(macOS 26.0, *), hasDeviceActions, hasTrailingChrome {
             ToolbarSpacer(.fixed, placement: .primaryAction)
         }
         // Add lives at the foot of the sidebar (SidebarAddButton); with the sidebar hidden it's ＋ here.

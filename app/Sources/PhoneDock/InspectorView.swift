@@ -83,7 +83,8 @@ struct InspectorTabPicker: View {
             .testAnchor("Inspector tabs")
     }
 
-    static let width: CGFloat = 236
+    /// 36 pt per tab so tabs + inspector toggle fit inside the 280 pt minimum inspector column without overflowing.
+    static let width: CGFloat = 216
 
     private struct Segments: NSViewRepresentable {
         @Binding var tab: InspectorTab
