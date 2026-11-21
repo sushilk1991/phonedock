@@ -105,10 +105,11 @@ macOS text styles only. Any number that changes in place uses monospaced digits.
   window and sheet margin. `windowTop` sits below the toolbar.
 - Radii (`Theme.Radius`): badge 4, control and well 6, card and toast 10, panel 14. Floating bars and pills are
   capsules. Always `.continuous` corners.
-- The stage reserves `Theme.Stage.topSlot` (72 pt, room for a handoff reason on two lines) above the device and
+- The stage reserves `Theme.Stage.topSlot` (84 pt, room for a handoff reason on two lines or an elsewhere pill above
+  the control capsule with clearance under the toolbar) above the device and
   `bottomSlot` (56 pt) below it, so bars appearing or disappearing never move or rescale the screen. Bars in the top
   slot sit 8 pt above the device. On a stage narrower than `stackBelowWidth` (660 pt,
-  e.g. the minimum window with sidebar and inspector open) the top slot is `topSlotStacked` (112 pt) so the handoff
+  e.g. the minimum window with sidebar and inspector open) the top slot is `topSlotStacked` (120 pt) so the handoff
   card can stack instead of truncating. The slot depends only on the stage width, never on what the bar shows.
 
 ## Components

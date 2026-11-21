@@ -131,7 +131,7 @@ struct StageTopBar: View {
                 if let e = ended { endedCard(e).transition(.opacity) }
             }
         }
-        .padding(.horizontal, Theme.Space.xl)
+        // DeviceDetailView already insets StageTopBar by `Theme.Space.xxl` on each side; avoid double horizontal padding.
         // Bars sit a fixed gap above the device, whatever their height and the slot's.
         .padding(.bottom, Theme.Space.m)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
