@@ -350,16 +350,12 @@ private struct HandoffCard: View {
         // stage far narrower than the minimum window gives it, icons.
         Group {
             if stacked {
-                ViewThatFits(in: .horizontal) {
-                    stackedRows(.full)
-                    stackedRows(.medium)
-                    stackedRows(.compact)
-                }
+                stackedRows
             } else {
                 ViewThatFits(in: .horizontal) {
                     row(.full)
                     row(.medium)
-                    stackedRows(.medium)
+                    stackedRows
                 }
             }
         }
@@ -392,8 +388,9 @@ private struct HandoffCard: View {
     }
 
     /// Two rows: tile, eyebrow + countdown on the top line, full-width untruncated instruction beneath; then the
-    /// answers trailing on their own row.
-    private func stackedRows(_ density: Density) -> some View {
+    /// answers trailing on their own row. Button density adapts independently of the instruction text's length so
+    /// wrapping text never forces buttons down to icons.
+    private var stackedRows: some View {
         VStack(alignment: .trailing, spacing: Theme.Space.s) {
             HStack(alignment: .top, spacing: Theme.Space.m) {
                 tile
@@ -407,7 +404,11 @@ private struct HandoffCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            buttons(density).fixedSize()
+            ViewThatFits(in: .horizontal) {
+                buttons(.full).fixedSize()
+                buttons(.medium).fixedSize()
+                buttons(.compact).fixedSize()
+            }
         }
     }
 
