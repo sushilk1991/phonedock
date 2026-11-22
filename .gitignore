@@ -9,3 +9,4 @@ fixtures/downloads/
 __pycache__/
 .yoyo/
 .claude/worktrees/
+.vphone/

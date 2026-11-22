@@ -1,0 +1,697 @@
+{
+  "profiles": [
+    {
+      "id": "pixel_8",
+      "name": "Google Pixel 8",
+      "variant": "Global unlocked (shiba, AP2A.240605.024)",
+      "props": {
+        "ro.product.brand": "google",
+        "ro.product.manufacturer": "Google",
+        "ro.product.model": "Pixel 8",
+        "ro.product.device": "shiba",
+        "ro.product.name": "shiba",
+        "ro.product.board": "shiba",
+        "ro.hardware": "shiba",
+        "ro.board.platform": "zuma",
+        "ro.soc.manufacturer": "Google",
+        "ro.soc.model": "Tensor G3",
+        "ro.build.version.release": "14",
+        "ro.build.version.sdk": "34",
+        "ro.build.id": "AP2A.240605.024",
+        "ro.build.version.incremental": "11860263",
+        "ro.build.version.security_patch": "2024-06-05",
+        "ro.build.fingerprint": "google/shiba/shiba:14/AP2A.240605.024/11860263:user/release-keys",
+        "ro.build.description": "shiba-user 14 AP2A.240605.024 11860263 release-keys",
+        "ro.build.display.id": "AP2A.240605.024",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.flavor": "shiba-user",
+        "ro.build.host": "r-82b05a39f2cf359a-z8kw",
+        "ro.build.user": "android-build",
+        "ro.build.date.utc": "1716016212",
+        "ro.vendor.build.fingerprint": "google/shiba/shiba:14/AP2A.240605.024/11860263:user/release-keys",
+        "ro.vendor.build.security_patch": "2024-06-05",
+        "ro.bootloader": "ripcurrent-14.5-11693900",
+        "gsm.version.baseband": "g5300i-240308-240517-B-11857457",
+        "ro.build.characteristics": "nosdcard",
+        "ro.product.first_api_level": "34",
+        "ro.opengles.version": "196610",
+        "ro.sf.lcd_density": "420"
+      },
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 420,
+        "refreshHz": [60, 120]
+      },
+      "ramMB": 8192,
+      "cpu": {
+        "cores": 9,
+        "hardwareLine": null,
+        "abis": ["arm64-v8a"]
+      },
+      "gl": {
+        "vendor": "ARM",
+        "renderer": "Mali-G715",
+        "version": "OpenGL ES 3.2 v1.r44p0-01eac0.d0969c01d66270848df0f1eaaba55820"
+      },
+      "sensors": [
+        { "name": "ICM45631 Accelerometer", "vendor": null, "type": "accelerometer" },
+        { "name": "ICM45631 Gyroscope", "vendor": null, "type": "gyroscope" },
+        { "name": "MMC56X3X Magnetometer", "vendor": null, "type": "magnetometer" },
+        { "name": "TMD3719 Ambient Light", "vendor": null, "type": "light" },
+        { "name": "TMD3719 Proximity (wake-up)", "vendor": null, "type": "proximity" },
+        { "name": "ICP20100 Pressure Sensor", "vendor": null, "type": "pressure" }
+      ],
+      "tacs": [
+        "35154570",
+        "35871196",
+        "35983173",
+        "35944533",
+        "35748189"
+      ],
+      "serial": {
+        "example_shape": null,
+        "length": null,
+        "alphabet": null
+      },
+      "wifiOuis": [
+        "60:70:6C",
+        "C8:2A:DD",
+        "24:29:34",
+        "08:B4:B1",
+        "60:B7:6E",
+        "B0:E4:D5",
+        "F0:72:EA",
+        "D4:F5:47"
+      ],
+      "wifiOuisMeta": {
+        "confidence": "maker-level"
+      },
+      "sources": {
+        "system_build_prop": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/system/system/build.prop?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "vendor_build_prop": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/vendor/build.prop?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "product_build_prop": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/product/etc/build.prop?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "ro.hardware": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/vendor/etc/init/hw/init.shiba.rc?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "ro.hardware_dlkm": "https://dumps.tadiphone.dev/dumps/google/shiba/tree/vendor_dlkm/etc?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "ro.build.fingerprint": "https://dl.google.com/dl/android/aosp/shiba-ota-ap2a.240605.024-dc846018.zip",
+        "ro.bootloader": "https://dl.google.com/dl/android/aosp/shiba-ap2a.240605.024-factory-929fd327.zip",
+        "gsm.version.baseband": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/vendor/build.prop?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "factory_images_index": "https://developers.google.com/android/images",
+        "screen": "https://support.google.com/pixelphone/answer/7158570?hl=en",
+        "ramMB": "https://support.google.com/pixelphone/answer/7158570?hl=en",
+        "cpu.cores": "https://en.wikipedia.org/wiki/Google_Tensor",
+        "cpu.abis": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/vendor/build.prop?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "gl": "https://opengles.gpuinfo.org/displayreport.php?id=7117",
+        "sensors": "https://opengles.gpuinfo.org/displayreport.php?id=7117",
+        "sensors_registry": "https://dumps.tadiphone.dev/dumps/google/shiba/plain/vendor/etc/sensors/registry/shiba_common.reg?h=shiba-user-14-AP2A.240605.024-11860263-release-keys",
+        "tacs": "https://raw.githubusercontent.com/MoazEb/tac-database/main/tac_full.csv",
+        "wifiOuis": "https://standards-oui.ieee.org/oui/oui.txt"
+      },
+      "unverified": [
+        "cpu.hardwareLine",
+        "sensors.vendor",
+        "serial"
+      ]
+    },
+    {
+      "id": "pixel_8a",
+      "name": "Google Pixel 8a",
+      "variant": "Global unlocked (akita, AP2A.240905.003.A1)",
+      "props": {
+        "ro.product.brand": "google",
+        "ro.product.manufacturer": "Google",
+        "ro.product.model": "Pixel 8a",
+        "ro.product.device": "akita",
+        "ro.product.name": "akita",
+        "ro.product.board": "akita",
+        "ro.hardware": "akita",
+        "ro.board.platform": "zuma",
+        "ro.soc.manufacturer": "Google",
+        "ro.soc.model": "Tensor G3",
+        "ro.build.version.release": "14",
+        "ro.build.version.sdk": "34",
+        "ro.build.id": "AP2A.240905.003.A1",
+        "ro.build.version.incremental": "12234140",
+        "ro.build.version.security_patch": "2024-09-05",
+        "ro.build.fingerprint": "google/akita/akita:14/AP2A.240905.003.A1/12234140:user/release-keys",
+        "ro.build.description": "akita-user 14 AP2A.240905.003.A1 12234140 release-keys",
+        "ro.build.display.id": "AP2A.240905.003.A1",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.flavor": "akita-user",
+        "ro.build.host": null,
+        "ro.build.user": null,
+        "ro.build.date.utc": "1723742722",
+        "ro.vendor.build.fingerprint": null,
+        "ro.vendor.build.security_patch": null,
+        "ro.bootloader": "akita-14.5-12100691",
+        "gsm.version.baseband": "g5300o-240308-240517-B-11857457",
+        "ro.build.characteristics": "nosdcard",
+        "ro.product.first_api_level": "34",
+        "ro.opengles.version": "196610",
+        "ro.sf.lcd_density": "420"
+      },
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 420,
+        "refreshHz": [60, 120]
+      },
+      "ramMB": 8192,
+      "cpu": {
+        "cores": 9,
+        "hardwareLine": null,
+        "abis": ["arm64-v8a"]
+      },
+      "gl": {
+        "vendor": "ARM",
+        "renderer": "Mali-G715",
+        "version": "OpenGL ES 3.2 v1.r47p0-01eac0.32bf74397e5661efd860483910b1a861"
+      },
+      "sensors": [
+        { "name": "LSM6DSV Accelerometer", "vendor": null, "type": "accelerometer" },
+        { "name": "LSM6DSV Gyroscope", "vendor": null, "type": "gyroscope" },
+        { "name": "MMC56X3X Magnetometer", "vendor": null, "type": "magnetometer" },
+        { "name": "TMD3719 Ambient Light", "vendor": null, "type": "light" },
+        { "name": "TMD3719 Proximity (wake-up)", "vendor": null, "type": "proximity" },
+        { "name": "ICP20100 Pressure Sensor", "vendor": null, "type": "pressure" }
+      ],
+      "tacs": [
+        "35578016",
+        "35600155",
+        "35116352",
+        "35893752",
+        "35372517"
+      ],
+      "serial": {
+        "example_shape": null,
+        "length": null,
+        "alphabet": null
+      },
+      "wifiOuis": [
+        "60:70:6C",
+        "C8:2A:DD",
+        "24:29:34",
+        "08:B4:B1",
+        "60:B7:6E",
+        "B0:E4:D5",
+        "F0:72:EA",
+        "D4:F5:47"
+      ],
+      "wifiOuisMeta": {
+        "confidence": "maker-level"
+      },
+      "sources": {
+        "ro.build.fingerprint": "https://dl.google.com/dl/android/aosp/akita-ota-ap2a.240905.003.a1-02dd5149.zip",
+        "ro.build.date.utc": "https://dl.google.com/dl/android/aosp/akita-ota-ap2a.240905.003.a1-02dd5149.zip",
+        "ro.build.description": "https://raw.githubusercontent.com/LineageOS/android_device_google_akita/lineage-21/lineage_akita.mk",
+        "ro.bootloader": "https://dl.google.com/dl/android/aosp/akita-ap2a.240905.003.a1-factory-39b3cda7.zip",
+        "gsm.version.baseband": "https://dl.google.com/dl/android/aosp/akita-ap2a.240905.003.a1-factory-39b3cda7.zip",
+        "factory_images_index": "https://developers.google.com/android/images",
+        "ota_images_index": "https://developers.google.com/android/ota",
+        "ro.product.board": "https://raw.githubusercontent.com/GrapheneOS/device_google_akita/14/akita/BoardConfig.mk",
+        "ro.hardware": "https://raw.githubusercontent.com/GrapheneOS/device_google_akita/14/conf/init.akita.rc",
+        "ro.board.platform": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/device.mk",
+        "ro.soc.manufacturer": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/device-common.mk",
+        "ro.soc.model": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/vendor.prop",
+        "ro.build.characteristics": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/device.mk",
+        "ro.product.first_api_level": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/device.mk",
+        "ro.opengles.version": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/device.mk",
+        "ro.sf.lcd_density": "https://raw.githubusercontent.com/LineageOS/android_device_google_akita/lineage-21/akita/BoardConfig.mk",
+        "screen": "https://support.google.com/pixelphone/answer/7158570?hl=en",
+        "ramMB": "https://support.google.com/pixelphone/answer/7158570?hl=en",
+        "cpu.cores": "https://en.wikipedia.org/wiki/Google_Tensor",
+        "cpu.abis": "https://raw.githubusercontent.com/GrapheneOS/device_google_zuma/14/BoardConfig-common.mk",
+        "gl": "https://opengles.gpuinfo.org/displayreport.php?id=7434",
+        "sensors": "https://opengles.gpuinfo.org/displayreport.php?id=7434",
+        "tacs": "https://raw.githubusercontent.com/MoazEb/tac-database/main/tac_full.csv",
+        "wifiOuis": "https://standards-oui.ieee.org/oui/oui.txt"
+      },
+      "unverified": [
+        "props.ro.build.host",
+        "props.ro.build.user",
+        "props.ro.vendor.build.fingerprint",
+        "props.ro.vendor.build.security_patch",
+        "cpu.hardwareLine",
+        "sensors.vendor",
+        "serial"
+      ]
+    },
+    {
+      "id": "pixel_7a",
+      "name": "Google Pixel 7a",
+      "variant": "Global unlocked (lynx, AP2A.240905.003)",
+      "props": {
+        "ro.product.brand": "google",
+        "ro.product.manufacturer": "Google",
+        "ro.product.model": "Pixel 7a",
+        "ro.product.device": "lynx",
+        "ro.product.name": "lynx",
+        "ro.product.board": "lynx",
+        "ro.hardware": "lynx",
+        "ro.board.platform": "gs201",
+        "ro.soc.manufacturer": "Google",
+        "ro.soc.model": "GS201",
+        "ro.build.version.release": "14",
+        "ro.build.version.sdk": "34",
+        "ro.build.id": "AP2A.240905.003",
+        "ro.build.version.incremental": "12231197",
+        "ro.build.version.security_patch": "2024-09-05",
+        "ro.build.fingerprint": "google/lynx/lynx:14/AP2A.240905.003/12231197:user/release-keys",
+        "ro.build.description": "lynx-user 14 AP2A.240905.003 12231197 release-keys",
+        "ro.build.display.id": "AP2A.240905.003",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.flavor": "lynx-user",
+        "ro.build.host": "r-68354e84479a5a03-p2rn",
+        "ro.build.user": "android-build",
+        "ro.build.date.utc": "1723684062",
+        "ro.vendor.build.fingerprint": "google/lynx/lynx:14/AP2A.240905.003/12231197:user/release-keys",
+        "ro.vendor.build.security_patch": "2024-09-05",
+        "ro.bootloader": "lynx-14.5-12088398",
+        "gsm.version.baseband": "g5300q-240308-240517-B-11857457",
+        "ro.build.characteristics": "nosdcard",
+        "ro.product.first_api_level": "33",
+        "ro.opengles.version": "196610",
+        "ro.sf.lcd_density": "420"
+      },
+      "screen": {
+        "width": 1080,
+        "height": 2400,
+        "dpi": 420,
+        "refreshHz": [60, 90]
+      },
+      "ramMB": 8192,
+      "cpu": {
+        "cores": 8,
+        "hardwareLine": null,
+        "abis": ["arm64-v8a"]
+      },
+      "gl": {
+        "vendor": "ARM",
+        "renderer": "Mali-G710",
+        "version": "OpenGL ES 3.2 v1.r46p0-01eac1.14d55ef7b97963f52f0db33fda5f2c4c"
+      },
+      "sensors": [
+        { "name": "LSM6DSV Accelerometer", "vendor": null, "type": "accelerometer" },
+        { "name": "LSM6DSV Gyroscope", "vendor": null, "type": "gyroscope" },
+        { "name": "MMC56X3X Magnetometer", "vendor": null, "type": "magnetometer" },
+        { "name": "TMD3719 Ambient Light", "vendor": null, "type": "light" },
+        { "name": "TMD3719 Proximity (wake-up)", "vendor": null, "type": "proximity" },
+        { "name": "ICP20100 Pressure Sensor", "vendor": null, "type": "pressure" }
+      ],
+      "tacs": [
+        "35917382",
+        "35906739",
+        "35448720",
+        "35529153",
+        "35497743"
+      ],
+      "serial": {
+        "example_shape": null,
+        "length": null,
+        "alphabet": null
+      },
+      "wifiOuis": [
+        "60:70:6C",
+        "C8:2A:DD",
+        "24:29:34",
+        "08:B4:B1",
+        "60:B7:6E",
+        "B0:E4:D5",
+        "F0:72:EA",
+        "D4:F5:47"
+      ],
+      "wifiOuisMeta": {
+        "confidence": "maker-level"
+      },
+      "sources": {
+        "system_build_prop": "https://dumps.tadiphone.dev/dumps/google/lynx/plain/system/system/build.prop?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "vendor_build_prop": "https://dumps.tadiphone.dev/dumps/google/lynx/plain/vendor/build.prop?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "product_build_prop": "https://dumps.tadiphone.dev/dumps/google/lynx/plain/product/etc/build.prop?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "ro.hardware": "https://dumps.tadiphone.dev/dumps/google/lynx/tree/vendor/etc/init/hw?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "ro.build.fingerprint": "https://dl.google.com/dl/android/aosp/lynx-ota-ap2a.240905.003-5eaf66b1.zip",
+        "ro.bootloader": "https://dl.google.com/dl/android/aosp/lynx-ap2a.240905.003-factory-e2128987.zip",
+        "gsm.version.baseband": "https://dumps.tadiphone.dev/dumps/google/lynx/plain/vendor/build.prop?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "factory_images_index": "https://developers.google.com/android/images",
+        "screen": "https://support.google.com/pixelphone/answer/7158570?hl=en",
+        "ramMB": "https://support.google.com/pixelphone/answer/7158570?hl=en",
+        "cpu.cores": "https://en.wikipedia.org/wiki/Pixel_7a",
+        "cpu.abis": "https://dumps.tadiphone.dev/dumps/google/lynx/plain/vendor/build.prop?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "gl": "https://vulkan.gpuinfo.org/displayreport.php?id=32895",
+        "gl_format_sibling_gs201": "https://opengles.gpuinfo.org/displayreport.php?id=7308",
+        "sensors_registry": "https://dumps.tadiphone.dev/dumps/google/lynx/plain/vendor/etc/sensors/registry/lynx_pvt.reg?h=lynx-user-14-AP2A.240905.003-12231197-release-keys",
+        "sensors_sibling_gs201": "https://opengles.gpuinfo.org/displayreport.php?id=6876",
+        "tacs": "https://raw.githubusercontent.com/MoazEb/tac-database/main/tac_full.csv",
+        "wifiOuis": "https://standards-oui.ieee.org/oui/oui.txt"
+      },
+      "unverified": [
+        "cpu.hardwareLine",
+        "gl.version",
+        "sensors.name",
+        "sensors.vendor",
+        "serial"
+      ]
+    },
+    {
+      "id": "galaxy_s23",
+      "name": "Samsung Galaxy S23",
+      "variant": "International / OXM multi-CSC (SM-S911B, dm1qxxx, Snapdragon 8 Gen 2 for Galaxy)",
+      "props": {
+        "ro.product.brand": "samsung",
+        "ro.product.manufacturer": "samsung",
+        "ro.product.model": "SM-S911B",
+        "ro.product.device": "dm1q",
+        "ro.product.name": "dm1qxxx",
+        "ro.product.board": "kalama",
+        "ro.hardware": "qcom",
+        "ro.board.platform": "kalama",
+        "ro.soc.manufacturer": "QTI",
+        "ro.soc.model": "kalama",
+        "ro.build.version.release": "14",
+        "ro.build.version.sdk": "34",
+        "ro.build.id": "UP1A.231005.007",
+        "ro.build.version.incremental": "S911BXXS5CXDE",
+        "ro.build.version.security_patch": "2024-05-01",
+        "ro.build.fingerprint": "samsung/dm1qxxx/dm1q:14/UP1A.231005.007/S911BXXS5CXDE:user/release-keys",
+        "ro.build.description": "dm1qxxx-user 14 UP1A.231005.007 S911BXXS5CXDE release-keys",
+        "ro.build.display.id": "UP1A.231005.007.S911BXXS5CXDE",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.flavor": "dm1qxxx-user",
+        "ro.build.host": "21DK7B07",
+        "ro.build.user": "dpi",
+        "ro.build.date.utc": "1715075993",
+        "ro.vendor.build.fingerprint": "samsung/dm1qxxx/dm1q:13/TP1A.220624.014/S911BXXS5CXDE:user/release-keys",
+        "ro.vendor.build.security_patch": "2024-05-01",
+        "ro.bootloader": null,
+        "gsm.version.baseband": null,
+        "ro.build.characteristics": "phone",
+        "ro.product.first_api_level": "33",
+        "ro.opengles.version": "196610",
+        "ro.sf.lcd_density": "480"
+      },
+      "screen": {
+        "width": 1080,
+        "height": 2340,
+        "dpi": 480,
+        "refreshHz": [48, 120]
+      },
+      "ramMB": 8192,
+      "cpu": {
+        "cores": 8,
+        "hardwareLine": null,
+        "abis": ["arm64-v8a", "armeabi-v7a", "armeabi"]
+      },
+      "gl": {
+        "vendor": "Qualcomm",
+        "renderer": "Adreno (TM) 740",
+        "version": "OpenGL ES 3.2 V@0676.42 (GIT@7b26bdd942, Iab69c31769, 1693222181) (Date:08/28/23)"
+      },
+      "sensors": [
+        { "name": "lsm6dso LSM6DSO Accelerometer Non-wakeup", "vendor": null, "type": "accelerometer" },
+        { "name": "lsm6dso LSM6DSO Gyroscope Non-wakeup", "vendor": null, "type": "gyroscope" },
+        { "name": "AK09918 Magnetometer", "vendor": null, "type": "magnetometer" },
+        { "name": "STK33911 Light  Non-wakeup", "vendor": null, "type": "light" },
+        { "name": "STK33911 Proximity Strm  Non-wakeup", "vendor": null, "type": "proximity" },
+        { "name": "lps22hh Pressure Sensor Non-wakeup", "vendor": null, "type": "pressure" }
+      ],
+      "tacs": [
+        "35884341",
+        "35973922",
+        "35965699",
+        "35958628",
+        "35458550"
+      ],
+      "serial": {
+        "example_shape": "11 characters",
+        "length": 11,
+        "alphabet": null
+      },
+      "wifiOuis": [
+        "64:1B:2F",
+        "9C:73:B1",
+        "38:8A:06",
+        "48:BC:E1",
+        "D0:D0:03",
+        "24:09:35",
+        "84:22:89",
+        "80:39:8C"
+      ],
+      "wifiOuisMeta": {
+        "confidence": "maker-level"
+      },
+      "sources": {
+        "system_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/plain/system/system/build.prop?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "vendor_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/plain/vendor/build.prop?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "product_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/plain/product/etc/build.prop?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "odm_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/plain/odm/etc/build.prop?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "ro.hardware": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/tree/vendor/etc?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "ro.soc.model": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/plain/vendor/etc/init/hw/init.target.rc?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "samsung_fota_release_notes": "https://doc.samsungmobile.com/SM-S911B/025760230221/eng.html",
+        "screen": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S23",
+        "ramMB": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S23",
+        "cpu.cores": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S23",
+        "cpu.abis": "https://dumps.tadiphone.dev/dumps/samsung/dm1q/plain/vendor/build.prop?h=dm1qxxx-user-14-UP1A.231005.007-S911BXXS5CXDE-release-keys",
+        "gl": "https://opengles.gpuinfo.org/displayreport.php?id=7275",
+        "sensors": "https://opengles.gpuinfo.org/displayreport.php?id=7275",
+        "tacs": "https://raw.githubusercontent.com/MoazEb/tac-database/main/tac_full.csv",
+        "serial.length": "https://www.samsung.com/us/support/answer/ANS00062629/",
+        "wifiOuis": "https://standards-oui.ieee.org/oui/oui.txt"
+      },
+      "unverified": [
+        "props.ro.bootloader",
+        "props.gsm.version.baseband",
+        "cpu.hardwareLine",
+        "sensors.vendor",
+        "serial.alphabet"
+      ]
+    },
+    {
+      "id": "galaxy_s24",
+      "name": "Samsung Galaxy S24",
+      "variant": "European / International OXM (SM-S921B, e1sxxx, Exynos 2400)",
+      "props": {
+        "ro.product.brand": "samsung",
+        "ro.product.manufacturer": "samsung",
+        "ro.product.model": "SM-S921B",
+        "ro.product.device": "e1s",
+        "ro.product.name": "e1sxxx",
+        "ro.product.board": "s5e9945",
+        "ro.hardware": "s5e9945",
+        "ro.board.platform": "erd9945",
+        "ro.soc.manufacturer": "Samsung",
+        "ro.soc.model": "s5e9945",
+        "ro.build.version.release": "14",
+        "ro.build.version.sdk": "34",
+        "ro.build.id": "UP1A.231005.007",
+        "ro.build.version.incremental": "S921BXXS3AXFE",
+        "ro.build.version.security_patch": "2024-07-01",
+        "ro.build.fingerprint": "samsung/e1sxxx/e1s:14/UP1A.231005.007/S921BXXS3AXFE:user/release-keys",
+        "ro.build.description": "e1sxxx-user 14 UP1A.231005.007 S921BXXS3AXFE release-keys",
+        "ro.build.display.id": "UP1A.231005.007.S921BXXS3AXFE",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.flavor": "e1sxxx-user",
+        "ro.build.host": "SWDK6917",
+        "ro.build.user": "dpi",
+        "ro.build.date.utc": "1720083589",
+        "ro.vendor.build.fingerprint": "samsung/e1sxxx/e1s:14/UP1A.231005.007/S921BXXS3AXFE:user/release-keys",
+        "ro.vendor.build.security_patch": "2024-07-01",
+        "ro.bootloader": null,
+        "gsm.version.baseband": null,
+        "ro.build.characteristics": "phone",
+        "ro.product.first_api_level": "34",
+        "ro.opengles.version": "196610",
+        "ro.sf.lcd_density": "480"
+      },
+      "screen": {
+        "width": 1080,
+        "height": 2340,
+        "dpi": 480,
+        "refreshHz": [1, 120]
+      },
+      "ramMB": 8192,
+      "cpu": {
+        "cores": 10,
+        "hardwareLine": null,
+        "abis": ["arm64-v8a"]
+      },
+      "gl": {
+        "vendor": "Samsung Electronics Co., Ltd.",
+        "renderer": "ANGLE (Samsung Xclipse 940) on Vulkan 1.3.264",
+        "version": "OpenGL ES 3.2 ANGLE git hash: d2a158dccead"
+      },
+      "sensors": [
+        { "name": "LSM6DSVTR Accelerometer", "vendor": null, "type": "accelerometer" },
+        { "name": "LSM6DSVTR Gyroscope", "vendor": null, "type": "gyroscope" },
+        { "name": "AK09918C Magnetometer", "vendor": null, "type": "magnetometer" },
+        { "name": "STK33F11 Light", "vendor": null, "type": "light" },
+        { "name": "STK33F11 Proximity", "vendor": null, "type": "proximity" },
+        { "name": "LPS22DFTR Barometer", "vendor": null, "type": "pressure" }
+      ],
+      "tacs": [
+        "35970674",
+        "35928417",
+        "35918393",
+        "35433376",
+        "35433286"
+      ],
+      "serial": {
+        "example_shape": "11 characters",
+        "length": 11,
+        "alphabet": null
+      },
+      "wifiOuis": [
+        "64:1B:2F",
+        "9C:73:B1",
+        "38:8A:06",
+        "48:BC:E1",
+        "D0:D0:03",
+        "24:09:35",
+        "84:22:89",
+        "80:39:8C"
+      ],
+      "wifiOuisMeta": {
+        "confidence": "maker-level"
+      },
+      "sources": {
+        "system_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/e1s/plain/system/system/build.prop?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "vendor_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/e1s/plain/vendor/build.prop?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "product_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/e1s/plain/product/etc/build.prop?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "odm_build_prop": "https://dumps.tadiphone.dev/dumps/samsung/e1s/plain/odm/etc/build.prop?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "ro.hardware": "https://dumps.tadiphone.dev/dumps/samsung/e1s/plain/vendor/etc/init/init.s5e9945.rc?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "ro.hardware_fstab": "https://dumps.tadiphone.dev/dumps/samsung/e1s/tree/vendor/etc?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "samsung_fota_release_notes": "https://doc.samsungmobile.com/SM-S921B/029280240224/eng.html",
+        "screen": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S24",
+        "ramMB": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S24",
+        "cpu.cores": "https://en.wikipedia.org/wiki/Samsung_Galaxy_S24",
+        "cpu.abis": "https://dumps.tadiphone.dev/dumps/samsung/e1s/plain/vendor/build.prop?h=e1sxxx-user-14-UP1A.231005.007-S921BXXS3AXFE-release-keys",
+        "gl": "https://opengles.gpuinfo.org/displayreport.php?id=7582",
+        "sensors": "https://opengles.gpuinfo.org/displayreport.php?id=7582",
+        "tacs": "https://raw.githubusercontent.com/MoazEb/tac-database/main/tac_full.csv",
+        "serial.length": "https://www.samsung.com/us/support/answer/ANS00062629/",
+        "wifiOuis": "https://standards-oui.ieee.org/oui/oui.txt"
+      },
+      "unverified": [
+        "props.ro.bootloader",
+        "props.gsm.version.baseband",
+        "cpu.hardwareLine",
+        "sensors.vendor",
+        "serial.alphabet"
+      ]
+    },
+    {
+      "id": "oneplus_12",
+      "name": "OnePlus 12",
+      "variant": "European / EEA (CPH2581, CPH2581EEA, OP595DL1, OxygenOS 14.0.0.810(EX01))",
+      "props": {
+        "ro.product.brand": "OnePlus",
+        "ro.product.manufacturer": "OnePlus",
+        "ro.product.model": "CPH2581",
+        "ro.product.device": "OP595DL1",
+        "ro.product.name": "CPH2581EEA",
+        "ro.product.board": "pineapple",
+        "ro.hardware": "qcom",
+        "ro.board.platform": "pineapple",
+        "ro.soc.manufacturer": "QTI",
+        "ro.soc.model": "SM8650",
+        "ro.build.version.release": "14",
+        "ro.build.version.sdk": "34",
+        "ro.build.id": "UKQ1.230924.001",
+        "ro.build.version.incremental": "U.R4T3.18a86bb-3bd6e-400f2",
+        "ro.build.version.security_patch": "2024-06-05",
+        "ro.build.fingerprint": "OnePlus/CPH2581EEA/OP595DL1:14/UKQ1.230924.001/U.R4T3.18a86bb-3bd6e-400f2:user/release-keys",
+        "ro.build.description": "qssi_64-user 14 UKQ1.231108.001 1718959536227 release-keys",
+        "ro.build.display.id": "CPH2581_14.0.0.810(EX01)",
+        "ro.build.type": "user",
+        "ro.build.tags": "release-keys",
+        "ro.build.flavor": "qssi_64-user",
+        "ro.build.host": "dg02-pool06-kvm50",
+        "ro.build.user": "root",
+        "ro.build.date.utc": "1718959536",
+        "ro.vendor.build.fingerprint": "OnePlus/CPH2581EEA/OP595DL1:14/UKQ1.230924.001/U.R4T3.18a86bb-3bd6e-400f2:user/release-keys",
+        "ro.vendor.build.security_patch": "2024-06-05",
+        "ro.bootloader": null,
+        "gsm.version.baseband": null,
+        "ro.build.characteristics": "nosdcard",
+        "ro.product.first_api_level": "34",
+        "ro.opengles.version": "196610",
+        "ro.sf.lcd_density": "640"
+      },
+      "screen": {
+        "width": 1440,
+        "height": 3168,
+        "dpi": 640,
+        "refreshHz": [1, 120]
+      },
+      "ramMB": 12288,
+      "cpu": {
+        "cores": 8,
+        "hardwareLine": null,
+        "abis": ["arm64-v8a"]
+      },
+      "gl": {
+        "vendor": "Qualcomm",
+        "renderer": "Adreno (TM) 750",
+        "version": "OpenGL ES 3.2 V@0762.10 (GIT@1394a2c7a8, Id12349e41b, 1708672982) (Date:02/23/24)"
+      },
+      "sensors": [
+        { "name": "bmi26x Accelerometer Non-wakeup", "vendor": null, "type": "accelerometer" },
+        { "name": "bmi26x Gyroscope Non-wakeup", "vendor": null, "type": "gyroscope" },
+        { "name": "ak0991x Magnetometer Non-wakeup", "vendor": null, "type": "magnetometer" },
+        { "name": "OPLUS Fusion Light Sensor Next Gen", "vendor": null, "type": "light" },
+        { "name": "tcs3720 Proximity Sensor Wakeup", "vendor": null, "type": "proximity" }
+      ],
+      "tacs": [
+        "86154506"
+      ],
+      "serial": {
+        "example_shape": null,
+        "length": null,
+        "alphabet": null
+      },
+      "wifiOuis": [
+        "AC:C0:48",
+        "5C:17:CF",
+        "A0:91:A2",
+        "7C:F0:E5",
+        "6C:60:16",
+        "2C:A7:EF",
+        "30:BB:7D",
+        "AC:D6:18"
+      ],
+      "wifiOuisMeta": {
+        "confidence": "maker-level"
+      },
+      "sources": {
+        "system_build_prop": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/system/system/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "vendor_build_prop": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/vendor/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "product_build_prop": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/product/etc/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "odm_build_prop": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/odm/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "my_product_build_prop": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/my_product/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "my_manifest_build_prop": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/my_manifest/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "modem_verinfo": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/modem/verinfo/ver_info.txt?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "ro.hardware": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/tree/vendor/etc?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "ro.soc.model": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/vendor/bin/init.qti.qcv.sh?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "ro.soc.model_rc": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/vendor/etc/init/init.qti.qcv.rc?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "screen": "https://www.oneplus.com/uk/12/specs",
+        "ramMB": "https://www.oneplus.com/uk/12/specs",
+        "cpu.cores": "https://en.wikipedia.org/wiki/OnePlus_12",
+        "cpu.abis": "https://dumps.tadiphone.dev/dumps/oneplus/op595dl1/plain/odm/build.prop?h=qssi_64-user-14-UKQ1.231108.001-1718959536227-release-keys--EUEX",
+        "gl": "https://opengles.gpuinfo.org/displayreport.php?id=7506",
+        "sensors": "https://opengles.gpuinfo.org/displayreport.php?id=7506",
+        "tacs": "https://raw.githubusercontent.com/MoazEb/tac-database/main/tac_full.csv",
+        "wifiOuis": "https://standards-oui.ieee.org/oui/oui.txt"
+      },
+      "unverified": [
+        "props.ro.bootloader",
+        "props.gsm.version.baseband",
+        "cpu.hardwareLine",
+        "sensors.vendor",
+        "serial"
+      ]
+    }
+  ]
+}
