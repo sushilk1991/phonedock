@@ -369,8 +369,9 @@ struct ContentView: View {
     /// Where the stage wants toasts (above its hardware bar); nil: no bar on screen.
     @State private var toastLift: CGFloat?
     /// Below this detail width, Open in Separate Window (also in the Device menu and the sidebar's context menu)
-    /// leaves the toolbar first, so ＋ never falls into the » overflow menu.
-    static let narrowToolbarBelow: CGFloat = 470
+    /// leaves the toolbar first, so ＋ never falls into the » overflow menu. At the 960 pt minimum window with default
+    /// sidebar (250 pt) and inspector (320 pt) the detail column is 390 pt, which fits all four actions cleanly.
+    static let narrowToolbarBelow: CGFloat = 340
 
     var body: some View {
         @Bindable var model = model
@@ -477,9 +478,7 @@ struct ContentView: View {
             ToolbarItem(placement: .status) { ConnectionPill(health: health) }
         }
         if let d = model.selectedDevice, model.connection.isConnected {
-            ToolbarItemGroup(placement: .primaryAction) {
-                DeviceToolbarActions(device: d, narrow: narrowDetail)
-            }
+            deviceToolbarActions(d, narrow: narrowDetail)
         }
         if #available(macOS 26.0, *), hasDeviceActions, hasTrailingChrome {
             ToolbarSpacer(.fixed, placement: .primaryAction)
@@ -555,6 +554,61 @@ struct ContentView: View {
             ContentUnavailableView("Select a Device", systemImage: "iphone.gen3")
         }
     }
+    /// Toolbar device actions: Power ▾ · Screenshot · Record · Separate Window. Each conditional action is its own
+    /// `ToolbarItem` so macOS 26+ Liquid Glass toolbar platters resize cleanly when items appear or hide (e.g. `narrow`).
+    @ToolbarContentBuilder
+    private func deviceToolbarActions(_ device: Device, narrow: Bool) -> some ToolbarContent {
+        let running = device.isRunning
+        if device.can("boot") || device.can("shutdown") {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Start") { model.boot(device) }
+                        .disabled(!DeviceActions.canStart(device, model))
+                        .modifierKeyAlternate(.option) {
+                            Button("Cold Boot") { model.boot(device, cold: true) }
+                                .disabled(!DeviceActions.canStart(device, model))
+                        }
+                    Button("Shut Down") { model.shutdown(device) }
+                        .disabled(!DeviceActions.canShutDown(device, model))
+                } label: {
+                    Label("Power", systemImage: "power")
+                }
+                .help("Start or Shut Down")   // it opens a menu, so the tooltip names the menu, not one action
+                .testAnchor("Power")
+            }
+        }
+        // While recording, the timer pill is wider than the Record button: in a narrow column Screenshot (also ⌘S and
+        // the Device menu) makes room for it, so ＋ never falls into ».
+        if device.can("screenshot"), !(narrow && model.recordings[device.id] != nil) {
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.screenshot(device) } label: { Label("Screenshot", systemImage: "camera") }
+                    .help("Save Screenshot (⌘S)")
+                    .disabled(!running)
+                    .testAnchor("Screenshot")
+            }
+        }
+        if running {
+            ToolbarItem(placement: .primaryAction) {
+                // One per device: reused across devices, its "path changed" check would announce the other device's
+                // last recording as just saved.
+                RecordControl(device: device).id(device.id)
+            }
+        } else if device.can("record"), !model.recordingUnsupported.contains(device.id) {
+            ToolbarItem(placement: .primaryAction) {
+                // Off: shown disabled like Screenshot and the window button, so the toolbar keeps its shape when it starts.
+                Button {} label: { Label("Record Screen", systemImage: "record.circle") }
+                    .help("Record Screen (⌘R)")
+                    .disabled(true)
+            }
+        }
+        if device.can("window"), !narrow {
+            ToolbarItem(placement: .primaryAction) {
+                Button { model.openWindow(device) } label: { Label(device.windowActionTitle, systemImage: "macwindow.on.rectangle") }
+                    .help(device.windowActionHelp)
+                    .disabled(!running)
+            }
+        }
+    }
 }
 
 /// App start: nothing for 600 ms, then a spinner; a reassurance line after 10 s.
@@ -578,57 +632,6 @@ private struct StartingView: View {
             visible = true
             try? await Task.sleep(for: .seconds(9.4))
             slow = true
-        }
-    }
-}
-
-/// Toolbar device actions: Power ▾ · Screenshot · Record · Separate Window. Hidden when the device can't do them.
-struct DeviceToolbarActions: View {
-    @Environment(AppModel.self) private var model
-    let device: Device
-    /// A narrow detail column: leave out the least-used item rather than overflow into ».
-    var narrow = false
-
-    var body: some View {
-        let running = device.isRunning
-        if device.can("boot") || device.can("shutdown") {
-            Menu {
-                Button("Start") { model.boot(device) }
-                    .disabled(!DeviceActions.canStart(device, model))
-                    .modifierKeyAlternate(.option) {
-                        Button("Cold Boot") { model.boot(device, cold: true) }
-                            .disabled(!DeviceActions.canStart(device, model))
-                    }
-                Button("Shut Down") { model.shutdown(device) }
-                    .disabled(!DeviceActions.canShutDown(device, model))
-            } label: {
-                Label("Power", systemImage: "power")
-            }
-            .help("Start or Shut Down")   // it opens a menu, so the tooltip names the menu, not one action
-            .testAnchor("Power")
-        }
-        // While recording, the timer pill is wider than the Record button: in a narrow column Screenshot (also ⌘S and
-        // the Device menu) makes room for it, so ＋ never falls into ».
-        if device.can("screenshot"), !(narrow && model.recordings[device.id] != nil) {
-            Button { model.screenshot(device) } label: { Label("Screenshot", systemImage: "camera") }
-                .help("Save Screenshot (⌘S)")
-                .disabled(!running)
-                .testAnchor("Screenshot")
-        }
-        if running {
-            // One per device: reused across devices, its "path changed" check would announce the other device's
-            // last recording as just saved.
-            RecordControl(device: device).id(device.id)
-        } else if device.can("record"), !model.recordingUnsupported.contains(device.id) {
-            // Off: shown disabled like Screenshot and the window button, so the toolbar keeps its shape when it starts.
-            Button {} label: { Label("Record Screen", systemImage: "record.circle") }
-                .help("Record Screen (⌘R)")
-                .disabled(true)
-        }
-        if device.can("window"), !narrow {
-            Button { model.openWindow(device) } label: { Label(device.windowActionTitle, systemImage: "macwindow.on.rectangle") }
-                .help(device.windowActionHelp)
-                .disabled(!running)
         }
     }
 }
