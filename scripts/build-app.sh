@@ -168,8 +168,18 @@ PLIST
 NODE_BIN="${NODE:-$(command -v node)}"
 NODE_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$NODE_BIN")"
 echo "    node: $NODE_REAL"
+# The app runs this node on Macs that may not have Homebrew, so it has to be self-contained (nodejs.org, nvm, fnm).
+# Homebrew's node loads libnode and a dozen other dylibs from /opt/homebrew and dies at launch anywhere else.
+NODE_LIBS="$(otool -L "$NODE_REAL" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/Library/)' || true)"
+if [ -n "$NODE_LIBS" ]; then
+  echo "error: $NODE_REAL needs libraries the app can't carry:" >&2
+  echo "$NODE_LIBS" | sed 's/^/         /' >&2
+  echo "       Use a self-contained node (nodejs.org or nvm): NODE=/path/to/node scripts/build-app.sh" >&2
+  exit 1
+fi
 cp "$NODE_REAL" "$APP/Contents/Resources/node"
 chmod 755 "$APP/Contents/Resources/node"
+"$APP/Contents/Resources/node" --version >/dev/null || { echo "error: the bundled node doesn't run" >&2; exit 1; }
 
 if [ -f "$ROOT/dist/bundle/daemon/phonedockd.mjs" ]; then
   cp "$ROOT/dist/bundle/daemon/phonedockd.mjs" "$APP/Contents/Resources/daemon/phonedockd.mjs"
