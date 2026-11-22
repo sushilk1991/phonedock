@@ -718,7 +718,9 @@ struct SidebarView: View {
             Section("Devices") {
                 ForEach(model.creating) { CreatingRow(pending: $0) }
                 rows(managed)
-                if managed.isEmpty, model.creating.isEmpty {
+                // Only show an inline "New Device…" placeholder when other sections have devices (so the stage isn't
+                // showing FirstRunGuide). In the true empty state, FirstRunGuide is the single primary creation path.
+                if managed.isEmpty, model.creating.isEmpty, !all.isEmpty {
                     Button { model.showCreate = true } label: {
                         HStack(spacing: Theme.Space.m) {
                             Image(systemName: "plus.circle").frame(width: 20)

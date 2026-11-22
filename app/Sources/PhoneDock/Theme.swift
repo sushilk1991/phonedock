@@ -117,7 +117,7 @@ enum Theme {
 
     enum DeviceFrame {
         static let bezel = Color(nsColor: Theme.rgb(0x0B0B0C))
-        static let rim = Theme.dynamic(light: 0x2C2C2E, dark: 0x3A3A3E)
+        static let rim = Theme.dynamic(light: 0x2C2C2E, dark: 0x54545A)
         static let shadow = Theme.dynamic(light: 0x000000, dark: 0x000000, lightAlpha: 0.18, darkAlpha: 0.50)
         static let iosCorner: CGFloat = 0.12
         static let androidCorner: CGFloat = 0.07

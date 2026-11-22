@@ -590,15 +590,21 @@ struct FirstRunGuide: View {
                 }
                 .fixedSize()   // each button its own width: the empty state's actions stretch the last one
             }
-            GuideStep(number: 3, title: "Your agent", done: !setup.connected.isEmpty) {
+            let agentStepLocked = model.devices.isEmpty && setup.connected.isEmpty
+            GuideStep(number: 3, title: "Your agent", done: !setup.connected.isEmpty, locked: agentStepLocked) {
                 VStack(alignment: .leading, spacing: Theme.Space.s) {
                     if !setup.connected.isEmpty {
                         Text(ListFormatter.localizedString(byJoining: setup.connected.map(\.name)) + " can use PhoneDock.")
+                            .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                    } else if agentStepLocked {
+                        Text("Add a device first, then connect your agent.")
                             .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
                     }
                     // Its own width, like the buttons of step 2 (ContentUnavailableView's actions stretch buttons).
                     Button(setup.connected.isEmpty ? "Connect an Agent…" : "Connect Another Agent…") { model.showAgentSetup = true }
                         .fixedSize()
+                        .disabled(agentStepLocked)
+                        .help(agentStepLocked ? "Create or connect a device first" : "Connect an AI agent to PhoneDock")
                 }
             }
         }
@@ -613,23 +619,31 @@ private struct GuideStep<Content: View>: View {
     let number: Int
     let title: String
     let done: Bool
+    var locked = false
     @ViewBuilder var content: Content
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Space.l) {
             ZStack {
                 if done {
-                    Image(systemName: "checkmark.circle.fill").font(.system(size: 18)).foregroundStyle(Theme.Status.running)
+                    Circle().fill(Theme.Status.running)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Theme.Ink.onFill)
                 } else {
                     Circle().strokeBorder(Theme.Ink.tertiary, lineWidth: 1.5)
-                    Text("\(number)").font(Theme.Fonts.meta.weight(.semibold)).foregroundStyle(Theme.Ink.secondary)
+                    Text("\(number)")
+                        .font(Theme.Fonts.meta.weight(.semibold))
+                        .foregroundStyle(locked ? Theme.Ink.tertiary : Theme.Ink.secondary)
                 }
             }
             .frame(width: 20, height: 20)
             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
             .accessibilityLabel(done ? "Step \(number), done" : "Step \(number)")
             VStack(alignment: .leading, spacing: Theme.Space.s) {
-                Text(title).font(Theme.Fonts.headline).foregroundStyle(Theme.Ink.primary)
+                Text(title)
+                    .font(Theme.Fonts.headline)
+                    .foregroundStyle(locked ? Theme.Ink.secondary : Theme.Ink.primary)
                 content
             }
             .frame(maxWidth: .infinity, alignment: .leading)

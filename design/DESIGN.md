@@ -72,7 +72,7 @@ Rules:
 |---|---|---|
 | `Inspect.stroke` · `fill` · `halo` | `#FF2D92` · `#FF2D92` 14% · white 85% | UI-tree highlight: 2 pt stroke, 1 pt halo. The only chrome drawn on device pixels |
 | `DeviceFrame.bezel` | `#0B0B0C` | bezel, 3.5% of width |
-| `DeviceFrame.rim` | `#2C2C2E` / `#3A3A3E` | 1 pt rim |
+| `DeviceFrame.rim` | `#2C2C2E` / `#54545A` | 1 pt rim |
 | `DeviceFrame` corners | iOS 12%, Android 7% of width | continuous corners |
 | `DeviceFrame.shadow` | black 18% / 50% | device elevation |
 | `Elevation.card` | black 6% / none | card shadow (r2, y1) |

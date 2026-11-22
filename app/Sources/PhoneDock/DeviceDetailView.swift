@@ -435,7 +435,8 @@ private struct OffScreen: View {
                     Button("Start in Separate Window") { model.boot(device, window: true) }
                 }
             } label: {
-                Image(systemName: "ellipsis")
+                Label("More ways to start", systemImage: "ellipsis")
+                    .labelStyle(.iconOnly)
             }
             .menuIndicator(.hidden)
             .fixedSize()

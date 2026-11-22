@@ -17,12 +17,15 @@ struct UpdatesSettingsSection: View {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     statusRow(u, now: context.date)
                 }
-                SettingsRow("Check for updates automatically", detail: "Once a day, and each time PhoneDock opens.") {
-                    Toggle("Check for updates automatically", isOn: Binding(get: { u.automaticChecks }, set: { u.automaticChecks = $0 }))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .disabled(u.unavailableReason != nil)
-                        .testAnchor("Check for updates automatically")
+                // In builds that don't check for updates, omit the automatic-check toggle so we never show an ON switch
+                // contradicting the explanation above.
+                if u.unavailableReason == nil {
+                    SettingsRow("Check for updates automatically", detail: "Once a day, and each time PhoneDock opens.") {
+                        Toggle("Check for updates automatically", isOn: Binding(get: { u.automaticChecks }, set: { u.automaticChecks = $0 }))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .testAnchor("Check for updates automatically")
+                    }
                 }
             }
         }
@@ -97,12 +100,14 @@ struct UpdatesSettingsSection: View {
         case .checking:
             Button("Checking…") {}.disabled(true)
         case .idle:
-            if case .failed? = u.lastResult, u.unavailableReason == nil {
+            if u.unavailableReason != nil {
+                EmptyView()
+            } else if case .failed? = u.lastResult {
                 Button("Try Again") { u.checkForUpdates(from: .settings) }
                     .disabled(!u.canCheck)
             } else {
                 Button("Check Now") { u.checkForUpdates(from: .settings) }
-                    .disabled(u.unavailableReason != nil || !u.canCheck)
+                    .disabled(!u.canCheck)
                     .testAnchor("Check Now")
             }
         }

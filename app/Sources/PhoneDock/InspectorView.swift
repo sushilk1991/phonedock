@@ -474,13 +474,28 @@ struct InfoTab: View {
 
     private var snapshots: some View {
         let busy = DeviceActions.isBusy(device, model)
+        let transitioning = ["booting", "creating", "stopping"].contains(device.state)
+        // Android emulators and QEMU VMs must be running to save; Android emulators must also be running to restore
+        // (iOS simulators shut down during save/restore, so offline save/restore genuinely works there).
+        let saveNeedsRunning = !device.isRunning && ["android-emulator", "qemu"].contains(device.backend)
+        let restoreNeedsRunning = !device.isRunning && device.backend == "android-emulator"
+        let saveDisabled = busy || device.leasedByAgent || transitioning || saveNeedsRunning
+        let restoreDisabled = busy || device.leasedByAgent || transitioning || restoreNeedsRunning
+        let saveHelp = device.leasedByAgent
+            ? "Take over from \(device.controllerName ?? "the agent") to save a snapshot"
+            : saveNeedsRunning ? "Start \(device.name) to save a snapshot"
+            : "Save a snapshot of \(device.name)"
+        let restoreHelp: (String) -> String = { snapName in
+            if device.leasedByAgent { return "Take over from \(device.controllerName ?? "the agent") to restore a snapshot" }
+            if restoreNeedsRunning { return "Start \(device.name) to restore a snapshot" }
+            return "Restore \(snapName)"
+        }
         return VStack(alignment: .leading, spacing: 0) {
             SectionHeader("Snapshots") {
                 // While an agent holds the device a save would be refused after you've named it: say so up front.
                 Button { savingName = Self.defaultSnapshotName() } label: { Label("Save…", systemImage: "plus") }
-                    .disabled(busy || device.leasedByAgent || ["booting", "creating", "stopping"].contains(device.state))
-                    .help(device.leasedByAgent ? "Take over from \(device.controllerName ?? "the agent") to save a snapshot"
-                                               : "Save a snapshot of \(device.name)")
+                    .disabled(saveDisabled)
+                    .help(saveHelp)
                     .testAnchor("Save Snapshot")
             }
             if let operation = model.busy[device.id] {
@@ -507,7 +522,9 @@ struct InfoTab: View {
                 } else {
                     VStack(spacing: 0) {
                         ForEach(snaps) { s in
-                            SnapshotRow(snapshot: s, busy: busy, onRestore: { restoreTarget = s }, onDelete: { deleteTarget = s })
+                            SnapshotRow(snapshot: s, busy: busy, restoreDisabled: restoreDisabled,
+                                        restoreHelp: restoreHelp(s.name),
+                                        onRestore: { restoreTarget = s }, onDelete: { deleteTarget = s })
                         }
                     }
                     .padding(.horizontal, Theme.Space.s)
@@ -694,6 +711,9 @@ private struct SnapshotRow: View {
     let snapshot: Snapshot
     /// Another snapshot, restore or clone is running on this device.
     var busy = false
+    /// Restore cannot run right now (busy, agent lease, or backend requires the device to be running).
+    var restoreDisabled = false
+    var restoreHelp: String? = nil
     let onRestore: () -> Void
     let onDelete: () -> Void
     @State private var hovering = false
@@ -715,8 +735,8 @@ private struct SnapshotRow: View {
             Spacer(minLength: Theme.Space.s)
             Button("Restore…", action: onRestore)
                 .controlSize(.small)
-                .disabled(busy)
-                .help("Restore \(snapshot.name)")
+                .disabled(restoreDisabled)
+                .help(restoreHelp ?? "Restore \(snapshot.name)")
                 .accessibilityLabel("Restore \(snapshot.name)")
                 .testAnchor("Restore \(snapshot.name)")
         }
@@ -726,7 +746,7 @@ private struct SnapshotRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .contextMenu {
-            Button("Restore…", action: onRestore).disabled(busy)
+            Button("Restore…", action: onRestore).disabled(restoreDisabled)
             Divider()
             Button("Delete…", role: .destructive, action: onDelete).disabled(busy)
         }
@@ -779,7 +799,7 @@ struct AppsTab: View {
                     .disabled(!available || !device.isRunning)
             }
             if available && device.isRunning && !apps.isEmpty {
-                InspectorField(prompt: "Search", text: $search)
+                InspectorField(prompt: "Filter", text: $search, symbol: "line.3.horizontal.decrease.circle")
             }
             content
         }
