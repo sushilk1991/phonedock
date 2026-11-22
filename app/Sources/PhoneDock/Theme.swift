@@ -579,9 +579,16 @@ struct SheetParentHeight: NSViewRepresentable {
 // MARK: - Modifier sugar
 
 extension View {
-    /// A segmented picker with the system's neutral selected segment, as in the approved mockups. The root
-    /// `.tint(Accent.fill)` would otherwise fill the selected segment with indigo, the loudest thing in the chrome.
-    func pdSegmented() -> some View { pickerStyle(.segmented).tint(nil) }
+    /// A segmented picker with a neutral selected segment, as in the approved mockups. The root `.tint(Accent.fill)`
+    /// (and, on macOS 26+, the system accent default when `.tint(nil)` is passed) would otherwise fill the selected
+    /// segment with indigo, the loudest thing in the chrome.
+    @ViewBuilder func pdSegmented() -> some View {
+        if #available(macOS 26.0, *) {
+            pickerStyle(.segmented).tint(Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
+        } else {
+            pickerStyle(.segmented).tint(nil)
+        }
+    }
     func pdCard(padding: CGFloat = Theme.Space.l) -> some View { modifier(CardModifier(padding: padding)) }
     func pdFloatingBar() -> some View { modifier(FloatingBarModifier()) }
 }
