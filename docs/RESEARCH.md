@@ -17,6 +17,7 @@ third-party pieces. **NOT POSSIBLE** comes with the alternative architecture.
 | Option | What runs | Accel on Apple Silicon | Status in PhoneDock |
 |---|---|---|---|
 | Android Emulator (QEMU fork) | Real AOSP / Google APIs / Play Store system images, ARM64 apps natively | Hypervisor.framework (HVF) | **WORKS** (`android-emulator`) |
+| Disguised Android virtual phone (`options.disguise`) | Play Store ARM64 image + sourced handset profile, deterministic identity (IMEI/serial/MAC/SIM), Magisk `v31.1` overlay ramdisk (59 → 36/279 `pd-probe` flags; −30 stock tells, +7 Magisk-root side effects) | Hypervisor.framework (HVF) | **WORKS** (`android-emulator` + `options.disguise`; see [VIRTUAL-PHONES.md](VIRTUAL-PHONES.md)) |
 | Cuttlefish (AOSP reference VM) | Real AOSP builds, multi-device, WebRTC display | Needs Linux + KVM | **NOT POSSIBLE natively**, design only |
 | Upstream QEMU | Any OS image: Alpine/Debian/Ubuntu, postmarketOS, custom builds | HVF for aarch64 guests, TCG for x86_64 | **WORKS** (`qemu`, verified with Alpine aarch64) |
 | iOS Simulator (CoreSimulator) | Real iOS userland frameworks, **simulator-built** apps only | Native (simulator processes run on macOS) | **WORKS** (`ios-simulator`) |
@@ -33,7 +34,10 @@ third-party pieces. **NOT POSSIBLE** comes with the alternative architecture.
 uses HVF with `arm64-v8a` system images, so ARM64 apps run at near-native speed. Image flavours:
 `google_apis` lets `adb root` run, which gives root. `google_apis_playstore` has the Play Store and Google sign-in
 but is a production build, so `adb root` is refused. Snapshots (`-snapshot`, console `avd snapshot save`) and
-headless mode (`-no-window`) work. Docs: https://developer.android.com/studio/run/emulator-commandline
+headless mode (`-no-window`) work. Passing `options.disguise` (or CLI `--disguise`) layers a sourced real-handset
+profile, deterministic device identity, and a two-tier cached Magisk `v31.1` + `overlay.d/` ramdisk on top of a Play
+Store image so the VM boots disguised on first launch; see [VIRTUAL-PHONES.md](VIRTUAL-PHONES.md) for architecture,
+measured `pd-probe` results, and the kernel/hardware floor. Docs: https://developer.android.com/studio/run/emulator-commandline
 
 **Cuttlefish.** This is AOSP's cloud-oriented virtual device (`launch_cvd`, crosvm or QEMU). It needs Linux with KVM,
 and there is no macOS host support. Alternative architecture (not implemented):
@@ -110,6 +114,7 @@ All of these fit PhoneDock as `kind: 'cloud'` backends. Only Corellium is implem
 | QEMU | `qemu` backend; base of the Android Emulator | GPL-2.0 |
 | EDK2 (OVMF/AAVMF firmware, Homebrew `share/qemu`) | UEFI for QEMU guests | BSD-2-Clause-Patent |
 | Android Emulator / platform-tools (adb) | Android virtual + physical | Apache-2.0 (+ GPL for QEMU parts) |
+| Magisk (`v31.1`, downloaded on demand, SHA-256 verified) | Pre-zygote `resetprop` + `overlay.d` ramdisk patching for disguised virtual phones | GPL-3.0 |
 | scrcpy | Android mirroring/control | Apache-2.0 |
 | AXe | iOS Simulator HID + accessibility | MIT |
 | WebDriverAgent (Appium fork) | iPhone input / UI tree on iOS 26 and older | BSD-3-Clause |

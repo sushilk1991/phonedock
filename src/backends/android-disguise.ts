@@ -42,7 +42,7 @@ export const MAGISK_PIN = {
 } as const;
 
 export const GUEST_PATCH_DIR = '/data/local/tmp/pdvp';
-/** Default carrier matches the Android Emulator's simulated T-Mobile US (310260) network so rild registers IN_SERVICE. */
+/** Default carrier for disguised virtual phones (matches the emulator's default T-Mobile US 310260 network). */
 export const DEFAULT_CARRIER_ID = 'tmobile_us';
 
 /** In-guest POSIX shell script that runs Magisk's arm64 `magiskboot` against an AVD's stock ramdisk.img. */

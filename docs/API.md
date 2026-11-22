@@ -40,7 +40,7 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | Method | Path | Body / query | Response |
 |---|---|---|---|
 | GET | /v1/devices | `?backend=&platform=&state=&fresh=1` | `Device[]` (all backends, managed + discovered). `osVersion` is display text: `Android 16 (API 36)`, `iOS 26.5 (23F77)` (iOS simulators said `26.5` before) |
-| POST | /v1/devices | `DeviceSpec` (+ `boot?: boolean`) | `202 { job, device? }` – creation is a Job; `job.result` is the Device |
+| POST | /v1/devices | `DeviceSpec` (+ `boot?: boolean`) | `202 { job, device? }` – creation is a Job; `job.result` is the Device. For `android-emulator`, additive `options.disguise` (`true`, a profile id such as `"pixel_8"`, or `{ enabled?, profile?, carrier?, seed?, teardownMagisk? }`) creates a disguised virtual phone with a persisted `DeviceIdentity` and exposes `Device.meta.disguise` (see [VIRTUAL-PHONES.md](VIRTUAL-PHONES.md)) |
 | POST | /v1/devices/batch | `{ spec: DeviceSpec, count, boot? }` | `202 { jobs: Job[] }` – names get `-1..-N` suffixes |
 | GET | /v1/devices/:id | – | `Device` |
 | PATCH | /v1/devices/:id | `{ name?, autoStart? }` | `Device` |
@@ -48,7 +48,7 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | POST | /v1/devices/:id/boot | `BootOptions` | `202 { job }`. Android emulators PhoneDock created get Chrome's first-run screens skipped at boot: `/data/local/tmp/chrome-command-line` = `_ --disable-fre --no-default-browser-check --no-first-run` and Chrome's notification permission granted, once (an existing file is left alone; never on AVDs PhoneDock didn't create) |
 | POST | /v1/devices/:id/shutdown | – | `{ ok }`. The device reads `state: "stopping"` from the moment the call starts; its lease ends with the shutdown |
 | POST | /v1/devices/:id/restart | `BootOptions` | `202 { job }` (shut down if running, then boot) |
-| POST | /v1/devices/:id/clone | `{ name }` | `202 { job }` (result = new Device) |
+| POST | /v1/devices/:id/clone | `{ name }` | `202 { job }` (result = new Device; cloning a disguised Android emulator generates a fresh `DeviceIdentity`) |
 | POST | /v1/devices/:id/window | – | `{ ok }` opens native viewer (Simulator.app / emulator window / scrcpy) |
 | GET | /v1/devices/:id/snapshots | – | `Snapshot[]`. Never lists the emulator's internal `default_boot`; `sizeMB` is the size on disk, stable between calls. Errors: `snapshot_vulkan` (Android emulator can't save after a Vulkan app ran), `snapshot_incompatible`, `snapshot_failed` (e.g. the phone isn't running after a restore) |
 | POST | /v1/devices/:id/snapshots | `{ name }` | `{ ok }` |
