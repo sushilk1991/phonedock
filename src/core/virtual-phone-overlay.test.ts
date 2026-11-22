@@ -122,31 +122,31 @@ test('overlay: stage 1 preserves HAL qemu props while stage 2 cleans them and se
   assert.match(o.initRc, /on property:sys\.boot_completed=1/);
   assert.doesNotMatch(o.initRc, /pd-rootd/);
 
-  // Stage 1 (post-fs-data): verified Pixel 8 identity + serial + voltage_now bind-mount,
-  // leaves RIL-owned gsm.operator.* untouched, NO blanket vendor.qemu/ro.boot.qemu deletion, NO /data/adb.
+  // Stage 1 (post-fs-data): verified Pixel 8 identity + serial,
+  // preserves ro.kernel.qemu/ro.boot.qemu/vport and leaves gsm.operator.* untouched so rild/qemu-props
+  // initialize modem/SIM/wlan0/codecs cleanly; no /dev/pd_vnow sysfs bind-mount, no /data/adb.
   assert.match(o.postFsDataScript, /s 'ro\.build\.fingerprint' 'google\/shiba\/shiba:14\/AP2A\.240605\.024\/11860263:user\/release-keys'/);
   assert.match(o.postFsDataScript, /s 'ro\.bootloader' 'ripcurrent-14\.5-11693900'/);
   assert.match(o.postFsDataScript, /s 'gsm\.version\.baseband' 'g5300i-240308-240517-B-11857457'/);
   assert.match(o.postFsDataScript, new RegExp(`s 'ro\\.serialno' '${identity.serial}'`));
-  assert.doesNotMatch(o.postFsDataScript, /gsm\.operator\.alpha/, 'must not resetprop RIL-owned gsm.operator.*');
-  assert.doesNotMatch(o.postFsDataScript, /vendor\\\.qemu/, 'post-fs-data must NOT wipe vendor.qemu.* before HALs start');
+  assert.doesNotMatch(o.postFsDataScript, /gsm\.operator\.alpha/, 'must not resetprop RIL-owned gsm.operator.* pre-boot');
+  assert.doesNotMatch(o.postFsDataScript, /--delete ro\.kernel\.qemu(\s|$)/, 'preserve ro.kernel.qemu pre-boot for qemu-props/rild');
+  assert.doesNotMatch(o.postFsDataScript, /--delete ro\.boot\.qemu(\s|$)/, 'preserve ro.boot.qemu pre-boot for qemu-props/rild');
+  assert.match(o.postFsDataScript, /--delete ro\.boot\.qemu\.avd_name/);
+  assert.doesNotMatch(o.postFsDataScript, /pd_vnow/, 'must not bind-mount sysfs voltage_now');
   assert.doesNotMatch(o.postFsDataScript, /\/data\/adb/, 'must not create /data/adb root artifact');
   const batt = defaultBatteryValues(identity.seed);
   assert.ok(batt.voltageMv >= 3920 && batt.voltageMv <= 4210 && batt.voltageMv !== 5000);
-  assert.match(o.postFsDataScript, new RegExp(`'${batt.voltageMv * 1000}' > /dev/pd_vnow`));
-  assert.match(o.postFsDataScript, /mount -o bind \/dev\/pd_vnow \/sys\/class\/power_supply\/battery\/voltage_now/);
 
-  // Stage 2 (boot-completed): re-asserts baseband, rewrites gralloc/vulkan/power, preserves HAL qemu/vport props,
-  // runs two-pass cleanup for late boot_completed services, sets settings & battery level/status.
+  // Stage 2 (boot-completed): re-asserts baseband, rewrites gralloc/vulkan/power, runs two-pass cleanup
+  // for qemu/ranchu/goldfish/init.svc props, aligns carrier props after rild settles, sets settings & battery level/status.
   assert.match(o.bootCompletedScript, /s 'ro\.hardware\.gralloc' 'shiba'/);
   assert.match(o.bootCompletedScript, /s 'ro\.hardware\.vulkan' 'shiba'/);
   assert.match(o.bootCompletedScript, /s 'ro\.hardware\.power' 'shiba'/);
   assert.match(o.bootCompletedScript, /s 'dalvik\.vm\.isa\.arm64\.variant' 'armv8-a'/);
   assert.match(o.bootCompletedScript, /s 'gsm\.version\.baseband' 'g5300i-240308-240517-B-11857457'/);
-  assert.doesNotMatch(o.bootCompletedScript, /gsm\.operator\.alpha/, 'must not resetprop RIL-owned gsm.operator.*');
-  assert.match(o.bootCompletedScript, /vendor\.qemu\.vport\.\*\|ro\.boot\.qemu\.virtiowifi\|ro\.boot\.qemu\.hwcodec\.\*\|ro\.boot\.qemu\.gltransport\.\*/);
   assert.match(o.bootCompletedScript, /init\\\.svc\\\.qemu-/);
-  assert.match(o.bootCompletedScript, /sleep 4\nclean_props/);
+  assert.match(o.bootCompletedScript, /sleep 4\nclean_props\ns 'gsm\.operator\.alpha' 'EE'\ns 'gsm\.operator\.numeric' '23430'/);
   assert.match(o.bootCompletedScript, /settings put global device_name 'Pixel 8'/);
   assert.match(o.bootCompletedScript, /settings put global development_settings_enabled 0/);
   assert.doesNotMatch(o.bootCompletedScript, /adb_enabled 0/, 'must not disable adb_enabled and sever PhoneDock control');

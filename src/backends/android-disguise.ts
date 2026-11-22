@@ -42,7 +42,8 @@ export const MAGISK_PIN = {
 } as const;
 
 export const GUEST_PATCH_DIR = '/data/local/tmp/pdvp';
-export const DEFAULT_CARRIER_ID = 'tmobile_us';
+/** Default carrier for disguised virtual phones (avoids the emulator's hardcoded 310260 T-Mobile default). */
+export const DEFAULT_CARRIER_ID = 'att_us';
 
 /** In-guest POSIX shell script that runs Magisk's arm64 `magiskboot` against an AVD's stock ramdisk.img. */
 export const GUEST_MAGISK_PATCH_SCRIPT = [
