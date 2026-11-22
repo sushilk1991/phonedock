@@ -16,6 +16,11 @@ import * as A from './android-common.ts';
 import * as T from './android-trace.ts';
 import * as C from './android-clipboard.ts';
 import { adbFrameStream, adbVideoStream } from './android-video.ts';
+import { DEVICE_PROFILES, deviceProfileById } from '../core/device-profiles.ts';
+import {
+  clonePersistedDisguise, disguiseDeviceMeta, parseDisguiseOption, prepareDisguiseRamdisk, resolveDisguiseCreation,
+  type PersistedDisguise, type PrepareDisguiseDeps,
+} from './android-disguise.ts';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -95,7 +100,7 @@ const ID = 'android-emulator';
 const managedHome = () => stateDir('avd');
 const userHome = () => process.env.ANDROID_AVD_HOME_USER ?? join(homedir(), '.android', 'avd');
 
-const PROFILES: HardwareProfile[] = [
+const BASE_PROFILES: HardwareProfile[] = [
   { id: 'pixel_9', name: 'Pixel 9', width: 1080, height: 2424, dpi: 420, ramMB: 4096 },
   { id: 'pixel_9_pro_xl', name: 'Pixel 9 Pro XL', width: 1344, height: 2992, dpi: 480, ramMB: 4096 },
   { id: 'pixel_8a', name: 'Pixel 8a', width: 1080, height: 2400, dpi: 420, ramMB: 4096 },
@@ -103,6 +108,51 @@ const PROFILES: HardwareProfile[] = [
   { id: 'pixel_tablet', name: 'Pixel Tablet', width: 2560, height: 1600, dpi: 320, ramMB: 4096 },
   { id: 'pixel_fold', name: 'Pixel Fold (inner)', width: 1840, height: 2208, dpi: 420, ramMB: 4096 },
 ];
+
+const PROFILES: HardwareProfile[] = [
+  ...BASE_PROFILES,
+  ...DEVICE_PROFILES
+    .filter((p) => !BASE_PROFILES.some((b) => b.id === p.id))
+    .map((p): HardwareProfile => ({ id: p.id, name: p.name, width: p.screen.width, height: p.screen.height, dpi: p.screen.dpi, ramMB: p.ramMB })),
+];
+
+export function isPersistedDisguise(v: unknown): v is PersistedDisguise {
+  if (!v || typeof v !== 'object') return false;
+  const d = v as Partial<PersistedDisguise>;
+  return d.v === 1 && typeof d.profile === 'string' && !!d.identity && typeof d.identity === 'object' && typeof d.identity.serial === 'string';
+}
+
+export function imageIdFromSysdir(sysdir: string | undefined): string | undefined {
+  if (!sysdir) return undefined;
+  const parts = sysdir.replace(/\/+$/, '').split('/').filter(Boolean);
+  if (parts.length !== 4 || parts[0] !== 'system-images') return undefined;
+  return parts.join(';');
+}
+
+/** Pick an installed arm64 image matching `sdk`, strongly preferring Google Play Store images for disguised virtual phones. */
+export function chooseDisguiseImage(sdk: number, installed: OsImage[]): string {
+  const matching = installed.filter((i) => {
+    if (!i.installed || !i.id.endsWith(';arm64-v8a')) return false;
+    const api = parseInt((i.version ?? '').split('.')[0], 10);
+    if (Number.isInteger(api) && api === sdk) return true;
+    return i.id.startsWith(`system-images;android-${sdk};`);
+  });
+  matching.sort((a, b) => {
+    const rank = (id: string) => (id.includes(';google_apis_playstore;') ? 0 : id.includes(';google_apis;') ? 1 : 2);
+    return rank(a.id) - rank(b.id) || a.id.localeCompare(b.id);
+  });
+  if (!matching.length) {
+    const suggested = `system-images;android-${sdk};google_apis_playstore;arm64-v8a`;
+    throw new PhoneDockError(
+      `No Android API ${sdk} arm64 system image is installed for this virtual phone profile`,
+      'no_image',
+      400,
+      [`Install ${suggested} first.`],
+      `Install one: POST /v1/backends/android-emulator/images/install {"image":"${suggested}"}`,
+    );
+  }
+  return matching[0].id;
+}
 
 const API_TO_ANDROID: Record<string, string> = {
   '37': '17', '36': '16', '35': '15', '34': '14', '33': '13', '32': '12L', '31': '12', '30': '11', '29': '10', '28': '9', '27': '8.1', '26': '8.0', '25': '7.1', '24': '7.0', '23': '6.0', '22': '5.1', '21': '5.0',
@@ -127,7 +177,7 @@ export function sanitizeName(n: string): string {
   return s;
 }
 
-interface AvdEntry { name: string; home: string; avdDir: string; config: Record<string, string>; managed: boolean; meta?: Record<string, unknown> }
+export interface AvdEntry { name: string; home: string; avdDir: string; config: Record<string, string>; managed: boolean; meta?: Record<string, unknown> }
 
 function scanAvds(home: string, managed: boolean): AvdEntry[] {
   if (!existsSync(home)) return [];
@@ -230,7 +280,7 @@ function sdkmanagerBin(): string | undefined {
   return undefined;
 }
 
-function toDevice(a: AvdEntry, run: Running | undefined): Device {
+export function toDevice(a: AvdEntry, run: Running | undefined): Device {
   const c = a.config;
   const api = (c.target ?? '').replace(/^android-/, '') || /android-([\w.]+)/.exec(c['image.sysdir.1'] ?? '')?.[1] || '';
   let state: DeviceState = 'stopped';
@@ -238,11 +288,13 @@ function toDevice(a: AvdEntry, run: Running | undefined): Device {
   else if (booting.has(a.name)) state = 'booting';
   const width = +c['hw.lcd.width'] || undefined, height = +c['hw.lcd.height'] || undefined;
   const spec = (a.meta?.spec as Partial<DeviceSpec> | undefined) ?? undefined;
+  const disguise = isPersistedDisguise(a.meta?.disguise) ? a.meta.disguise : undefined;
+  const disguisedModel = disguise ? deviceProfileById(disguise.profile)?.model : undefined;
   return {
     id: `${ID}:${a.name}`, backend: ID, nativeId: a.name, name: (a.meta?.displayName as string) ?? c['avd.ini.displayname'] ?? a.name,
     platform: 'android', kind: 'virtual', state, managed: a.managed,
     osVersion: api ? `Android ${API_TO_ANDROID[api.split('.')[0]] ?? '?'} (API ${api})` : undefined,
-    model: c['hw.device.name'] ?? undefined, connection: 'local',
+    model: disguisedModel ?? c['hw.device.name'] ?? undefined, connection: 'local',
     // running: the screen as it is turned now (follows rotation); otherwise the panel from the AVD config
     screen: (state === 'running' && run ? A.knownScreen(run.serial) : undefined)
       ?? (width && height ? { width, height, scale: 1, density: +c['hw.lcd.density'] || undefined, orientation: A.orientationOf(width, height) } : undefined),
@@ -252,6 +304,7 @@ function toDevice(a: AvdEntry, run: Running | undefined): Device {
       avdHome: a.home, avdDir: a.avdDir, image: c['image.sysdir.1'], tag: c['tag.id'], abi: c['abi.type'],
       ...(run ? { serial: run.serial, consolePort: +run.serial.split('-')[1] } : {}),
       ...(children.get(a.name)?.pid ? { pid: children.get(a.name)!.pid } : {}),
+      ...(disguise ? { disguise: disguiseDeviceMeta(disguise) } : {}),
     },
   };
 }
@@ -389,24 +442,33 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     const home = managedHome();
     if (existsSync(join(home, `${name}.ini`)) || existsSync(join(home, `${name}.avd`))) throw new PhoneDockError(`Emulator "${name}" already exists.`, 'exists', 409);
     if (scanAvds(userHome(), false).some((a) => a.name === name)) throw new PhoneDockError("An emulator with this name already exists", 'exists', 409, ["Choose another name."], [`An AVD named "${name}" already exists in ${userHome()}`, ...['Pick another name']].filter(Boolean).join('\n'));
-    const imageId = spec.image ?? chooseDefaultImage();
+    const disguiseOpt = parseDisguiseOption(spec.options?.disguise);
+    const prelimDisguise = disguiseOpt ? resolveDisguiseCreation(spec.options?.disguise, { specProfile: spec.profile }) : undefined;
+    const imageId = spec.image ?? (prelimDisguise ? chooseDisguiseImage(prelimDisguise.profile.sdk, installedImages()) : chooseDefaultImage());
     const img = imageDirFromId(imageId);
     if (!existsSync(img.dir)) {
       onProgress?.(`Installing system image ${imageId}…`);
       await installImage(imageId, onProgress);
     }
     const sp = readIni(join(img.dir, 'source.properties'));
+    const parsedSdk = parseInt((sp['AndroidVersion.ApiLevel'] ?? img.plat.replace(/^android-/, '')).split('.')[0], 10);
+    const imageSdk = Number.isInteger(parsedSdk) ? parsedSdk : undefined;
+    const disguise = disguiseOpt
+      ? resolveDisguiseCreation(spec.options?.disguise, { specProfile: spec.profile, imageSdk })
+      : undefined;
     const prof = PROFILES.find((p) => p.id === spec.profile || p.name === spec.profile) ?? (spec.profile ? undefined : PROFILES[0]);
-    if (spec.profile && !prof) throw new PhoneDockError('The device profile is unknown', 'bad_request', 400, ['Choose an available device profile.'], `Unknown profile "${spec.profile}". Profiles: ${PROFILES.map((p) => p.id).join(', ')}`);
-    const width = spec.width ?? prof?.width ?? 1080, height = spec.height ?? prof?.height ?? 2424, dpi = spec.dpi ?? prof?.dpi ?? 420;
-    const ramMB = spec.ramMB ?? prof?.ramMB ?? 3072;
+    if (spec.profile && !prof && !disguise) throw new PhoneDockError('The device profile is unknown', 'bad_request', 400, ['Choose an available device profile.'], `Unknown profile "${spec.profile}". Profiles: ${PROFILES.map((p) => p.id).join(', ')}`);
+    const width = spec.width ?? disguise?.profile.screen.width ?? prof?.width ?? 1080;
+    const height = spec.height ?? disguise?.profile.screen.height ?? prof?.height ?? 2424;
+    const dpi = spec.dpi ?? disguise?.profile.screen.dpi ?? prof?.dpi ?? 420;
+    const ramMB = spec.ramMB ?? disguise?.profile.ramMB ?? prof?.ramMB ?? 3072;
     const cpus = spec.cpus ?? 4;
     const tagId = sp['SystemImage.TagId'] ?? img.tag;
     const tagDisplay = sp['SystemImage.TagDisplay'] ?? img.tag;
     const target = img.plat; // android-36
     const avdDir = join(home, `${name}.avd`);
     mkdirSync(avdDir, { recursive: true });
-    onProgress?.(`Writing AVD ${name} (${width}x${height}@${dpi}, ${cpus} cpu, ${ramMB} MB) → ${avdDir}`);
+    onProgress?.(`Writing AVD ${name} (${width}x${height}@${dpi}, ${cpus} cpu, ${ramMB} MB${disguise ? `, disguise=${disguise.profile.id}` : ''}) → ${avdDir}`);
     const cfg: Record<string, string> = {
       'avd.ini.encoding': 'UTF-8', 'AvdId': name, 'avd.ini.displayname': spec.name,
       'PlayStore.enabled': /playstore/.test(tagId) ? 'true' : 'false',
@@ -416,11 +478,11 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       'hw.ramSize': String(ramMB), 'vm.heapSize': String(Math.min(576, Math.max(228, Math.round(ramMB / 12)))) + 'M',
       'hw.cpu.ncore': String(cpus), 'disk.dataPartition.size': spec.storageMB ? `${spec.storageMB}M` : '6G',
       'disk.cachePartition': 'yes', 'disk.cachePartition.size': '66MB',
-      'hw.keyboard': 'yes', 'hw.keyboard.charmap': 'qwerty2', 'hw.gpu.enabled': 'yes', 'hw.gpu.mode': String(spec.options?.gpu ?? 'auto'),
-      'hw.device.name': prof?.id ?? 'custom', 'hw.device.manufacturer': 'Google',
+      'hw.keyboard': disguise ? 'no' : 'yes', 'hw.keyboard.charmap': 'qwerty2', 'hw.gpu.enabled': 'yes', 'hw.gpu.mode': String(spec.options?.gpu ?? 'auto'),
+      'hw.device.name': disguise?.profile.model ?? prof?.id ?? 'custom', 'hw.device.manufacturer': disguise?.profile.manufacturer ?? 'Google',
       'hw.mainKeys': 'no', 'hw.dPad': 'no', 'hw.trackBall': 'no', 'hw.screen': 'multi-touch', 'hw.initialOrientation': width > height ? 'landscape' : 'portrait',
       'hw.accelerometer': 'yes', 'hw.gyroscope': 'yes', 'hw.gps': 'yes', 'hw.battery': 'yes', 'hw.audioInput': 'yes', 'hw.audioOutput': 'yes',
-      'hw.camera.back': 'emulated', 'hw.camera.front': 'none', 'hw.sdCard': 'yes', 'sdcard.size': '512M',
+      'hw.camera.back': 'emulated', 'hw.camera.front': disguise ? 'emulated' : 'none', 'hw.sdCard': 'yes', 'sdcard.size': '512M',
       'hw.sensors.proximity': 'yes', 'hw.sensors.light': 'yes', 'hw.sensors.orientation': 'yes', 'hw.sensors.magnetic_field': 'yes', 'hw.sensors.pressure': 'yes',
       'hw.lcd.backlight': 'yes', 'hw.arc': 'false', 'hw.useext4': 'yes', 'userdata.useQcow2': 'no',
       'fastboot.forceColdBoot': 'no', 'fastboot.forceFastBoot': 'yes', 'fastboot.forceChosenSnapshotBoot': 'no',
@@ -430,7 +492,12 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     };
     writeIni(join(avdDir, 'config.ini'), cfg);
     writeIni(join(home, `${name}.ini`), { 'avd.ini.encoding': 'UTF-8', path: avdDir, target });
-    writeFileSync(join(avdDir, 'phonedock.json'), JSON.stringify({ displayName: spec.name, spec: { ...spec, image: imageId, width, height, dpi, ramMB, cpus }, createdAt: new Date().toISOString() }, null, 2));
+    writeFileSync(join(avdDir, 'phonedock.json'), JSON.stringify({
+      displayName: spec.name,
+      spec: { ...spec, image: imageId, width, height, dpi, ramMB, cpus },
+      ...(disguise ? { disguise: disguise.persisted } : {}),
+      createdAt: new Date().toISOString(),
+    }, null, 2));
     onProgress?.('AVD created');
     return toDevice(requireAvd(name), undefined);
   },
@@ -443,6 +510,12 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     booting.set(name, Date.now());
     let port = 0;
     try {
+      const disguiseBoot = await resolveDisguiseBoot(a, {
+        adbBin: A.adbPath(),
+        sdkRootDir: A.sdkRoot(),
+        onProgress: p,
+        withBootstrapSerial: (fn) => runTransientBootstrap(a, p, fn),
+      });
       port = await pickPort(); reservedPorts.add(port);
       const headless = opts.window ? false : opts.headless ?? true;
       const args = ['-avd', name, '-port', String(port), '-no-audio', '-no-boot-anim'];
@@ -450,7 +523,8 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       // Headless defaults to SwiftShader (software GL) which makes screencap/streaming CPU-bound.
       // Host GPU (Metal via gfxstream) works headless on Apple Silicon; override with PHONEDOCK_EMULATOR_GPU.
       args.push('-gpu', process.env.PHONEDOCK_EMULATOR_GPU ?? 'host');
-      if (opts.coldBoot) args.push('-no-snapshot-load');
+      if (opts.coldBoot || disguiseBoot?.forceColdBoot) args.push('-no-snapshot-load');
+      if (disguiseBoot?.ramdiskPath) args.push('-ramdisk', disguiseBoot.ramdiskPath);
       // Vulkan: an app that uses it (Chrome does) makes the emulator refuse to save a snapshot (UNSUPPORTED_VK_APP).
       // Without it Chrome renders through OpenGL ES and snapshots save fine (measured; screenshots as fast).
       if (!vulkanEnabled(a)) args.push('-feature', '-Vulkan');
@@ -472,6 +546,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       const t0 = Date.now();
       // wait for adb to see it, then for boot_completed
       await A.waitBootCompleted(serial, 240_000, () => exited);
+      disguiseBoot?.commit();
       p?.(`boot completed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       await A.adb(serial, ['shell', 'input', 'keyevent', '82'], { allowFail: true });
       await A.adb(serial, ['shell', 'wm', 'dismiss-keyguard'], { allowFail: true });
@@ -528,7 +603,15 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     writeIni(join(home, `${nn}.ini`), { 'avd.ini.encoding': 'UTF-8', path: dst, target: srcIni.target ?? cfg.target ?? '' });
     let meta: Record<string, unknown> = {};
     try { meta = JSON.parse(readFileSync(join(dst, 'phonedock.json'), 'utf8')); } catch { /* */ }
-    writeFileSync(join(dst, 'phonedock.json'), JSON.stringify({ ...meta, displayName: newName, clonedFrom: name, spec: { ...(meta.spec as object ?? {}), name: newName }, createdAt: new Date().toISOString() }, null, 2));
+    const nextDisguise = isPersistedDisguise(meta.disguise) ? clonePersistedDisguise(meta.disguise) : undefined;
+    writeFileSync(join(dst, 'phonedock.json'), JSON.stringify({
+      ...meta,
+      displayName: newName,
+      clonedFrom: name,
+      spec: { ...(meta.spec as object ?? {}), name: newName },
+      ...(nextDisguise ? { disguise: nextDisguise } : {}),
+      createdAt: new Date().toISOString(),
+    }, null, 2));
     return toDevice(requireAvd(nn), undefined);
   },
 
@@ -655,10 +738,117 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   async info(name) {
     const a = requireAvd(name);
     const s = await serialFor(name);
-    return { avd: name, avdDir: a.avdDir, managed: a.managed, config: a.config, ...(s ? await A.info(s) : { running: false }) };
+    const disguise = isPersistedDisguise(a.meta?.disguise) ? disguiseDeviceMeta(a.meta.disguise) : undefined;
+    return {
+      avd: name, avdDir: a.avdDir, managed: a.managed, config: a.config,
+      ...(disguise ? { disguise } : {}),
+      ...(s ? await A.info(s) : { running: false }),
+    };
   },
   runningSerial: serialFor,
 };
+
+export interface DisguiseBootResult {
+  ramdiskPath: string;
+  forceColdBoot: boolean;
+  overlaySha256: string;
+  baseCached: boolean;
+  ramdiskCached: boolean;
+  /** Persist `overlaySha256` to `phonedock.json` once the disguised boot completes cleanly. */
+  commit: () => void;
+}
+
+/**
+ * Prepare the disguised ramdisk for an AVD before spawning `emulator`.
+ * Returns `undefined` for non-disguised or unmanaged AVDs. Requests `forceColdBoot` whenever the
+ * overlay changed (first boot, clone, or updated overlay scripts) so stale quick-boot snapshots
+ * never resurrect old props; callers invoke `commit()` after boot completes so a failed boot
+ * always retries cold.
+ */
+export async function resolveDisguiseBoot(
+  a: Pick<AvdEntry, 'name' | 'avdDir' | 'config' | 'managed' | 'meta'>,
+  deps: PrepareDisguiseDeps & { sdkRootDir: string },
+): Promise<DisguiseBootResult | undefined> {
+  if (!a.managed || !isPersistedDisguise(a.meta?.disguise)) return undefined;
+  const disguise = a.meta.disguise;
+  const imageId = (a.meta.spec as Partial<DeviceSpec> | undefined)?.image ?? imageIdFromSysdir(a.config['image.sysdir.1']);
+  if (!imageId) {
+    throw new PhoneDockError(`Cannot determine Android system image for disguised AVD "${a.name}"`, 'bad_request', 400);
+  }
+  const parts = imageId.split(';');
+  if (parts.length !== 4 || parts[0] !== 'system-images') {
+    throw new PhoneDockError(`Invalid system image "${imageId}" on disguised AVD "${a.name}"`, 'bad_request', 400);
+  }
+  const stockRamdiskPath = join(deps.sdkRootDir, 'system-images', parts[1], parts[2], parts[3], 'ramdisk.img');
+  const prepared = await prepareDisguiseRamdisk(
+    { imageId, stockRamdiskPath, disguise },
+    deps,
+  );
+  const forceColdBoot = disguise.overlaySha256 !== prepared.overlaySha256;
+  const commit = () => {
+    if (!forceColdBoot) return;
+    const metaFile = join(a.avdDir, 'phonedock.json');
+    let meta: Record<string, unknown> = a.meta ? { ...a.meta } : {};
+    try { meta = JSON.parse(readFileSync(metaFile, 'utf8')); } catch { /* keep in-memory meta */ }
+    const updated: PersistedDisguise = { ...disguise, overlaySha256: prepared.overlaySha256 };
+    writeFileSync(metaFile, JSON.stringify({ ...meta, disguise: updated }, null, 2));
+  };
+  return {
+    ramdiskPath: prepared.ramdiskPath,
+    forceColdBoot,
+    overlaySha256: prepared.overlaySha256,
+    baseCached: prepared.baseCached,
+    ramdiskCached: prepared.ramdiskCached,
+    commit,
+  };
+}
+
+/**
+ * Boot a transient read-only stock emulator solely to run in-guest `magiskboot` once per system image.
+ * Always shuts down the transient emulator and releases locks/port before returning so the real
+ * disguised boot starts clean on unmodified AVD userdata.
+ */
+async function runTransientBootstrap(
+  a: AvdEntry,
+  onProgress: ((l: string) => void) | undefined,
+  fn: (serial: string) => Promise<void>,
+): Promise<void> {
+  const bootPort = await pickPort();
+  reservedPorts.add(bootPort);
+  const serial = `emulator-${bootPort}`;
+  const args = [
+    '-avd', a.name, '-port', String(bootPort),
+    '-no-audio', '-no-boot-anim', '-no-window',
+    '-gpu', process.env.PHONEDOCK_EMULATOR_GPU ?? 'host',
+    '-no-snapshot', '-read-only',
+  ];
+  if (!vulkanEnabled(a)) args.push('-feature', '-Vulkan');
+  const logFile = join(stateDir('logs'), `emulator-${a.name}-bootstrap.log`);
+  const fd = openSync(logFile, 'a');
+  onProgress?.(`Booting transient stock emulator on ${serial} to patch base ramdisk (cached once per image)…`);
+  const child = spawn(emulatorBin(), args, {
+    detached: true, stdio: ['ignore', fd, fd],
+    env: { ...toolEnv(), ANDROID_AVD_HOME: a.home },
+  });
+  closeSync(fd);
+  child.unref();
+  let exited: string | undefined;
+  child.on('exit', (code, sig) => { exited = `bootstrap emulator exited (${code ?? sig}) – see ${logFile}: ${tail(logFile)}`; });
+  try {
+    await A.waitBootCompleted(serial, 240_000, () => exited);
+    await fn(serial);
+  } finally {
+    await A.adb(serial, ['emu', 'kill'], { allowFail: true, timeoutMs: 10_000 }).catch(() => undefined);
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (!(await A.adbDevices().catch(() => [])).some((d) => d.serial === serial)) break;
+      await sleep(500);
+    }
+    for (let i = 0; i < 40 && readdirSync(a.avdDir).some((f) => f.endsWith('.lock')); i++) await sleep(250);
+    serialCache.delete(serial);
+    reservedPorts.delete(bootPort);
+  }
+}
 
 
 /** Should this AVD boot with Vulkan? Only AVDs PhoneDock created are touched. The choice is made once per AVD and

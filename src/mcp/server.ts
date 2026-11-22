@@ -468,10 +468,23 @@ export function createMcpServer(ctx: McpContext): McpServer {
     dpi: z.number().int().positive().optional().describe('Screen density (Android emulator)'),
     boot: z.boolean().optional().describe('Boot after creation (default false)'),
     auto_start: z.boolean().optional().describe('Boot automatically whenever the PhoneDock daemon starts'),
+    disguise: z.union([z.boolean(), z.string()]).optional().describe('Android emulator only: present as a real phone. Pass true for default (pixel_8) or a profile id (pixel_8, pixel_8a, pixel_7a, galaxy_s23, galaxy_s24, oneplus_12).'),
+    carrier: z.string().optional().describe('Android emulator disguise carrier id (e.g. tmobile_us, att_us, verizon_us, ee_uk, vodafone_uk, jio_in, airtel_in, telekom_de)'),
+    seed: z.string().optional().describe('Android emulator disguise hex seed for deterministic IMEI/serial/MAC/Android ID/SIM generation'),
     wait_seconds: z.number().int().min(0).max(600).optional().describe('Wait up to this long for creation (+boot) to finish (default 120)'),
   }, async (a) => {
+    let options: Record<string, unknown> | undefined;
+    if (a.disguise !== undefined || a.carrier !== undefined || a.seed !== undefined) {
+      if (a.disguise !== false) {
+        const d: Record<string, unknown> = { enabled: true };
+        if (typeof a.disguise === 'string') d.profile = a.disguise;
+        if (a.carrier !== undefined) d.carrier = a.carrier;
+        if (a.seed !== undefined) d.seed = a.seed;
+        options = { disguise: d };
+      }
+    }
     const spec = { backend: a.backend, name: a.name, image: a.image, profile: a.profile, cpus: a.cpus, ramMB: a.ram_mb, storageMB: a.storage_mb,
-      width: a.width, height: a.height, dpi: a.dpi, boot: a.boot, autoStart: a.auto_start };
+      width: a.width, height: a.height, dpi: a.dpi, boot: a.boot, autoStart: a.auto_start, ...(options ? { options } : {}) };
     const r = await c.createDeviceAsync(spec);
     const j = await waitJobUpTo(c, r.job, a.wait_seconds ?? 120);
     ctx.deviceCache = undefined;

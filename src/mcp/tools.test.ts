@@ -227,3 +227,32 @@ test('settle_ms without return_screenshot still waits', async () => {
     assert.ok(Date.now() - t0 < 250, 'no settle_ms, no wait');
   } finally { await s.close(); }
 });
+
+test('create_device forwards optional disguise, carrier and seed into spec.options.disguise', async () => {
+  const seen: unknown[] = [];
+  const createdDevice = {
+    id: 'android-emulator:pdtest-vp', backend: 'android-emulator', nativeId: 'pdtest-vp', name: 'pdtest-vp',
+    platform: 'android', kind: 'virtual', state: 'stopped', managed: true, capabilities: [],
+  } as unknown as Device;
+  const fake: Fake = {
+    calls: [],
+    createDeviceAsync: async (spec: unknown) => {
+      seen.push(spec);
+      return { job: { id: 'job_1', kind: 'create', state: 'done', progress: [], result: createdDevice, startedAt: '' } };
+    },
+  };
+  const s = await connect(fake);
+  try {
+    const r1 = await s.call('create_device', {
+      backend: 'android-emulator', name: 'pdtest-vp', disguise: 'pixel_8', carrier: 'ee_uk', seed: 'abcdef01',
+    });
+    assert.equal(r1.isError, false, r1.text);
+    assert.deepEqual((seen[0] as Record<string, unknown>).options, {
+      disguise: { enabled: true, profile: 'pixel_8', carrier: 'ee_uk', seed: 'abcdef01' },
+    });
+
+    const r2 = await s.call('create_device', { backend: 'android-emulator', name: 'pdtest-plain' });
+    assert.equal(r2.isError, false, r2.text);
+    assert.equal((seen[1] as Record<string, unknown>).options, undefined);
+  } finally { await s.close(); }
+});

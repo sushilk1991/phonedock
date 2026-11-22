@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PhoneDockApiError } from '../sdk/client.ts';
 import type { Device } from '../sdk/client.ts';
-import { cliDetail, cliHints, devicesTable, humanCell, leaseCell } from './main.ts';
+import { cliDetail, cliHints, devicesTable, humanCell, leaseCell, parseSpec } from './main.ts';
+import { parseArgs } from './args.ts';
 
 const base = { id: 'android-emulator:pdtest-a', name: 'pdtest-a', backend: 'android-emulator', platform: 'android', kind: 'emulator', state: 'running', managed: true } as unknown as Device;
 const ID = 'android-emulator:pdtest-a';
@@ -39,4 +40,29 @@ test('lease_conflict hints: never raw routes; a person → handoff request; an a
   assert.ok(rm.includes('To delete it anyway: phonedock rm android-emulator:pdtest-a --force'), String(rm));
   assert.ok(!rm.some((h) => h.includes('phonedock lease')), String(rm));
   assert.doesNotMatch(cliDetail(conflict('cli:other', []).detail) ?? '', /\/v1\//);
+});
+
+test('parseSpec: --disguise, --carrier and --seed populate spec.options.disguise additively', () => {
+  const plain = parseSpec(parseArgs(['create', '--backend', 'android-emulator', '--name', 'pdtest-plain']));
+  assert.equal(plain.options, undefined);
+
+  const bare = parseSpec(parseArgs(['create', '--backend', 'android-emulator', '--name', 'pdtest-d1', '--disguise']));
+  assert.deepEqual(bare.options, { disguise: { enabled: true } });
+
+  const full = parseSpec(parseArgs([
+    'create', '--backend', 'android-emulator', '--name', 'pdtest-d2',
+    '--options', '{"gpu":"host"}', '--disguise', 'galaxy_s24', '--carrier', 'ee_uk', '--seed', 'deadbeef',
+  ]));
+  assert.deepEqual(full.options, {
+    gpu: 'host',
+    disguise: { enabled: true, profile: 'galaxy_s24', carrier: 'ee_uk', seed: 'deadbeef' },
+  });
+
+  const off = parseSpec(parseArgs(['create', '--backend', 'android-emulator', '--name', 'pdtest-off', '--no-disguise']));
+  assert.equal(off.options, undefined);
+
+  assert.throws(
+    () => parseSpec(parseArgs(['create', '--backend', 'android-emulator', '--name', 'pdtest-bad', '--no-disguise', '--carrier', 'ee_uk'])),
+    /require --disguise/,
+  );
 });

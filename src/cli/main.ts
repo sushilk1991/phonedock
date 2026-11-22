@@ -28,7 +28,8 @@ Daemon:     daemon start|stop|status|logs|install-agent [--load]|uninstall-agent
 Catalog:    backends | images [backend] | images install <backend> <image> | profiles <backend>
 Devices:    devices|ls [--backend B --platform P --state S]
             create --backend B --name N [--image I --profile P --cpus N --ram MB --storage MB
-                   --width W --height H --dpi D --boot --auto-start --no-wait]
+                   --width W --height H --dpi D --disguise [PROFILE] --carrier C --seed HEX
+                   --boot --auto-start --no-wait]
             boot <id> [--window] [--cold] [--no-wait] | shutdown <id> | rm <id> [--force]
             clone <id> <name> | window <id> | update <id> [--name N] [--auto-start true|false]
             snapshot ls|save|restore|rm <id> [name] | info <id>
@@ -246,7 +247,7 @@ async function daemonCmd(c: PhoneDockClient, a: ParsedArgs): Promise<number> {
   }
 }
 
-function parseSpec(a: ParsedArgs): DeviceSpec & { boot?: boolean } {
+export function parseSpec(a: ParsedArgs): DeviceSpec & { boot?: boolean } {
   const f = a.flags;
   const backend = str(f, 'backend'); const name = str(f, 'name') ?? a.positionals[1];
   if (!backend) usage('create needs --backend (see `phonedock backends`)');
@@ -259,6 +260,20 @@ function parseSpec(a: ParsedArgs): DeviceSpec & { boot?: boolean } {
   s('network', str(f, 'network')); s('autoStart', bool(f, 'autoStart')); s('headless', bool(f, 'headless'));
   s('boot', bool(f, 'boot'));
   const opts = str(f, 'options'); if (opts) { try { spec.options = JSON.parse(opts); } catch { usage('--options must be JSON'); } }
+  const disguiseFlag = f.disguise;
+  const carrierFlag = str(f, 'carrier');
+  const seedFlag = str(f, 'seed');
+  if (disguiseFlag !== undefined || carrierFlag !== undefined || seedFlag !== undefined) {
+    if (disguiseFlag === false) {
+      if (carrierFlag !== undefined || seedFlag !== undefined) usage('--carrier and --seed require --disguise');
+    } else {
+      const d: Record<string, unknown> = { enabled: true };
+      if (typeof disguiseFlag === 'string') d.profile = disguiseFlag;
+      if (carrierFlag !== undefined) d.carrier = carrierFlag;
+      if (seedFlag !== undefined) d.seed = seedFlag;
+      spec.options = { ...(spec.options ?? {}), disguise: d };
+    }
+  }
   return spec;
 }
 
