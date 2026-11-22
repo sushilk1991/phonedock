@@ -108,16 +108,17 @@ struct StageTopBar: View {
     private var handingBack: Bool { leaseRequest == "back" || model.pending[device.id] == "Handing back…" }
 
     var body: some View {
+        let otherNeedsYou = [.empty, .agent, .you].contains(mode) ? elsewhere : nil
         VStack(spacing: Theme.Space.xs) {
-            if [.empty, .agent, .you].contains(mode), let e = elsewhere {
-                ElsewhereRequestPill(handoff: e.handoff, device: e.device, more: e.more)
+            if let e = otherNeedsYou {
+                NeedsYouBanner(handoff: e.handoff, device: e.device, more: e.more, style: .compact)
                     .transition(.opacity)
             }
             switch mode {
             case .empty:
                 EmptyView()
             case .agent:
-                agentCapsule.transition(.opacity)
+                agentCapsule(demoted: otherNeedsYou != nil).transition(.opacity)
             case .you:
                 youCapsule.transition(.opacity)
             case .handoff:
@@ -143,8 +144,17 @@ struct StageTopBar: View {
 
     // MARK: Lease capsules
 
-    private var agentCapsule: some View {
+    /// When another device has a blocking handoff request (`demoted == true`), Take Over steps back to a secondary
+    /// bordered button so the urgent orange Show button above it is the sole prominent CTA.
+    private func agentCapsule(demoted: Bool) -> some View {
         let name = device.controllerName ?? "An agent"
+        let takeOverButton = Button { takeOver() } label: {
+            HStack(spacing: Theme.Space.xs) {
+                if takingOver { ProgressView().controlSize(.mini).environment(\.colorScheme, .dark) }
+                Text(takingOver ? "Taking Over…" : "Take Over")
+            }
+            .padding(.horizontal, Theme.Space.xxs)
+        }
         return HStack(spacing: Theme.Space.m) {
             Image(systemName: "sparkles")
                 .font(.system(size: 13, weight: .semibold))
@@ -155,16 +165,14 @@ struct StageTopBar: View {
                 .foregroundStyle(Theme.Ink.primary)
                 .lineLimit(1)
                 .testAnchor("Controlled by agent")
-            Button { takeOver() } label: {
-                HStack(spacing: Theme.Space.xs) {
-                    if takingOver { ProgressView().controlSize(.mini).environment(\.colorScheme, .dark) }
-                    Text(takingOver ? "Taking Over…" : "Take Over")
+            Group {
+                if demoted {
+                    takeOverButton.buttonStyle(.bordered)
+                } else {
+                    takeOverButton.buttonStyle(.borderedProminent).tint(Theme.Status.agentStrong)
                 }
-                .padding(.horizontal, Theme.Space.xxs)
             }
-            .buttonStyle(.borderedProminent)
             .buttonBorderShape(.capsule)
-            .tint(Theme.Status.agentStrong)
             .controlSize(.large)   // the time-sensitive action: a full 24 pt target, not a 16 pt chip
             .fixedSize()
             .disabled(leaseRequest != nil || takingOver)
@@ -343,6 +351,7 @@ private struct HandoffCard: View {
         Group {
             if stacked {
                 ViewThatFits(in: .horizontal) {
+                    stackedRows(.full)
                     stackedRows(.medium)
                     stackedRows(.compact)
                 }
@@ -350,7 +359,7 @@ private struct HandoffCard: View {
                 ViewThatFits(in: .horizontal) {
                     row(.full)
                     row(.medium)
-                    row(.compact)
+                    stackedRows(.medium)
                 }
             }
         }
@@ -370,31 +379,33 @@ private struct HandoffCard: View {
     private func row(_ density: Density) -> some View {
         HStack(spacing: Theme.Space.m) {
             tile
-            // Who and when on top (eyebrow), the reason on its own line so it gets the full width.
-            VStack(alignment: .leading, spacing: 1) {
+            // Who and when on top (eyebrow), the reason on its own line so it gets the full width and never truncates.
+            VStack(alignment: .leading, spacing: 2) {
                 eyebrow
-                reason(lines: 2)
+                reasonText
             }
-            // The ideal width is what ViewThatFits measures: the reason keeps at least this much room (it truncates
-            // past it, with the full text in the tooltip). The stage is stacked well before it would get less.
-            .frame(minWidth: 90, idealWidth: density == .full ? 240 : density == .medium ? 170 : 120,
+            .frame(minWidth: 160, idealWidth: density == .full ? 280 : 210,
                    maxWidth: .infinity, alignment: .leading)
             countdown.fixedSize()
             buttons(density).fixedSize()
         }
     }
 
-    /// Two rows: tile, who/why and time left; then the answers, trailing. The reason may wrap to a second line.
+    /// Two rows: tile, eyebrow + countdown on the top line, full-width untruncated instruction beneath; then the
+    /// answers trailing on their own row.
     private func stackedRows(_ density: Density) -> some View {
         VStack(alignment: .trailing, spacing: Theme.Space.s) {
             HStack(alignment: .top, spacing: Theme.Space.m) {
                 tile
-                VStack(alignment: .leading, spacing: 1) {
-                    eyebrow
-                    reason(lines: 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
+                        eyebrow
+                        Spacer(minLength: Theme.Space.s)
+                        countdown.fixedSize()
+                    }
+                    reasonText
                 }
-                .frame(minWidth: 90, idealWidth: 120, maxWidth: .infinity, alignment: .leading)
-                countdown.fixedSize()
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             buttons(density).fixedSize()
         }
@@ -421,14 +432,12 @@ private struct HandoffCard: View {
         }
     }
 
-    private func reason(lines: Int) -> some View {
+    /// Instructions the person must act on (2FA, sign-in, permissions) wrap cleanly and never truncate.
+    private var reasonText: some View {
         Text(handoff.reason)
             .font(Theme.Fonts.headline)
             .foregroundStyle(Theme.Ink.primary)
-            .lineLimit(lines)
-            .truncationMode(.tail)
             .fixedSize(horizontal: false, vertical: true)
-            .help(handoff.reason)
     }
 
     private func meta(now: Date) -> String {
@@ -795,28 +804,33 @@ struct RowBadge: View {
     }
 }
 
-// MARK: - Help request banner (any device)
+// MARK: - Unified "needs you" banner (other device)
 
-/// A help request on a device you aren't looking at must not hide in the sidebar: this banner sits at the top of the
-/// detail area on every other device, names the phone and the agent, and Show takes you there. (The Dock icon carries
-/// the count too.)
-/// "✋ Claude Code needs you on Pixel 9 · Show ›": a help request on another device, as one line in the stage's top
-/// slot. The whole pill is the Show button; the reason is in its tooltip and the other device's card.
-struct ElsewhereRequestPill: View {
+/// One "needs you" banner component shared by both places where another device has a pending handoff:
+/// - `.compact`: sits inside `StageTopBar` above the current device's lease capsule (single row so it fits inside
+///   `Theme.Stage.topSlot` without moving the phone screen).
+/// - `.expanded`: sits at the top of the empty detail pane when no device is selected (adds the reason line).
+/// Both share the exact orange `hand.raised.fill` badge tile, `handoffTint` surface, `handoffText` headline, and
+/// prominent `handoffStrong` Show button used by `HandoffCard`.
+struct NeedsYouBanner: View {
+    enum Style { case compact, expanded }
+
     @Environment(AppModel.self) private var model
     let handoff: Handoff
     let device: Device
     var more = 0
+    let style: Style
 
     var body: some View {
-        Button { model.selection = device.id } label: {
-            HStack(spacing: Theme.Space.s) {
-                Image(systemName: "hand.raised.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.Status.handoffText)
-                    .accessibilityHidden(true)
-                // The whole sentence when it fits; in a narrow stage the device name goes (the tooltip keeps it)
-                // rather than a cut through the middle of the sentence.
+        HStack(spacing: style == .compact ? Theme.Space.s : Theme.Space.m) {
+            Image(systemName: "hand.raised.fill")
+                .font(.system(size: style == .compact ? 11 : 12, weight: .semibold))
+                .foregroundStyle(Theme.Ink.onFill)
+                .frame(width: style == .compact ? 20 : 24, height: style == .compact ? 20 : 24)
+                .background(Theme.Status.handoffStrong, in: RoundedRectangle(cornerRadius: style == .compact ? 5 : 6, style: .continuous))
+                .accessibilityHidden(true)
+
+            if style == .compact {
                 ViewThatFits(in: .horizontal) {
                     Text("\(handoff.requesterName) needs you on \(DisplayText.unbroken(device.name))" + (more > 0 ? " and \(more) more" : ""))
                         .fixedSize()
@@ -826,28 +840,43 @@ struct ElsewhereRequestPill: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .font(Theme.Fonts.callout.weight(.medium))
-                .foregroundStyle(Theme.Ink.primary)
-                HStack(spacing: 2) {
-                    Text("Show")
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                }
                 .font(Theme.Fonts.callout.weight(.semibold))
                 .foregroundStyle(Theme.Status.handoffText)
-                .fixedSize()
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(handoff.requesterName) needs you on \(device.name)" + (more > 0 ? " (and \(more) more)" : ""))
+                        .font(Theme.Fonts.callout.weight(.semibold))
+                        .foregroundStyle(Theme.Status.handoffText)
+                        .lineLimit(1)
+                    Text(handoff.reason)
+                        .font(Theme.Fonts.callout)
+                        .foregroundStyle(Theme.Ink.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: Theme.Space.m)
             }
-            .padding(.horizontal, Theme.Space.m)
-            .frame(minHeight: 24)
-            .background(Theme.Status.handoffTint, in: Capsule())
-            .background(Theme.Surface.card, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.Status.handoff.opacity(0.35), lineWidth: 1))
-            .contentShape(Capsule())
+
+            Button { model.selection = device.id } label: {
+                Text("Show")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.Status.handoffStrong)
+            .controlSize(style == .compact ? .small : .large)
+            .fixedSize()
+            .accessibilityHint("Shows \(device.name)")
+            .testAnchor("Show Help Request")
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, style == .compact ? Theme.Space.s : Theme.Space.m)
+        .padding(.vertical, style == .compact ? Theme.Space.xs : Theme.Space.s)
+        .frame(maxWidth: style == .compact ? nil : 640)
+        .background(Theme.Status.handoffTint, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .background(Theme.Surface.card, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+            .strokeBorder(Theme.Status.handoff.opacity(style == .compact ? 0.35 : 0.25), lineWidth: 1))
+        .shadow(color: style == .compact ? Theme.Elevation.card : Theme.Elevation.float, radius: style == .compact ? 2 : 10, x: 0, y: style == .compact ? 1 : 3)
         .help("\(handoff.requesterName) needs you on \(device.name): \(handoff.reason)")
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(handoff.requesterName) needs you on \(device.name): \(handoff.reason)")
-        .accessibilityHint("Shows \(device.name)")
-        .testAnchor("Show Help Request")
     }
 }
 
@@ -866,40 +895,11 @@ struct HelpRequestBanner: View {
     var body: some View {
         ZStack {
             if let h = elsewhere.first, let d = model.devices.first(where: { $0.id == h.deviceId }) {
-                let extra = elsewhere.count - 1
-                HStack(spacing: Theme.Space.m) {
-                    Image(systemName: "hand.raised.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.Ink.onFill)
-                        .frame(width: 24, height: 24)
-                        .background(Theme.Status.handoffStrong, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text("\(h.requesterName) needs you on \(d.name)" + (extra > 0 ? " (and \(extra) more)" : ""))
-                            .font(Theme.Fonts.callout.weight(.semibold))
-                            .foregroundStyle(Theme.Status.handoffText)
-                            .lineLimit(1)
-                        Text(h.reason).font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.primary).lineLimit(1).truncationMode(.tail)
-                    }
-                    Spacer(minLength: Theme.Space.m)
-                    Button("Show") { model.selection = d.id }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.Status.handoffStrong)
-                        .controlSize(.large)
-                        .testAnchor("Show Help Request")
-                }
-                .padding(.horizontal, Theme.Space.m)
-                .padding(.vertical, Theme.Space.s)
-                .frame(maxWidth: 640)
-                .background(Theme.Status.handoffTint, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
-                .background(Theme.Surface.card, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.Line.card, lineWidth: 1))
-                .shadow(color: Theme.Elevation.float, radius: 10, x: 0, y: 3)
-                .padding(.horizontal, Theme.Space.xl)
-                .padding(.vertical, Theme.Space.m)
-                .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
-                .accessibilityElement(children: .contain)
-                .testAnchor("Help request banner")
+                NeedsYouBanner(handoff: h, device: d, more: elsewhere.count - 1, style: .expanded)
+                    .padding(.horizontal, Theme.Space.xl)
+                    .padding(.vertical, Theme.Space.m)
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                    .testAnchor("Help request banner")
             }
         }
         .animation(Theme.Motion.decorative(Theme.Motion.standard, reduceMotion: reduceMotion), value: elsewhere.first?.id)

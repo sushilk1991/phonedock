@@ -163,15 +163,15 @@ enum Theme {
     /// The device stage reserves fixed slots above and below the frame for the floating bars, so showing or hiding
     /// them never moves or rescales the screen.
     enum Stage {
-        /// StageTopBar: who's in control / needs you. Tall enough for an elsewhere help pill above a control capsule
+        /// StageTopBar: who's in control / needs you. Tall enough for an elsewhere help banner above a control capsule
         /// or a one-row handoff card whose reason wraps to a second line, with breathing room below the toolbar.
-        static let topSlot: CGFloat = 84
+        static let topSlot: CGFloat = 88
         static let bottomSlot: CGFloat = 56   // floating hardware bar
-        /// Below this stage width the handoff card can't keep its words on one row, so it stacks (reason, then the
-        /// answers on their own row) and the top slot is reserved taller. The choice depends only on the stage width,
-        /// never on what the bar shows, so the screen still never moves when a card appears.
-        static let stackBelowWidth: CGFloat = 660
-        static let topSlotStacked: CGFloat = 120
+        /// Below this stage width the handoff card stacks (full-width instruction, then answers on their own row)
+        /// so the instruction never truncates. The choice depends only on the stage width, never on what the bar shows,
+        /// so the screen never moves when a card appears.
+        static let stackBelowWidth: CGFloat = 760
+        static let topSlotStacked: CGFloat = 128
         static func topSlot(stageWidth: CGFloat) -> CGFloat { stageWidth < stackBelowWidth ? topSlotStacked : topSlot }
     }
 
