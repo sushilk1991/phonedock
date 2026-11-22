@@ -110,9 +110,16 @@ strong { font-weight: 650; }
 .key-primary { --lamp: rgb(255 255 255 / 0.45); --lamp-ring: rgb(255 255 255 / 0.35); background: var(--accent); border-color: transparent; color: #fff; }
 .key-primary:hover { background: color-mix(in oklab, var(--accent) 88%, #fff); border-color: transparent; }
 .key-primary:hover .lamp, .key-primary:focus-visible .lamp { --lamp: #fff; --lamp-ring: #fff; }
+.key-icon { flex: none; opacity: 0.92; }
+.key-primary .key-icon { opacity: 1; }
 .key:disabled { opacity: 0.45; cursor: default; transform: none; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .actions-center { justify-content: center; }
+
+/* Keep anchored sections clear of the 64px fixed top bar. */
+html { scroll-padding-top: 84px; }
+[id] { scroll-margin-top: 84px; }
+#top { scroll-margin-top: 0; }
 
 /* ---------- Nav ---------- */
 .nav {
@@ -121,7 +128,13 @@ strong { font-weight: 650; }
   transition: background-color 0.3s var(--ease-out), border-color 0.3s var(--ease-out);
   border-bottom: 1px solid transparent;
 }
-.nav.is-scrolled { background: color-mix(in oklab, var(--ground) 90%, transparent); border-bottom-color: var(--line); -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2); }
+.nav.is-scrolled, .nav.is-menu-open {
+  background: color-mix(in oklab, var(--ground) 98%, transparent);
+  border-bottom-color: var(--line);
+  -webkit-backdrop-filter: blur(20px) saturate(1.25);
+  backdrop-filter: blur(20px) saturate(1.25);
+}
+.nav.is-menu-open { color-scheme: dark light; }
 .nav-inner {
   max-width: var(--wrap); height: 100%; margin: 0 auto; padding-inline: var(--gutter);
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; column-gap: 16px;
@@ -132,21 +145,39 @@ strong { font-weight: 650; }
 .nav-links a { display: block; padding: 8px 11px; border-radius: 8px; color: var(--ink-2); text-decoration: none; font-size: 0.9375rem; font-weight: 520; white-space: nowrap; }
 .nav-links a:hover { color: var(--ink); background: var(--line); }
 .nav-end { justify-self: end; display: flex; align-items: center; gap: 8px; }
-.theme-toggle, .nav-gh {
+.theme-toggle, .nav-gh, .nav-menu {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 12px;
   border: 1px solid var(--line-2); border-radius: 9px; background: transparent; color: var(--ink);
   font: 560 0.875rem/1 var(--f-sans); text-decoration: none; cursor: pointer;
 }
-.theme-toggle { width: 36px; padding: 0; }
-.theme-toggle:hover, .nav-gh:hover { border-color: var(--ink-2); text-decoration: none; }
+.theme-toggle, .nav-menu { width: 36px; padding: 0; }
+.nav-menu { display: none; }
+.nav-menu .i-close { display: none; }
+.nav.is-menu-open .nav-menu .i-menu { display: none; }
+.nav.is-menu-open .nav-menu .i-close { display: block; }
+.theme-toggle:hover, .nav-gh:hover, .nav-menu:hover { border-color: var(--ink-2); text-decoration: none; }
 .theme-toggle .i-moon, :root[data-resolved="light"] .theme-toggle .i-sun { display: none; }
 :root[data-resolved="light"] .theme-toggle .i-moon { display: block; }
-:root:not(.js) .theme-toggle { display: none; }
+:root:not(.js) .theme-toggle, :root:not(.js) .nav-menu { display: none; }
+.nav-drawer {
+  background: var(--ground);
+  border-bottom: 1px solid var(--line);
+  padding: 12px var(--gutter) 18px;
+}
+.nav-drawer ul {
+  max-width: var(--wrap); margin: 0 auto; padding: 0; list-style: none;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px;
+}
+.nav-drawer a {
+  display: block; padding: 10px 10px; border-radius: 8px;
+  color: var(--ink); text-decoration: none; font-size: 0.9375rem; font-weight: 560;
+}
+.nav-drawer a:hover { background: var(--line); text-decoration: none; }
 
 /* ---------- Show bands: dark in both themes (the hero, the real runs, the handoff) ---------- */
 .show { color-scheme: dark; color: var(--ink); }
-/* Over the hero the bar reads in the show band's ink; once it has its own ground it follows the page theme. */
-.nav:not(.is-scrolled) { color-scheme: dark; }
+/* Over the hero the bar reads in the show band's ink; once scrolled or opened it follows the page theme. */
+.nav:not(.is-scrolled):not(.is-menu-open) { color-scheme: dark; }
 
 /* ---------- Hero: a real phone playing real runs, and the agent's calls beside it ---------- */
 .hero { position: relative; isolation: isolate; overflow: hidden; background: var(--ground); }
@@ -495,6 +526,7 @@ strong { font-weight: 650; }
   .pencil { right: 146px; }
   .nav-inner { grid-template-columns: auto auto; justify-content: space-between; }
   .nav-links { display: none; }
+  .nav-menu { display: inline-flex; }
   .plain-grid { grid-template-columns: 1fr 1fr; }
   .plain-title { grid-column: 1 / -1; }
   .runs { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 64px; }
@@ -577,7 +609,8 @@ strong { font-weight: 650; }
 @media (max-width: 480px) {
   .nav-gh span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .nav-gh { width: 36px; padding: 0; }
-  .actions .key { flex: 1 1 auto; justify-content: center; padding-inline: 12px; }
+  .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .actions .key { justify-content: center; padding-inline: 8px; font-size: 0.875rem; white-space: nowrap; gap: 0.45em; }
   .key-label-long { display: none; }
   .targets { grid-template-columns: 1fr; }
 }

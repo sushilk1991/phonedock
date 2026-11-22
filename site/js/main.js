@@ -34,6 +34,22 @@ const onScroll = () => nav?.classList.toggle('is-scrolled', scrollY > 24);
 addEventListener('scroll', onScroll, { passive: true });
 onScroll();
 
+const navToggle = document.querySelector('[data-nav-toggle]');
+const navDrawer = document.querySelector('[data-nav-drawer]');
+if (nav && navToggle && navDrawer) {
+  const setOpen = (open) => {
+    nav.classList.toggle('is-menu-open', open);
+    navDrawer.hidden = !open;
+    navToggle.setAttribute('aria-expanded', String(open));
+    navToggle.setAttribute('aria-label', open ? 'Close navigation menu' : 'Open navigation menu');
+  };
+  navToggle.addEventListener('click', () => setOpen(navDrawer.hidden));
+  for (const a of navDrawer.querySelectorAll('a')) a.addEventListener('click', () => setOpen(false));
+  addEventListener('keydown', (e) => { if (e.key === 'Escape' && !navDrawer.hidden) setOpen(false); });
+  addEventListener('click', (e) => { if (!navDrawer.hidden && !nav.contains(e.target)) setOpen(false); });
+  matchMedia('(min-width: 1081px)').addEventListener('change', (e) => { if (e.matches) setOpen(false); });
+}
+
 // ---------- Copy buttons ----------
 for (const btn of document.querySelectorAll('[data-copy]')) {
   btn.addEventListener('click', async () => {
