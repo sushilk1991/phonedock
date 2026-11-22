@@ -49,7 +49,7 @@ test('disguise options: parsing, profile/carrier/SDK resolution, and clone fresh
   // Defaults + explicit options
   const def = resolveDisguiseCreation(true, { imageSdk: 34 })!;
   assert.equal(def.profile.id, 'pixel_8');
-  assert.equal(def.carrier.id, 'att_us');
+  assert.equal(def.carrier.id, 'tmobile_us');
   assert.equal(def.persisted.v, 1);
 
   const fromSpecProf = resolveDisguiseCreation(true, { specProfile: 'pixel_8a', imageSdk: 34 })!;

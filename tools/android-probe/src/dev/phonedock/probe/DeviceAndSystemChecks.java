@@ -73,8 +73,6 @@ final class DeviceAndSystemChecks {
             Pattern.CASE_INSENSITIVE
     );
 
-    private static final long MIN_UPTIME_MS = 3L * 60L * 1000L;
-
     private static final String[][] NAMED_FEATURES = {
             {"telephony", PackageManager.FEATURE_TELEPHONY, "0"},
             {"telephony.gsm", PackageManager.FEATURE_TELEPHONY_GSM, "0"},
@@ -971,17 +969,10 @@ final class DeviceAndSystemChecks {
     // -------------------------------------------------------------------------
 
     private static void runSystemChecks(ProbeContext ctx) {
-        ctx.check("system.elapsed_realtime_ms", "system", () -> {
-            long ms = SystemClock.elapsedRealtime();
-            boolean fresh = ms < MIN_UPTIME_MS;
-            return ProbeContext.Outcome.of(ms, fresh, fresh ? "uptime under 3 minutes (" + (ms / 1000) + "s)" : null);
-        });
+        // Record uptime honestly without flagging fresh boots (any physical phone has <3 min uptime right after reboot).
+        ctx.check("system.elapsed_realtime_ms", "system", () -> ProbeContext.Outcome.ok(SystemClock.elapsedRealtime()));
 
-        ctx.check("system.uptime_millis", "system", () -> {
-            long ms = SystemClock.uptimeMillis();
-            boolean fresh = ms < MIN_UPTIME_MS;
-            return ProbeContext.Outcome.of(ms, fresh, fresh ? "uptimeMillis under 3 minutes (" + (ms / 1000) + "s)" : null);
-        });
+        ctx.check("system.uptime_millis", "system", () -> ProbeContext.Outcome.ok(SystemClock.uptimeMillis()));
 
         ctx.check("system.timezone", "system", () -> ProbeContext.Outcome.ok(TimeZone.getDefault().getID()));
         ctx.check("system.locale", "system", () -> ProbeContext.Outcome.ok(Locale.getDefault().toLanguageTag()));

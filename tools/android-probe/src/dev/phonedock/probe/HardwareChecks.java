@@ -111,8 +111,8 @@ final class HardwareChecks {
 
         ctx.check("telephony.network_operator", "telephony", () -> {
             String v = tm.getNetworkOperator();
-            boolean isDefault = "310260".equals(v);
-            return ProbeContext.Outcome.of(v, isDefault, isDefault ? "emulator default operator" : null);
+            boolean empty = v == null || v.isEmpty();
+            return ProbeContext.Outcome.of(v, empty, empty ? "network operator numeric is empty" : null);
         });
 
         ctx.check("telephony.sim_operator_name", "telephony", () -> {
@@ -122,8 +122,8 @@ final class HardwareChecks {
 
         ctx.check("telephony.sim_operator", "telephony", () -> {
             String v = tm.getSimOperator();
-            boolean isDefault = "310260".equals(v);
-            return ProbeContext.Outcome.of(v, isDefault, isDefault ? "emulator default operator" : null);
+            boolean empty = v == null || v.isEmpty();
+            return ProbeContext.Outcome.of(v, empty, empty ? "SIM operator numeric is empty" : null);
         });
 
         ctx.check("telephony.network_country_iso", "telephony", () -> ProbeContext.Outcome.ok(tm.getNetworkCountryIso()));

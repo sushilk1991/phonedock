@@ -66,8 +66,9 @@ final class FilesAndRootChecks {
             "/system/sd/xbin"
     };
 
+    // Note: bare /data/adb and bare /debug_ramdisk exist on stock Android 14 builds
+    // (AOSP adbd keys dir and first-stage init tmpfs), so only root-tool children are checked.
     private static final String[] ROOT_ARTIFACTS = {
-            "/data/adb",
             "/data/adb/magisk",
             "/data/adb/modules",
             "/sbin/.magisk",

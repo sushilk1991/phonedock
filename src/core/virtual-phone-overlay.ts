@@ -516,12 +516,19 @@ export function renderBootCompletedScript(
   if (opts.teardownMagisk === true) {
     lines.push(
       '',
-      '# Transient-root teardown: remove su/magisk binaries and lazily unmount MAGISKTMP',
+      '# Best-effort opt-in transient-root teardown (Magisk v31.1): reduces root-mount/su exposure',
+      '# but does NOT guarantee stock/unrooted state (SELinux policy remains loaded; existing namespaces',
+      '# may retain references). Stops magiskd via its supported --stop RPC, then detaches leftover',
+      '# magisk-sourced mounts only (never unmounts a stock /debug_ramdisk tmpfs).',
       'cd /',
-      'rm -f "$MAGISKTMP/su" "$MAGISKTMP/resetprop" "$MAGISKTMP/magisk" "$MAGISKTMP/magisk32" "$MAGISKTMP/magisk64" 2>/dev/null || true',
-      'umount -l "$MAGISKTMP/.magisk/pts" 2>/dev/null || true',
-      'umount -l "$MAGISKTMP/.magisk/worker" 2>/dev/null || true',
-      'umount -l "$MAGISKTMP" 2>/dev/null || true',
+      '"$MAGISKTMP/magisk" --stop 2>/dev/null || true',
+      'sleep 1',
+      'if grep -E "^magisk " /proc/self/mounts 2>/dev/null | grep -q " $MAGISKTMP "; then',
+      '  rm -f "$MAGISKTMP/su" "$MAGISKTMP/resetprop" "$MAGISKTMP/magisk" "$MAGISKTMP/magisk32" "$MAGISKTMP/magisk64" 2>/dev/null || true',
+      '  umount -l "$MAGISKTMP/.magisk/pts" 2>/dev/null || true',
+      '  umount -l "$MAGISKTMP/.magisk/worker" 2>/dev/null || true',
+      '  umount -l "$MAGISKTMP" 2>/dev/null || true',
+      'fi',
     );
   }
 

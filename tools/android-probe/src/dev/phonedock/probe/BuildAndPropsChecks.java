@@ -355,11 +355,6 @@ final class BuildAndPropsChecks {
                     reasons.add("emulator init service property present: " + val);
                 }
                 break;
-            case "gsm.operator.numeric":
-                if ("310260".equals(val)) {
-                    reasons.add("emulator default operator");
-                }
-                break;
             default:
                 break;
         }

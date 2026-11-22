@@ -189,6 +189,8 @@ test('overlay: shellQuote safety, profile/carrier mismatch checks, and optional 
   assert.throws(() => renderDisguiseOverlay(p8, id, ee), /does not match carrier/);
 
   const withTeardown = renderDisguiseOverlay(p8, id, tm, { teardownMagisk: true, hideEmulatorPackages: false, cutoutOverlay: false });
+  assert.match(withTeardown.bootCompletedScript, /"\$MAGISKTMP\/magisk" --stop/);
+  assert.match(withTeardown.bootCompletedScript, /grep -E "\^magisk " \/proc\/self\/mounts/);
   assert.match(withTeardown.bootCompletedScript, /umount -l "\$MAGISKTMP"/);
   assert.doesNotMatch(withTeardown.bootCompletedScript, /pm uninstall/);
   assert.doesNotMatch(withTeardown.bootCompletedScript, /cutout\.emulation\.hole/);
