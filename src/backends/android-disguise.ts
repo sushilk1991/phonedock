@@ -55,6 +55,10 @@ export const GUEST_MAGISK_PATCH_SCRIPT = [
   './magiskboot decompress ramdisk.img ramdisk.cpio',
   'cp ramdisk.cpio ramdisk.cpio.orig',
   '{ echo KEEPVERITY=true; echo KEEPFORCEENCRYPT=true; echo "PREINITDEVICE=$(./magisk --preinit-device)"; } > config',
+  // magiskboot's `cpio ... patch` reads KEEPVERITY/KEEPFORCEENCRYPT from the environment (not from `config`,
+  // which is only consumed by magiskinit at boot). Export them so patch keeps dm-verity/forceencrypt intact,
+  // matching a real handset's fstab instead of stripping verity (a tell) from the disguised ramdisk.
+  'export KEEPVERITY=true KEEPFORCEENCRYPT=true',
   './magiskboot compress=xz magisk magisk.xz',
   './magiskboot compress=xz init-ld init-ld.xz',
   './magiskboot cpio ramdisk.cpio \\',
