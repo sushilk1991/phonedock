@@ -275,11 +275,11 @@ const BUILD_PARTITIONS = [
   'system_dlkm', 'vendor_dlkm', 'odm_dlkm', 'bootimage',
 ] as const;
 
-/** Emulator-only system packages flagged by pd-probe (`packages.suspicious`). */
+/** Emulator-only non-essential system packages safe to uninstall for user 0 (`packages.suspicious`).
+ *  Note: `com.android.emulator.radio.config` and `com.google.android.connectivity.resources.goldfish.overlay`
+ *  are intentionally preserved so RIL/SIM and Wi-Fi connectivity keep working cleanly. */
 export const EMULATOR_PACKAGES = [
-  'com.android.emulator.radio.config',
   'com.android.emulator.multidisplay',
-  'com.google.android.connectivity.resources.goldfish.overlay',
 ] as const;
 
 /** Deterministic realistic battery defaults derived from the device seed (never 5000 mV). */
@@ -400,23 +400,22 @@ export function renderPostFsDataScript(
   lines.push(setPropLine('ro.boot.serialno', identity.serial));
   lines.push(setPropLine('ro.sf.lcd_density', String(profile.screen.dpi)));
 
-  // Seed carrier identity early as well (re-asserted after rild in boot-completed).
-  const numeric = `${carrier.mcc}${carrier.mnc}`;
-  lines.push(
-    '',
-    '# Carrier identity (preserved; never delete gsm.* or vendor.qemu.vport.* pre-boot)',
-    setPropLine('gsm.operator.alpha', carrier.name),
-    setPropLine('gsm.operator.numeric', numeric),
-    setPropLine('gsm.operator.iso-country', carrier.countryIso),
-    setPropLine('gsm.operator.isroaming', 'false'),
-    setPropLine('gsm.sim.operator.alpha', carrier.name),
-    setPropLine('gsm.sim.operator.numeric', numeric),
-    setPropLine('gsm.sim.operator.iso-country', carrier.countryIso),
-  );
+  const battery = defaultBatteryValues(identity.seed);
+  const voltageMv = opts.batteryVoltageMv ?? battery.voltageMv;
+  const voltageUv = voltageMv * 1000;
 
   lines.push(
     '',
-    '# Delete only top-level qemu identity tells pre-boot; keep virtiowifi/hwcodec/vport until boot_completed',
+    '# Realistic battery voltage via sysfs bind-mount (BatteryService ignores `dumpsys battery set voltage`)',
+    'if [ -e /sys/class/power_supply/battery/voltage_now ]; then',
+    `  printf '%s\\n' ${shellQuote(String(voltageUv))} > /dev/pd_vnow 2>/dev/null || true`,
+    '  chmod 0444 /dev/pd_vnow 2>/dev/null || true',
+    '  chcon u:object_r:sysfs_batteryinfo:s0 /dev/pd_vnow 2>/dev/null || chcon u:object_r:sysfs:s0 /dev/pd_vnow 2>/dev/null || true',
+    '  mount -o bind /dev/pd_vnow /sys/class/power_supply/battery/voltage_now 2>/dev/null || true',
+    'fi',
+    '',
+    '# Delete only top-level qemu identity tells pre-boot; preserve virtiowifi/hwcodec/gltransport/vport',
+    '# and leave RIL-owned gsm.operator.* props untouched so rild brings up SIM and operator names cleanly.',
     '"$R" --delete ro.kernel.qemu 2>/dev/null || true',
     '"$R" --delete ro.boot.qemu 2>/dev/null || true',
     '"$R" --delete ro.boot.qemu.avd_name 2>/dev/null || true',
@@ -443,13 +442,11 @@ export function renderPostFsDataScript(
 export function renderBootCompletedScript(
   profile: ResolvedDeviceProfile,
   identity: DeviceIdentity,
-  carrier: Carrier,
+  _carrier: Carrier,
   opts: OverlayOptions = {},
 ): string {
   const battery = defaultBatteryValues(identity.seed);
-  const voltageMv = opts.batteryVoltageMv ?? battery.voltageMv;
   const batteryLevel = opts.batteryLevel ?? battery.level;
-  const numeric = `${carrier.mcc}${carrier.mnc}`;
 
   const lines: string[] = [
     '#!/system/bin/sh',
@@ -458,31 +455,30 @@ export function renderBootCompletedScript(
     'R="$MAGISKTMP/resetprop"',
     's() { "$R" -n "$1" "$2"; }',
     '',
-    '# Re-assert telephony/carrier and baseband after rild completes initialization',
-    setPropLine('gsm.operator.alpha', carrier.name),
-    setPropLine('gsm.operator.numeric', numeric),
-    setPropLine('gsm.operator.iso-country', carrier.countryIso),
-    setPropLine('gsm.operator.isroaming', 'false'),
-    setPropLine('gsm.sim.operator.alpha', carrier.name),
-    setPropLine('gsm.sim.operator.numeric', numeric),
-    setPropLine('gsm.sim.operator.iso-country', carrier.countryIso),
-  ];
-
-  if (profile.baseband) lines.push(setPropLine('gsm.version.baseband', profile.baseband));
-
-  lines.push(
-    '',
     '# Rewrite HAL-sensitive hardware props post-boot (HALs have already loaded)',
     setPropLine('ro.hardware.gralloc', profile.hardware),
     setPropLine('ro.hardware.power', profile.hardware),
     setPropLine('ro.hardware.vulkan', profile.hardware),
     setPropLine('dalvik.vm.isa.arm64.variant', 'armv8-a'),
     setPropLine('net.bt.name', profile.model),
+  ];
+
+  if (profile.baseband) lines.push(setPropLine('gsm.version.baseband', profile.baseband));
+
+  lines.push(
     '',
-    '# Remove residual qemu/ranchu/goldfish/boot_devices props now that HALs are running',
-    'for k in $("$R" | sed -n \'s/^\\[\\([^]]*\\)\\].*/\\1/p\' | grep -E \'^(ro\\.kernel\\.qemu|ro\\.boot\\.qemu|qemu\\.|vendor\\.qemu\\.|init\\.svc\\.qemu-|init\\.svc\\.ranchu-|init\\.svc\\.android-hardware-media-c2-goldfish-|ro\\.boot\\.boot_devices$)\'); do',
-    '  "$R" --delete "$k" 2>/dev/null || true',
-    'done',
+    '# Remove residual qemu/ranchu/goldfish/boot_devices props while preserving HAL-required',
+    '# vendor.qemu.vport.*, ro.boot.qemu.virtiowifi, ro.boot.qemu.hwcodec.*, and ro.boot.qemu.gltransport.*',
+    '# so Wi-Fi, RIL/SIM operator names, Bluetooth, and hardware codecs remain healthy.',
+    'clean_props() {',
+    '  for k in $("$R" | sed -n \'s/^\\[\\([^]]*\\)\\].*/\\1/p\' | grep -E \'^(ro\\.kernel\\.qemu|ro\\.boot\\.qemu|qemu\\.|vendor\\.qemu\\.|init\\.svc\\.qemu-|init\\.svc\\.ranchu-|init\\.svc\\.android-hardware-media-c2-goldfish-|ro\\.boot\\.boot_devices$)\'); do',
+    '    case "$k" in',
+    '      vendor.qemu.vport.*|ro.boot.qemu.virtiowifi|ro.boot.qemu.hwcodec.*|ro.boot.qemu.gltransport.*) continue ;;',
+    '    esac',
+    '    "$R" --delete "$k" 2>/dev/null || true',
+    '  done',
+    '}',
+    'clean_props',
     '',
     '# Device settings coherence (intentionally leaves adb_enabled intact so PhoneDock keeps control)',
     `settings put global device_name ${shellQuote(profile.model)} 2>/dev/null || true`,
@@ -490,8 +486,7 @@ export function renderBootCompletedScript(
     `settings put secure android_id ${shellQuote(identity.androidId)} 2>/dev/null || true`,
     `settings put secure bluetooth_name ${shellQuote(profile.model)} 2>/dev/null || true`,
     '',
-    '# Realistic battery state (avoid static 5000 mV emulator tell)',
-    `dumpsys battery set voltage ${shellQuote(String(voltageMv))} 2>/dev/null || true`,
+    '# Realistic battery state (voltage_now is bind-mounted in post-fs-data; keep overrides pinned)',
     `dumpsys battery set level ${shellQuote(String(batteryLevel))} 2>/dev/null || true`,
     'dumpsys battery set temp 294 2>/dev/null || true',
     'dumpsys battery set status 3 2>/dev/null || true',
@@ -508,11 +503,20 @@ export function renderBootCompletedScript(
   }
 
   if (opts.hideEmulatorPackages !== false) {
-    lines.push('', '# Disable emulator-only packages for user 0');
+    lines.push('', '# Uninstall non-essential emulator-only packages for user 0');
     for (const pkg of EMULATOR_PACKAGES) {
-      lines.push(`pm disable-user --user 0 ${shellQuote(pkg)} 2>/dev/null || true`);
+      lines.push(`pm uninstall --user 0 ${shellQuote(pkg)} 2>/dev/null || true`);
     }
   }
+
+  lines.push(
+    '',
+    '# Second prop sweep after late boot_completed services (qemu-props-bootcomplete, ranchu-setup) exit',
+    'sleep 4',
+    'clean_props',
+  );
+
+  if (profile.baseband) lines.push(setPropLine('gsm.version.baseband', profile.baseband));
 
   if (opts.extraBootCompletedLines?.length) {
     lines.push('', '# Extra boot-completed hooks', ...opts.extraBootCompletedLines);

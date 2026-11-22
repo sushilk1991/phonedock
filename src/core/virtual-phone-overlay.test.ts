@@ -122,36 +122,42 @@ test('overlay: stage 1 preserves HAL qemu props while stage 2 cleans them and se
   assert.match(o.initRc, /on property:sys\.boot_completed=1/);
   assert.doesNotMatch(o.initRc, /pd-rootd/);
 
-  // Stage 1 (post-fs-data): verified Pixel 8 identity + carrier + serial, NO blanket vendor.qemu/ro.boot.qemu deletion, NO /data/adb.
+  // Stage 1 (post-fs-data): verified Pixel 8 identity + serial + voltage_now bind-mount,
+  // leaves RIL-owned gsm.operator.* untouched, NO blanket vendor.qemu/ro.boot.qemu deletion, NO /data/adb.
   assert.match(o.postFsDataScript, /s 'ro\.build\.fingerprint' 'google\/shiba\/shiba:14\/AP2A\.240605\.024\/11860263:user\/release-keys'/);
   assert.match(o.postFsDataScript, /s 'ro\.bootloader' 'ripcurrent-14\.5-11693900'/);
   assert.match(o.postFsDataScript, /s 'gsm\.version\.baseband' 'g5300i-240308-240517-B-11857457'/);
   assert.match(o.postFsDataScript, new RegExp(`s 'ro\\.serialno' '${identity.serial}'`));
-  assert.match(o.postFsDataScript, /s 'gsm\.operator\.alpha' 'EE'/);
-  assert.match(o.postFsDataScript, /s 'gsm\.operator\.numeric' '23430'/);
-  assert.match(o.postFsDataScript, /s 'gsm\.operator\.iso-country' 'gb'/);
+  assert.doesNotMatch(o.postFsDataScript, /gsm\.operator\.alpha/, 'must not resetprop RIL-owned gsm.operator.*');
   assert.doesNotMatch(o.postFsDataScript, /vendor\\\.qemu/, 'post-fs-data must NOT wipe vendor.qemu.* before HALs start');
   assert.doesNotMatch(o.postFsDataScript, /\/data\/adb/, 'must not create /data/adb root artifact');
+  const batt = defaultBatteryValues(identity.seed);
+  assert.ok(batt.voltageMv >= 3920 && batt.voltageMv <= 4210 && batt.voltageMv !== 5000);
+  assert.match(o.postFsDataScript, new RegExp(`'${batt.voltageMv * 1000}' > /dev/pd_vnow`));
+  assert.match(o.postFsDataScript, /mount -o bind \/dev\/pd_vnow \/sys\/class\/power_supply\/battery\/voltage_now/);
 
-  // Stage 2 (boot-completed): re-asserts carrier + baseband, rewrites gralloc/vulkan/power, cleans qemu/ranchu/init.svc props, sets settings & battery.
+  // Stage 2 (boot-completed): re-asserts baseband, rewrites gralloc/vulkan/power, preserves HAL qemu/vport props,
+  // runs two-pass cleanup for late boot_completed services, sets settings & battery level/status.
   assert.match(o.bootCompletedScript, /s 'ro\.hardware\.gralloc' 'shiba'/);
   assert.match(o.bootCompletedScript, /s 'ro\.hardware\.vulkan' 'shiba'/);
   assert.match(o.bootCompletedScript, /s 'ro\.hardware\.power' 'shiba'/);
   assert.match(o.bootCompletedScript, /s 'dalvik\.vm\.isa\.arm64\.variant' 'armv8-a'/);
   assert.match(o.bootCompletedScript, /s 'gsm\.version\.baseband' 'g5300i-240308-240517-B-11857457'/);
-  assert.match(o.bootCompletedScript, /s 'gsm\.sim\.operator\.alpha' 'EE'/);
+  assert.doesNotMatch(o.bootCompletedScript, /gsm\.operator\.alpha/, 'must not resetprop RIL-owned gsm.operator.*');
+  assert.match(o.bootCompletedScript, /vendor\.qemu\.vport\.\*\|ro\.boot\.qemu\.virtiowifi\|ro\.boot\.qemu\.hwcodec\.\*\|ro\.boot\.qemu\.gltransport\.\*/);
   assert.match(o.bootCompletedScript, /init\\\.svc\\\.qemu-/);
+  assert.match(o.bootCompletedScript, /sleep 4\nclean_props/);
   assert.match(o.bootCompletedScript, /settings put global device_name 'Pixel 8'/);
   assert.match(o.bootCompletedScript, /settings put global development_settings_enabled 0/);
   assert.doesNotMatch(o.bootCompletedScript, /adb_enabled 0/, 'must not disable adb_enabled and sever PhoneDock control');
   assert.match(o.bootCompletedScript, new RegExp(`settings put secure android_id '${identity.androidId}'`));
-  const batt = defaultBatteryValues(identity.seed);
-  assert.ok(batt.voltageMv >= 3920 && batt.voltageMv <= 4210 && batt.voltageMv !== 5000);
-  assert.match(o.bootCompletedScript, new RegExp(`dumpsys battery set voltage '${batt.voltageMv}'`));
+  assert.match(o.bootCompletedScript, new RegExp(`dumpsys battery set level '${batt.level}'`));
+  assert.doesNotMatch(o.bootCompletedScript, /^dumpsys battery reset/m);
   assert.match(o.bootCompletedScript, /com\.android\.internal\.display\.cutout\.emulation\.hole/);
   for (const pkg of EMULATOR_PACKAGES) {
-    assert.ok(o.bootCompletedScript.includes(pkg), `expected package hide for ${pkg}`);
+    assert.ok(o.bootCompletedScript.includes(`pm uninstall --user 0 '${pkg}'`), `expected package hide for ${pkg}`);
   }
+  assert.doesNotMatch(o.bootCompletedScript, /com\.android\.emulator\.radio\.config/, 'must not disable/remove radio config package');
 });
 
 test('overlay: omits unverified bootloader/baseband/host and honors Samsung S23 vendor freeze', () => {
@@ -167,9 +173,6 @@ test('overlay: omits unverified bootloader/baseband/host and honors Samsung S23 
   assert.doesNotMatch(o.postFsDataScript, /ro\.bootloader/);
   assert.doesNotMatch(o.postFsDataScript, /gsm\.version\.baseband/);
   assert.doesNotMatch(o.bootCompletedScript, /gsm\.version\.baseband/);
-  // AT&T carrier name contains '&' — verify it is safely single-quoted.
-  assert.match(o.postFsDataScript, /s 'gsm\.operator\.alpha' 'AT&T'/);
-  assert.match(o.bootCompletedScript, /s 'gsm\.sim\.operator\.alpha' 'AT&T'/);
 });
 
 test('overlay: shellQuote safety, profile/carrier mismatch checks, and optional teardown flag', () => {
@@ -187,6 +190,6 @@ test('overlay: shellQuote safety, profile/carrier mismatch checks, and optional 
 
   const withTeardown = renderDisguiseOverlay(p8, id, tm, { teardownMagisk: true, hideEmulatorPackages: false, cutoutOverlay: false });
   assert.match(withTeardown.bootCompletedScript, /umount -l "\$MAGISKTMP"/);
-  assert.doesNotMatch(withTeardown.bootCompletedScript, /pm disable-user/);
+  assert.doesNotMatch(withTeardown.bootCompletedScript, /pm uninstall/);
   assert.doesNotMatch(withTeardown.bootCompletedScript, /cutout\.emulation\.hole/);
 });
