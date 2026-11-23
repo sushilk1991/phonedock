@@ -13,4 +13,4 @@ Done:
 
 Evidence retained locally: `/var/folders/r2/hxzthddn0vnd14jsz35qwcc40000gn/T/pdtest-perf-hsdtlqwg`. No runnable bundle/home remains there. Reusable fe-hero checkout/dependency cache retained; no disposable box created.
 
-Next: push/open main PR, inspect CI/review status, remove finished task-owned Herdr terminals. Do not merge.
+Delivery: branch pushed; PR https://github.com/sushilk1991/phonedock/pull/2 is open against main. Full-suite status is tracked in the PR checks. Remaining operational step: read CI/review status and remove finished task-owned Herdr terminals. Do not merge.
