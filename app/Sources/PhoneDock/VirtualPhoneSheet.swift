@@ -337,15 +337,16 @@ struct VirtualPhoneSheet: View {
         downloadTask = Task {
             do {
                 let job = try await c.sendJob("POST", "/v1/backends/\(DaemonClient.enc(Self.backendId))/images/install", json: ["image": img.id])
+                try Task.checkCancellation()
                 downloadJob = job
                 let done = try await c.follow(job) { downloadJob = $0 }
                 if done.isFailed {
                     problem = FriendlyError.from(job: done, title: "Couldn’t download \(systemName)",
                                                  fallback: "Check your internet connection and try again.")
                 }
-            } catch is CancellationError {
-                return
             } catch {
+                // Cancelled (the sheet closed): nothing here is shown any more, so leave the state alone.
+                if Task.isCancelled { return }
                 problem = FriendlyError.from(error, title: "Couldn’t download \(systemName)")
             }
             // Reload even after a failure: a download whose job was lost may still have finished.

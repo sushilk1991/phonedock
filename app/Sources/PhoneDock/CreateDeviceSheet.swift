@@ -545,6 +545,7 @@ struct CreateDeviceSheet: View {
         downloadTask = Task {
             do {
                 let job = try await c.sendJob("POST", "/v1/backends/\(DaemonClient.enc(b))/images/install", json: ["image": img.id])
+                try Task.checkCancellation()
                 downloadJob = job
                 let done = try await c.follow(job) { downloadJob = $0 }
                 if done.isFailed {
@@ -552,12 +553,14 @@ struct CreateDeviceSheet: View {
                                                  fallback: "Check your internet connection and try again.")
                 }
                 let keep = imageId
-                images = (try? await c.get([OsImage].self, "/v1/backends/\(DaemonClient.enc(b))/images")) ?? images
+                let fresh = try? await c.get([OsImage].self, "/v1/backends/\(DaemonClient.enc(b))/images")
+                if Task.isCancelled { return }   // the platform changed meanwhile: these are the old one's images
+                images = fresh ?? images
                 imageId = keep ?? img.id
                 downloadJob = nil
-            } catch is CancellationError {
-                return
             } catch {
+                // Cancelled (sheet closed or platform changed): loadLists already reset the state for the new one.
+                if Task.isCancelled { return }
                 downloadJob = nil
                 problem = FriendlyError.from(error, title: "Couldn’t download \(Self.shortName(img))")
             }
