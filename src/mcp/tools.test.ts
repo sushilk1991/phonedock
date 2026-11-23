@@ -277,3 +277,434 @@ test('launch_app forwards args/env (and arguments alias) without echoing secret 
     });
   } finally { await s.close(); }
 });
+
+test('observe="ui"|"both": compact outline, default settle, unchanged suppression, snapshot ref binding, conflict error, and batch support', async () => {
+  const tree1: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    snapshotId: 'snap-obs-1',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'General', clickable: true })],
+  };
+  const tree2: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:02.000Z',
+    snapshotId: 'snap-obs-2',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'About', clickable: true })],
+  };
+  let currentTree = tree1;
+  let tapCalls: unknown[] = [];
+  let tapRefCalls: unknown[] = [];
+  let launchCalls: unknown[] = [];
+  let uiCalls = 0;
+  let shotCalls = 0;
+
+  const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, tree1.root);
+  fake.ui = async () => { uiCalls++; return currentTree; };
+  fake.screenshot = async () => {
+    shotCalls++;
+    return { data: Buffer.from([0xff, 0xd8, 0xff]), mime: 'image/jpeg', deviceWidth: 1080, deviceHeight: 2400, imageWidth: 461, imageHeight: 1024, scale: 2.3438 };
+  };
+  fake.tap = async (_id: string, x: number, y: number, _label?: string, meta?: Record<string, unknown>) => {
+    tapCalls.push({ x, y, meta });
+    return { ok: true, delivery: 'sent', retrySafe: false, ...(meta?.returnUi ? { ui: currentTree } : {}) };
+  };
+  fake.tapRef = async (_id: string, ref: string, opts?: Record<string, unknown>) => {
+    tapRefCalls.push({ ref, opts });
+    return { ok: true, delivery: 'sent', retrySafe: false, resolved: { ref, x: 200, y: 240 }, ...(opts?.returnUi ? { ui: currentTree } : {}) };
+  };
+  fake.launch = async (_id: string, appId: string, opts?: Record<string, unknown>) => {
+    launchCalls.push({ appId, opts });
+    return { ok: true, inFront: true, delivery: 'sent', retrySafe: false, ...(opts?.returnUi ? { ui: currentTree } : {}) };
+  };
+
+  const s = await connect(fake);
+  try {
+    // 1) Conflicting observe="ui" + return_screenshot=true fails BEFORE sending input
+    const conflict = await s.call('tap', { x: 10, y: 10, observe: 'ui', return_screenshot: true });
+    assert.equal(conflict.isError, true);
+    assert.match(conflict.text, /Conflicting options/);
+    assert.equal(tapCalls.length, 0);
+
+    // 2) tap with observe="ui" forwards returnUi + default settleMs=700 to daemon and renders compact outline without extra get_ui
+    const r1 = await s.call('tap', { x: 10, y: 10, observe: 'ui' });
+    assert.equal(r1.isError, false, r1.text);
+    assert.equal((tapCalls[0] as { meta?: Record<string, unknown> }).meta?.returnUi, true);
+    assert.equal((tapCalls[0] as { meta?: Record<string, unknown> }).meta?.settleMs, 700);
+    assert.equal(uiCalls, 0, 'daemon pre-captured UI must not trigger a second c.ui() call');
+    assert.match(r1.text, /obs=#1 hash=[0-9a-f]{16} snapshot=snap-obs-1/);
+    assert.match(r1.text, /e1 Button "General"/);
+
+    // 3) Immediate tap(ref="e1", observe="ui") uses bound snapshotId from prior observe="ui" and suppresses unchanged screen
+    const r2 = await s.call('tap', { ref: 'e1', observe: 'ui', settle_ms: 0 });
+    assert.equal(r2.isError, false, r2.text);
+    assert.equal((tapRefCalls[0] as { opts?: Record<string, unknown> }).opts?.snapshotId, 'snap-obs-1');
+    assert.equal((tapRefCalls[0] as { opts?: Record<string, unknown> }).opts?.settleMs, 0);
+    assert.match(r2.text, /Screen unchanged \(obs=#2, hash=[0-9a-f]{16}, snapshot=snap-obs-1\)\./);
+
+    // 4) Screen changes -> full outline emitted again; launch_app defaults to settleMs=1500 (or 0 with expect)
+    currentTree = tree2;
+    const r3 = await s.call('launch_app', { app_id: 'com.example.app', observe: 'ui' });
+    assert.equal(r3.isError, false, r3.text);
+    assert.equal((launchCalls[0] as { opts?: Record<string, unknown> }).opts?.settleMs, 1500);
+    assert.match(r3.text, /obs=#3 hash=[0-9a-f]{16} snapshot=snap-obs-2/);
+    assert.match(r3.text, /e1 Button "About"/);
+
+    const r4 = await s.call('launch_app', { app_id: 'com.example.app', observe: 'ui', expect: { visible: 'About' } });
+    assert.equal(r4.isError, false, r4.text);
+    assert.equal((launchCalls[1] as { opts?: Record<string, unknown> }).opts?.settleMs, 0, 'expect skips default settle');
+
+    // 5) observe="both" returns UI + screenshot in a single settle
+    shotCalls = 0;
+    const rBoth = await s.client.callTool({ name: 'tap', arguments: { x: 10, y: 10, observe: 'both', settle_ms: 0 } }) as { content: { type: string; text?: string }[]; isError?: boolean };
+    assert.equal(!!rBoth.isError, false);
+    assert.equal(shotCalls, 1);
+    assert.ok(rBoth.content.some((c) => c.type === 'image'));
+    assert.ok(rBoth.content.some((c) => c.type === 'text' && (c.text ?? '').includes('obs=#5')));
+
+    // 6) batch supports per-step observe and observe_at_end, and rejects observe_at_end/screenshot_at_end conflicts
+    const badBatch = await s.call('batch', { steps: [{ tool: 'tap', args: { x: 1, y: 1 } }], observe_at_end: 'ui', screenshot_at_end: true });
+    assert.equal(badBatch.isError, true);
+    assert.match(badBatch.text, /Conflicting options/);
+
+    currentTree = tree1;
+    const okBatch = await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } }],
+      observe_at_end: 'ui',
+      settle_ms: 0,
+    });
+    assert.equal(okBatch.isError, false, okBatch.text);
+    assert.match(okBatch.text, /e1 Button "General"/);
+    assert.match(okBatch.text, /Screen unchanged \(obs=#7/);
+  } finally { await s.close(); }
+});
+
+test('observe regressions: failed screenshot preserves delivered action, batch never suppresses against dropped step, observe_at_end settles', async () => {
+  const treeA: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    snapshotId: 'snap-a',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'Alpha', clickable: true })],
+  };
+  const treeB: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:01.000Z',
+    snapshotId: 'snap-b',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'Beta', clickable: true })],
+  };
+  const treeC: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:02.000Z',
+    snapshotId: 'snap-c',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'Gamma', clickable: true })],
+  };
+  let currentTree = treeA;
+  let failShot = false;
+
+  const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, treeA.root);
+  fake.ui = async () => currentTree;
+  fake.screenshot = async () => {
+    if (failShot) throw new Error('framebuffer timeout');
+    return { data: Buffer.from([0xff, 0xd8, 0xff]), mime: 'image/jpeg', deviceWidth: 1080, deviceHeight: 2400, imageWidth: 461, imageHeight: 1024, scale: 2.3438 };
+  };
+  fake.tap = async (_id: string, _x: number, _y: number, _label?: string, meta?: Record<string, unknown>) => ({
+    ok: true,
+    delivery: 'sent',
+    retrySafe: false,
+    ...(meta?.expect ? { expect: { ok: true, outcome: 'verified', message: 'Verified: "Gamma" is on screen (0.1 s).' } } : {}),
+    ...(meta?.returnUi ? { ui: currentTree } : {}),
+  });
+
+  const s = await connect(fake);
+  try {
+    // Item 2: observe="both" with a throwing screenshot keeps action summary + UI and does NOT mark delivered action failed
+    failShot = true;
+    const bothFailedShot = await s.call('tap', { x: 10, y: 10, observe: 'both', settle_ms: 0 });
+    assert.equal(bothFailedShot.isError, false, bothFailedShot.text);
+    assert.match(bothFailedShot.text, /Tapped/);
+    assert.match(bothFailedShot.text, /e1 Button "Alpha"/);
+    assert.match(bothFailedShot.text, /Screenshot unavailable \(framebuffer timeout\)/);
+
+    const imgFailedShot = await s.call('tap', { x: 10, y: 10, observe: 'image', settle_ms: 0 });
+    assert.equal(imgFailedShot.isError, false, imgFailedShot.text);
+    assert.match(imgFailedShot.text, /Tapped/);
+    assert.match(imgFailedShot.text, /Screenshot unavailable \(framebuffer timeout\)/);
+    failShot = false;
+
+    // Item 5a: batch with two observe="ui" steps on a new screen -> Step 1 is shortened, so Step 2 MUST emit full tree + refs
+    currentTree = treeB;
+    const batchTwoObs = await s.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2, observe: 'ui', settle_ms: 0 } },
+      ],
+    });
+    assert.equal(batchTwoObs.isError, false, batchTwoObs.text);
+    assert.match(batchTwoObs.text, /Output of the last step:[\s\S]*e1 Button "Beta"/);
+    assert.doesNotMatch(batchTwoObs.text, /Output of the last step:[\s\S]*Screen unchanged/);
+
+    // Item 5b: batch with Step 1 observe="ui", Step 2 plain tap, and observe_at_end="ui" on a new screen -> end block emits full tree + refs
+    currentTree = treeC;
+    const batchEndObs = await s.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+      observe_at_end: 'ui',
+      settle_ms: 0,
+    });
+    assert.equal(batchEndObs.isError, false, batchEndObs.text);
+    assert.match(batchEndObs.text, /e1 Button "Gamma"/);
+    assert.doesNotMatch(batchEndObs.text, /Screen unchanged/);
+
+    // Item 6: observe_at_end applies default 700 ms settle unless settle_ms is given or last step had expect
+    const tDefault = Date.now();
+    await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1 } }],
+      observe_at_end: 'ui',
+    });
+    assert.ok(Date.now() - tDefault >= 650, `expected default ~700 ms settle on observe_at_end, took ${Date.now() - tDefault} ms`);
+
+    const tExpect = Date.now();
+    await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1, expect: { visible: 'Gamma' } } }],
+      observe_at_end: 'ui',
+    });
+    assert.ok(Date.now() - tExpect < 500, `expected observe_at_end to skip default settle after expect, took ${Date.now() - tExpect} ms`);
+
+    const tExplicit = Date.now();
+    await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1 } }],
+      observe_at_end: 'ui',
+      settle_ms: 120,
+    });
+    const explicitMs = Date.now() - tExplicit;
+    assert.ok(explicitMs >= 100 && explicitMs < 550, `expected explicit ~120 ms settle on observe_at_end, took ${explicitMs} ms`);
+  } finally { await s.close(); }
+});
+
+test('hidden batch observations never update snapshot/ref binding, suppression hash, or get_ui(diff) baseline', async () => {
+  const saveTree: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    snapshotId: 'snap-save',
+    root: [el('e8', 'Button', 100, 200, 200, 80, { text: 'Save', clickable: true })],
+  };
+  const deleteTree: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:01.000Z',
+    snapshotId: 'snap-delete',
+    root: [el('e8', 'Button', 600, 900, 200, 80, { text: 'Delete', clickable: true })],
+  };
+
+  let currentTree = saveTree;
+  const tapRefCalls: { ref: string; snapshotId?: string }[] = [];
+  const fillCalls: { ref?: string; snapshotId?: string }[] = [];
+
+  const makeFake = () => {
+    const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, saveTree.root);
+    fake.ui = async () => currentTree;
+    fake.tap = async (_id: string, _x: number, _y: number, _label?: string, meta?: Record<string, unknown>) => ({
+      ok: true,
+      delivery: 'sent',
+      retrySafe: false,
+      ...(meta?.returnUi ? { ui: currentTree } : {}),
+    });
+    fake.tapRef = async (_id: string, ref: string, opts?: Record<string, unknown>) => {
+      tapRefCalls.push({ ref, snapshotId: opts?.snapshotId as string | undefined });
+      return { ok: true, delivery: 'sent', retrySafe: false, resolved: { ref, x: 200, y: 240 } };
+    };
+    fake.fill = async (_id: string, body: Record<string, unknown>) => {
+      fillCalls.push({ ref: body.ref as string | undefined, snapshotId: body.snapshotId as string | undefined });
+      return { element: null, tapped: { x: 200, y: 240 }, warnings: [], elapsedMs: 1, verified: true };
+    };
+    return fake;
+  };
+
+  // Repro 1a + 2: prior get_ui delivered snap-save ("Save"), then batch hides snap-delete ("Delete") in step 1
+  const s1 = await connect(makeFake());
+  try {
+    const g1 = await s1.call('get_ui');
+    assert.match(g1.text, /e8 Button "Save"/);
+
+    currentTree = deleteTree;
+    const b1 = await s1.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+    });
+    assert.equal(b1.isError, false, b1.text);
+    assert.doesNotMatch(b1.text, /Output of the last step:/);
+
+    // 1) A later tap(ref="e8") MUST stay bound to snap-save (last delivered), NEVER snap-delete (hidden step 1)
+    await s1.call('tap', { ref: 'e8' });
+    assert.equal(tapRefCalls.length, 1);
+    assert.equal(tapRefCalls[0].snapshotId, 'snap-save');
+
+    // 2) [tap(observe="ui"), get_ui(diff=true)] MUST diff against Save (last delivered), NEVER "(unchanged)" against hidden step 1
+    const b2 = await s1.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'get_ui', args: { diff: true } },
+      ],
+    });
+    assert.equal(b2.isError, false, b2.text);
+    assert.match(b2.text, /- .*Button "Save"/);
+    assert.match(b2.text, /\+ .*e8 Button "Delete"/);
+    assert.doesNotMatch(b2.text, /\(unchanged\)/);
+
+    // Now Delete WAS delivered in step 2 of b2, so tap(ref="e8") binds to snap-delete
+    await s1.call('tap', { ref: 'e8' });
+    assert.equal(tapRefCalls[1].snapshotId, 'snap-delete');
+  } finally { await s1.close(); }
+
+  // Repro 1b: fresh session (no prior get_ui) + hidden batch observation -> later tap/fill by ref MUST refuse before sending
+  tapRefCalls.length = 0;
+  fillCalls.length = 0;
+  currentTree = deleteTree;
+  const s2 = await connect(makeFake());
+  try {
+    const b = await s2.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+    });
+    assert.equal(b.isError, false, b.text);
+
+    const refusedTap = await s2.call('tap', { ref: 'e8' });
+    assert.equal(refusedTap.isError, true);
+    assert.match(refusedTap.text, /No UI tree has been read/);
+    assert.equal(tapRefCalls.length, 0, 'hidden batch step must never allow tap(ref) to reach daemon');
+
+    const refusedFill = await s2.call('fill', { ref: 'e8', value: 'hello' });
+    assert.equal(refusedFill.isError, true);
+    assert.match(refusedFill.text, /No UI tree has been read/);
+    assert.equal(fillCalls.length, 0, 'hidden batch step must never allow fill(ref) to reach daemon');
+
+    // A standalone get_ui(diff=true) after a hidden batch step has no prior delivered baseline, so it returns full lines
+    const g = await s2.call('get_ui', { diff: true });
+    assert.match(g.text, /e8 Button "Delete"/);
+    assert.doesNotMatch(g.text, /\(unchanged\)/);
+  } finally { await s2.close(); }
+});
+
+test('empty UI reads clear stale refs, and batch rollback never wipes concurrent observations on other devices', async () => {
+  const devA = {
+    id: 'android-emulator:pdtest-a', nativeId: 'pdtest-a', name: 'pdtest-a', backend: 'android-emulator', platform: 'android',
+    kind: 'virtual', state: 'running', managed: true, capabilities: [], screen: { width: 1080, height: 2400, scale: 1 },
+  } as unknown as Device;
+  const devB = {
+    id: 'android-emulator:pdtest-b', nativeId: 'pdtest-b', name: 'pdtest-b', backend: 'android-emulator', platform: 'android',
+    kind: 'virtual', state: 'running', managed: true, capabilities: [], screen: { width: 1080, height: 2400, scale: 1 },
+  } as unknown as Device;
+
+  const treeA0: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:00.000Z', snapshotId: 'snap-a0',
+    root: [el('e8', 'Button', 100, 200, 200, 80, { text: 'Save', clickable: true })],
+  };
+  const treeA1: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:01.000Z', snapshotId: 'snap-a1',
+    root: [el('e8', 'Button', 600, 900, 200, 80, { text: 'Delete', clickable: true })],
+  };
+  const treeEmpty: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:02.000Z', snapshotId: 'snap-empty',
+    root: [],
+  };
+  const treeB: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:03.000Z', snapshotId: 'snap-b1',
+    root: [el('e3', 'Button', 100, 200, 200, 80, { text: 'Confirm', clickable: true })],
+  };
+
+  const trees = new Map<string, UiTree>([[devA.id, treeA0], [devB.id, treeB]]);
+  const tapRefCalls: { device: string; ref: string; snapshotId?: string }[] = [];
+  let pauseNextTapOnA = false;
+  let step1Paused!: () => void;
+  let resumeStep1!: () => void;
+  const step1Gate = new Promise<void>((r) => { step1Paused = r; });
+  const resumeGate = new Promise<void>((r) => { resumeStep1 = r; });
+
+  const fake: Fake = {
+    calls: [], owner: 'test',
+    devices: async () => [devA, devB],
+    resolveDevice: async (q: string) => (q === 'pdtest-b' || q === devB.id ? devB : devA),
+    screen: async () => ({ width: 1080, height: 2400, scale: 1 }),
+    ui: async (id: string) => trees.get(id)!,
+    tap: async (id: string, _x: number, _y: number, _label?: string, meta?: Record<string, unknown>) => {
+      if (id === devA.id && pauseNextTapOnA) {
+        pauseNextTapOnA = false;
+        step1Paused();
+        await resumeGate;
+      }
+      return { ok: true, delivery: 'sent', retrySafe: false, ...(meta?.returnUi ? { ui: trees.get(id) } : {}) };
+    },
+    tapRef: async (id: string, ref: string, opts?: Record<string, unknown>) => {
+      tapRefCalls.push({ device: id, ref, snapshotId: opts?.snapshotId as string | undefined });
+      return { ok: true, delivery: 'sent', retrySafe: false, resolved: { ref, x: 200, y: 240 } };
+    },
+  };
+
+  const s = await connect(fake);
+  try {
+    // Item 1a: get_ui(Save) -> get_ui(empty) -> tap(ref="e8") MUST be rejected (never resolves to old Save snapshot)
+    const gSave = await s.call('get_ui', { device: 'pdtest-a' });
+    assert.match(gSave.text, /e8 Button "Save"/);
+    trees.set(devA.id, treeEmpty);
+    const gEmpty = await s.call('get_ui', { device: 'pdtest-a' });
+    assert.match(gEmpty.text, /No UI elements found/);
+    const afterEmptyGetUi = await s.call('tap', { device: 'pdtest-a', ref: 'e8' });
+    assert.equal(afterEmptyGetUi.isError, true);
+    assert.equal(tapRefCalls.length, 0, 'empty get_ui must clear prior snapshot binding');
+
+    // Item 1b: get_ui(Save) -> tap(observe="ui") returning empty -> tap(ref="e8") MUST be rejected
+    trees.set(devA.id, treeA0);
+    await s.call('get_ui', { device: 'pdtest-a' });
+    trees.set(devA.id, treeEmpty);
+    const obsEmpty = await s.call('tap', { device: 'pdtest-a', x: 10, y: 10, observe: 'ui', settle_ms: 0 });
+    assert.equal(obsEmpty.isError, false, obsEmpty.text);
+    const afterEmptyObs = await s.call('tap', { device: 'pdtest-a', ref: 'e8' });
+    assert.equal(afterEmptyObs.isError, true);
+    assert.equal(tapRefCalls.length, 0, 'empty observe="ui" must clear prior snapshot binding');
+
+    // Item 2: two-device interleaving — batch on A rolls back A's hidden step 1 without wiping B's delivered get_ui
+    trees.set(devA.id, treeA0);
+    await s.call('get_ui', { device: 'pdtest-a' }); // A's delivered baseline is snap-a0
+
+    trees.set(devA.id, treeA1);
+    pauseNextTapOnA = true;
+    const batchOnA = s.call('batch', {
+      device: 'pdtest-a',
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+    });
+    await step1Gate;
+    // While A's batch is paused in step 1 (before step 2's rollback runs), deliver get_ui on device B
+    const gB = await s.call('get_ui', { device: 'pdtest-b' });
+    assert.match(gB.text, /e3 Button "Confirm"/);
+    // Resume A's step 1 -> step 1 observes treeA1 -> step 2 triggers rollback on A
+    resumeStep1();
+    const resA = await batchOnA;
+    assert.equal(resA.isError, false, resA.text);
+
+    // Device B's binding and diff baseline MUST survive A's batch rollback
+    const tapB = await s.call('tap', { device: 'pdtest-b', ref: 'e3' });
+    assert.equal(tapB.isError, false, tapB.text);
+    assert.deepEqual(tapRefCalls.at(-1), { device: devB.id, ref: 'e3', snapshotId: 'snap-b1' });
+    const diffB = await s.call('get_ui', { device: 'pdtest-b', diff: true });
+    assert.match(diffB.text, /\(unchanged\)/);
+
+    // Device A's hidden step 1 WAS rolled back to snap-a0 (never snap-a1)
+    const tapA = await s.call('tap', { device: 'pdtest-a', ref: 'e8' });
+    assert.equal(tapA.isError, false, tapA.text);
+    assert.deepEqual(tapRefCalls.at(-1), { device: devA.id, ref: 'e8', snapshotId: 'snap-a0' });
+  } finally { await s.close(); }
+});

@@ -141,6 +141,8 @@ export interface UiTree {
   snapshotId?: string;
   /** Daemon action counter when the read began; callers can identify a read that overlapped input. */
   actionGeneration?: number;
+  /** Deterministic 16-hex-char SHA-256 of the visible outline (elements, refs, bounds, state flags, prompt, overlays). */
+  screenHash?: string;
   /** Native observation provenance, when available; a partial dump must never be mistaken for a complete one. */
   generation?: number;
   complete?: boolean;

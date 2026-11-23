@@ -214,9 +214,9 @@ a blinking caret or a status-bar clock tick doesn't count; a spinner, video or a
 ## Input & control
 | Method | Path | Body | Response |
 |---|---|---|---|
-| POST | /v1/devices/:id/input | `InputAction` or `{ actions: InputAction[] }`, plus optional `expect`, `snapshotId`, `returnUi` (see below) | `{ ok, resolved?, delivery, retrySafe, expect?, requestId?, ui?, observationUnavailable? }` (`tap` with `ref` resolves to the tap point of the element from the last `/ui`/`/find`, found again on a fresh read of the screen first (see *Tap by ref*; `resolved.moved`, `resolved.refCheck`, or `409 stale_ref` with nothing tapped), above a floating bar that covers its centre: then `resolved.coveredBy`, and `resolved.hidden: true` when nothing of it shows above the bar. Android: when the on-screen keyboard is up and its window covers the point of an element tap (`ref`, or `x`,`y` with `label`), it is hidden first and `resolved.keyboardHidden: true` (in landscape Gboard covers the whole app). A bare `x`,`y` is tapped as is, keyboard or not. `tap` with `x`,`y` takes an optional `label`, the name of what was aimed at, plus optional `selector: { text?, id?, type?, match?, index? }` (the find query that chose the point) and `element: { type?, id?, editable? }`; all three only appear in the activity log, and `flow save` turns `selector` into `tap: <text>`) |
-| POST | /v1/devices/:id/fill | `{ value, text? \| id? \| type? \| ref? \| x?,y?, match?, index?, clear?: true, submit?: false, secret?: false, focusTimeoutMs?: 2000, expect?, snapshotId?, returnUi?: false }` | `{ ok, via, element, label?, tapped, moved?, refCheck?, focused, keyboard, cleared, clearMethod, previousValue, finalValue, finalLength, verified, secret, submitted, warnings[], elapsedMs, delivery, retrySafe, expect?, requestId?, ui?, observationUnavailable? }` (`moved`, `refCheck`: added, `ref` fills, as for `tap {ref}`) |
-| POST | /v1/devices/:id/keyboard/hide | – | `{ ok }` |
+| POST | /v1/devices/:id/input | `InputAction` or `{ actions: InputAction[] }`, plus optional `expect`, `snapshotId`, `returnUi`, `settleMs` (see below) | `{ ok, resolved?, delivery, retrySafe, expect?, requestId?, ui?, observationUnavailable? }` (`tap` with `ref` resolves to the tap point of the element from the last `/ui`/`/find`, found again on a fresh read of the screen first (see *Tap by ref*; `resolved.moved`, `resolved.refCheck`, or `409 stale_ref` with nothing tapped), above a floating bar that covers its centre: then `resolved.coveredBy`, and `resolved.hidden: true` when nothing of it shows above the bar. Android: when the on-screen keyboard is up and its window covers the point of an element tap (`ref`, or `x`,`y` with `label`), it is hidden first and `resolved.keyboardHidden: true` (in landscape Gboard covers the whole app). A bare `x`,`y` is tapped as is, keyboard or not. `tap` with `x`,`y` takes an optional `label`, the name of what was aimed at, plus optional `selector: { text?, id?, type?, match?, index? }` (the find query that chose the point) and `element: { type?, id?, editable? }`; all three only appear in the activity log, and `flow save` turns `selector` into `tap: <text>`) |
+| POST | /v1/devices/:id/fill | `{ value, text? \| id? \| type? \| ref? \| x?,y?, match?, index?, clear?: true, submit?: false, secret?: false, focusTimeoutMs?: 2000, expect?, snapshotId?, returnUi?: false, settleMs? }` | `{ ok, via, element, label?, tapped, moved?, refCheck?, focused, keyboard, cleared, clearMethod, previousValue, finalValue, finalLength, verified, secret, submitted, warnings[], elapsedMs, delivery, retrySafe, expect?, requestId?, ui?, observationUnavailable? }` (`moved`, `refCheck`: added, `ref` fills, as for `tap {ref}`) |
+| POST | /v1/devices/:id/keyboard/hide | `{ returnUi?: false, settleMs? }` | `{ ok, delivery, retrySafe, requestId?, ui?, observationUnavailable? }` |
 | GET | /v1/devices/:id/requests/:requestId | – | Retained input receipt for the same device and owner: `{ requestId, status, delivery, startedAt, completedAt?, result?, resultOmitted?, error?, fingerprint, recorderPid? }`; `status` is `running`, `completed`, `failed`, or `interrupted` |
 | GET | /v1/devices/:id/actions | `?limit=200` | recorded action log `[{ at, owner, action }]` |
 | POST | /v1/devices/:id/replay | `{ actions: {action, delayMs?}[] }` | `202 { job }`; `job.result` = `{ ok, steps, skipped, warnings }` |
@@ -352,6 +352,27 @@ a 200: the input was sent (`delivery: 'sent'`), so don't resend it blindly. CLI:
 id:ID|changed`, `--expect-timeout MS`, `--expect-match M` on tap, long-press, double-tap, swipe, type, key, fill,
 launch and input (exit 1 when not verified). MCP: `expect` on tap, long_press, double_tap, swipe, type_text, fill,
 press_key and launch_app (also inside `batch`).
+
+**Post-action UI observation (`returnUi`, `settleMs`, `screenHash`).** `GET /v1/devices/:id/ui` and input routes with
+`returnUi: true` attach `screenHash` (a deterministic 16-hex-char SHA-256 of the device-pixel UI tree — visible
+elements, tap points, bounds, flags, prompts, overlay windows including `texts`, and OCR metadata — for HTTP/SDK
+consumers). Input routes (`/input`, `/fill`, `/swipe`, `/scroll-to`, `/back`, `/gesture`, `/alert`, `/keyboard/hide`,
+`/apps/:appId/launch`) accept optional `returnUi: true` and `settleMs` (integer `0..10000`, `400 bad_request` if
+invalid, `delivery: 'not_sent'`). When `expect` already read a fresh post-action screen at the current
+`actionGeneration`, `returnUi` reuses it without a second device read; otherwise it waits `settleMs` inside the input
+claim, reads the accessibility tree (falling back to OCR and registering it in `uiCache` + snapshots identically to
+`GET /ui` so returned refs work immediately), attaches `prompt`, `snapshotId`, and `screenHash`, and scrubs any secret
+substrings without blanking unrelated UI text. Observation failures never fail an already-sent action
+(`observationUnavailable: true`). In MCP, action tools accept `observe: "none" | "image" | "ui" | "both"` (and `batch`
+accepts `observe_at_end` plus `settle_ms`, backward compatible with `return_screenshot` / `screenshot_at_end`, rejecting
+conflicting combinations before sending input): `observe: "ui"` and `"both"` default to the tool's existing settle (700
+ms, 1500 ms for `launch_app`/`open_url`, or 0 ms when `expect` waited — including `batch` `observe_at_end`). MCP
+computes its reported `hash=` directly over the exact formatted outline it emits (element lines in the reported
+coordinate space, prompt/human warnings, OCR notes, and overlay window lines), so equal MCP hashes guarantee identical
+printed output by construction; repeated screens are suppressed with `Screen unchanged (obs=#N, hash=…, snapshot=…).`
+only against a tree the agent actually received, and every action-mode observation block (including unchanged-screen
+prompt warnings) is capped to 120 elements / 8,000 characters with an explicit truncation notice. Failed screenshots
+after a delivered action append a `Screenshot unavailable (…)` note without marking the action as failed.
 
 **Android input path (changed).** Taps, double taps, long presses, swipes, drags, keys and ASCII text are injected
 by the on-device helper when its session is up (a UI read or an earlier input starts it), with the input manager

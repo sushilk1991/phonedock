@@ -132,3 +132,159 @@ test('expect outcomes: verified, screen unchanged, changed but not found', () =>
   // no reading before the input: no claim about change
   assert.equal(judgeExpect(v, false, null, 5000).message, 'Not verified: "Welcome" never appeared (5.0 s).');
 });
+
+test('inputRoute returnUi + settleMs: validates options, reuses expect tree, sets screenHash/prompt, scrubs secrets without blanking UI, and handles capture failure', async () => {
+  const core = await import('./core.ts');
+  const { router } = await import('./routes.ts');
+  const { instrumentBackend } = await import('./metrics.ts');
+  const id = 'fake-obs:pdtest-obs';
+  let uiReads = 0;
+  let failUi = false;
+  let label = 'Welcome Home';
+  const sampleTree = () => ({
+    source: 'accessibility' as const,
+    screen: { width: 1080, height: 2400 },
+    capturedAt: new Date().toISOString(),
+    root: [
+      { ref: 'e1', type: 'Button', text: label, clickable: true, bounds: { x: 10, y: 100, width: 200, height: 60 } },
+      { ref: 'e2', type: 'Text', text: 'Secret: secret-token-9988', bounds: { x: 10, y: 200, width: 300, height: 60 } },
+    ],
+  });
+  const backend = instrumentBackend({
+    id: 'fake-obs',
+    platform: 'android',
+    async tap() { label = 'Welcome Home'; },
+    async launchApp() {},
+    async foregroundApp() { return { id: 'com.example.app' }; },
+    async uiTree() {
+      uiReads++;
+      if (failUi) throw new Error('tree failed');
+      return sampleTree();
+    },
+  }, 'fake-obs');
+  core.backends.push(backend as never);
+  const inputRouteMatch = router.match('POST', `/v1/devices/${id}/input`);
+  const launchRouteMatch = router.match('POST', `/v1/devices/${id}/apps/com.example.app/launch`);
+  assert.ok(inputRouteMatch && inputRouteMatch !== 'method');
+  assert.ok(launchRouteMatch && launchRouteMatch !== 'method');
+  const callInput = (body: unknown) => Promise.resolve(inputRouteMatch.h({
+    params: inputRouteMatch.params, owner: 'mcp:test:1', body: async () => body, q: () => undefined,
+  } as unknown as Ctx));
+  const callLaunch = (body: unknown) => Promise.resolve(launchRouteMatch.h({
+    params: launchRouteMatch.params, owner: 'mcp:test:1', body: async () => body, q: () => undefined,
+  } as unknown as Ctx));
+
+  try {
+    // 1) Invalid returnUi / settleMs rejected with 400 bad_request, delivery=not_sent
+    for (const bad of [{ action: 'tap', x: 1, y: 2, returnUi: 'yes' }, { action: 'tap', x: 1, y: 2, settleMs: -1 }, { action: 'tap', x: 1, y: 2, settleMs: 10001 }, { action: 'tap', x: 1, y: 2, settleMs: 1.5 }]) {
+      await assert.rejects(callInput(bad), (e: unknown) => e instanceof PhoneDockError && e.status === 400 && e.code === 'bad_request' && e.delivery === 'not_sent');
+    }
+
+    // 2) returnUi with settleMs waits and attaches screenHash, snapshotId, prompt
+    uiReads = 0;
+    const t0 = Date.now();
+    const r1 = await callInput({ action: 'tap', x: 10, y: 20, returnUi: true, settleMs: 120 }) as { ui?: { screenHash?: string; snapshotId?: string; prompt?: unknown }; delivery?: string };
+    assert.ok(Date.now() - t0 >= 110, 'expected settleMs delay');
+    assert.equal(r1.delivery, 'sent');
+    assert.equal(uiReads, 1);
+    assert.match(r1.ui?.screenHash ?? '', /^[0-9a-f]{16}$/);
+    assert.ok(r1.ui?.snapshotId);
+    assert.equal(r1.ui?.prompt, null);
+
+    // 3) returnUi with expect reuses the fresh expect tree with zero extra uiTree reads and no extra settle wait
+    label = 'Before Tap';
+    await callInput({ action: 'tap', x: 1, y: 1 }); // puts 'Welcome Home' on screen after tap; seed pre-tap cache below
+    label = 'Before Tap';
+    core.uiCache.set(id, { ...sampleTree(), actionGeneration: core.actionCount.get(id) ?? 0 });
+    uiReads = 0;
+    const tExpect = Date.now();
+    const r2 = await callInput({ action: 'tap', x: 10, y: 20, expect: { visible: 'Welcome Home', timeoutMs: 2000 }, returnUi: true, settleMs: 500 }) as { ui?: { screenHash?: string }; expect?: { ok: boolean } };
+    assert.equal(r2.expect?.ok, true);
+    assert.equal(uiReads, 1, `expected single post-action uiTree read reused by returnUi, got ${uiReads}`);
+    assert.ok(Date.now() - tExpect < 450, 'must not sleep settleMs when expect already waited');
+    assert.equal(r2.ui?.screenHash, r1.ui?.screenHash);
+
+    // 4) Secret launch with returnUi redacts secret substrings WITHOUT blanking unrelated UI labels
+    const r3 = await callLaunch({ args: { token: 'secret-token-9988' }, returnUi: true, settleMs: 0 }) as { ui?: { root: { text?: string }[] } };
+    assert.equal(r3.ui?.root[0].text, 'Welcome Home');
+    assert.equal(r3.ui?.root[1].text, 'Secret: •••');
+
+    // 5) Capture failure never fails an already-sent action; sets observationUnavailable: true
+    failUi = true;
+    const r4 = await callInput({ action: 'tap', x: 10, y: 20, returnUi: true, settleMs: 0 }) as { ok?: boolean; delivery?: string; observationUnavailable?: boolean; ui?: unknown };
+    assert.equal(r4.ok, true);
+    assert.equal(r4.delivery, 'sent');
+    assert.equal(r4.observationUnavailable, true);
+    assert.equal(r4.ui, undefined);
+  } finally {
+    failUi = false;
+    core.clearLaunchSecrets(id);
+    core.backends.splice(core.backends.indexOf(backend as never), 1);
+  }
+});
+
+test('inputRoute returnUi OCR fallback registers uiCache + snapshot so tap(ref) works immediately', async () => {
+  const core = await import('./core.ts');
+  const { router } = await import('./routes.ts');
+  const { instrumentBackend } = await import('./metrics.ts');
+  const { setOcrTreeReaderForTests } = await import('./delivery.ts');
+  const id = 'fake-ocr:pdtest-ocr';
+  const taps: { x: number; y: number }[] = [];
+
+  const backend = instrumentBackend({
+    id: 'fake-ocr',
+    platform: 'ios',
+    async tap(_nid: string, x: number, y: number) { taps.push({ x, y }); },
+    async screenshot() { return Buffer.from([0x89, 0x50, 0x4e, 0x47]); },
+    // No uiTree -> triggers OCR fallback in withUiObservation
+  }, 'fake-ocr');
+  core.backends.push(backend as never);
+  const inputRouteMatch = router.match('POST', `/v1/devices/${id}/input`);
+  assert.ok(inputRouteMatch && inputRouteMatch !== 'method');
+  const callInput = (body: unknown) => Promise.resolve(inputRouteMatch.h({
+    params: inputRouteMatch.params, owner: 'mcp:test:1', body: async () => body, q: () => undefined,
+  } as unknown as Ctx));
+
+  // Seed an older snapshot in uiCache so we verify OCR replaces it rather than binding to the old tree
+  core.uiCache.set(id, {
+    source: 'accessibility',
+    screen: { width: 1000, height: 2000 },
+    capturedAt: new Date(Date.now() - 60_000).toISOString(),
+    snapshotId: 'old-snap',
+    root: [{ ref: 'e1', type: 'Button', text: 'Stale Button', bounds: { x: 10, y: 10, width: 40, height: 40 } }],
+  });
+
+  setOcrTreeReaderForTests(async () => ({
+    source: 'ocr',
+    screen: { width: 1000, height: 2000 },
+    capturedAt: new Date().toISOString(),
+    root: [{ ref: 'e1', type: 'Text', text: 'Continue', bounds: { x: 400, y: 900, width: 200, height: 80 } }],
+  }));
+
+  try {
+    const obs = await callInput({ action: 'tap', x: 5, y: 5, returnUi: true, settleMs: 0 }) as {
+      delivery?: string;
+      ui?: { source: string; snapshotId?: string; screenHash?: string; root: { ref: string; text?: string }[] };
+    };
+    assert.equal(obs.delivery, 'sent');
+    assert.equal(obs.ui?.source, 'ocr');
+    assert.ok(obs.ui?.snapshotId && obs.ui.snapshotId !== 'old-snap', 'OCR fallback must register a fresh snapshotId');
+    assert.match(obs.ui?.screenHash ?? '', /^[0-9a-f]{16}$/);
+    assert.equal(core.uiCache.get(id)?.snapshotId, obs.ui.snapshotId);
+
+    // Immediate tap(ref="e1", snapshotId) must succeed and hit the OCR element's center (500, 940), NOT stale_ref or old-snap (30, 30)
+    taps.length = 0;
+    const tapRes = await callInput({ action: 'tap', ref: 'e1', snapshotId: obs.ui.snapshotId }) as {
+      delivery?: string;
+      resolved?: { ref: string; x: number; y: number };
+    };
+    assert.equal(tapRes.delivery, 'sent');
+    assert.deepEqual(taps, [{ x: 500, y: 940 }]);
+    assert.equal(tapRes.resolved?.x, 500);
+    assert.equal(tapRes.resolved?.y, 940);
+  } finally {
+    setOcrTreeReaderForTests(undefined);
+    core.uiCache.delete(id);
+    core.backends.splice(core.backends.indexOf(backend as never), 1);
+  }
+});

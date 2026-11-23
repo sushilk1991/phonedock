@@ -10,6 +10,7 @@ import { appNotesInfo } from '../core/app-notes.ts';
 import { PhoneDockError, type Backend, type BootOptions, type Device, type DeviceSpec, type InputAction, type LaunchOptions, type ScreenInfo, type SystemPrompt, type UiTree } from '../core/types.ts';
 import { launchLogMeta, launchSecretValues, validateLaunchOptions } from '../core/launch-options.ts';
 import { describePrompt, detectPrompt } from '../core/prompts.ts';
+import { uiTreeHash } from '../core/ui-hash.ts';
 import {
   acquireLease, backends, checkLease, clearLaunchSecrets, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
   loadFailures, logAction, readActions, record, releaseLease, rememberLaunchSecrets, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
@@ -452,6 +453,8 @@ r.get('/v1/devices/:id/ui', async (c) => {
   let prompt: SystemPrompt | null = null;
   try { prompt = detectPrompt(tree); } catch (e) { console.error('[phonedockd] detectPrompt:', e); }
   if (!ocrOff && c.q('partialOcr') !== '0' && c.q('partialOcr') !== 'false') tree = await withPartialOcr(b, nid, tree);
+  tree.prompt = prompt;
+  tree.screenHash = uiTreeHash(tree);
   uiCache.set(id, tree);
   if ((c.q('format') ?? 'json') === 'text') {
     let txt = uiText(tree);
