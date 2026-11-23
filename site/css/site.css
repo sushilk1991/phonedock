@@ -369,7 +369,7 @@ html { scroll-padding-top: 84px; }
 .clip-hold[data-paused] .i-play { display: block; }
 
 /* Devices: the real PhoneDock window (recorded with four devices in the sidebar) on a dark stage with a soft
-   indigo glow. Then the four kinds of device. */
+   indigo glow. Then the five kinds of device. */
 .fleet { margin: 0; }
 .fleet-stage {
   position: relative; isolation: isolate; overflow: hidden; display: grid; justify-items: center;
@@ -380,13 +380,27 @@ html { scroll-padding-top: 84px; }
   background: linear-gradient(180deg, rgb(7 7 11 / 0.2) 0%, rgb(7 7 11 / 0.5) 45%, rgb(7 7 11 / 0.9) 100%); }
 .fleet-app { display: block; width: min(100%, 908px); height: auto; border-radius: 12px; box-shadow: 0 0 0 1px rgb(255 255 255 / 0.12), 0 0 0 7px rgb(10 10 15 / 0.55), 0 48px 90px -30px rgb(0 0 0 / 0.85); }
 .fleet figcaption { max-width: 40rem; margin: 18px auto 0; color: var(--ink-2); font-size: 0.9375rem; text-align: center; }
-.targets { list-style: none; margin: clamp(48px, 6vw, 80px) 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: clamp(20px, 3vw, 44px); }
+.targets { list-style: none; margin: clamp(48px, 6vw, 80px) 0 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: clamp(20px, 2.6vw, 40px); }
 .targets li { padding-top: 18px; border-top: 1px solid var(--line-2); color: var(--ink-2); font-size: 0.9375rem; }
 .pl-name { color: var(--ink); font-weight: 680; font-size: 1.1875rem; font-stretch: 108%; margin-bottom: 6px; }
 .agents-row { margin-top: clamp(48px, 5vw, 72px); padding-top: 28px; border-top: 1px solid var(--line); }
 .agents-lede { max-width: 42rem; color: var(--ink-2); font-size: clamp(1.0625rem, 1.4vw, 1.25rem); }
 .agents-lede strong { color: var(--ink); font-weight: 650; }
 .agents-lede .mono { font-size: 0.9em; }
+.targets .beta { margin-left: 6px; vertical-align: 0.18em; }
+
+/* Virtual phones: three steps beside the real recording of one being made. */
+.vphones-grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: clamp(32px, 4.5vw, 72px); align-items: center; }
+.vphones-copy .sec-head { margin-bottom: 28px; }
+.kicker { display: flex; align-items: center; gap: 4px; margin-bottom: 18px; font-size: 0.8125rem; font-weight: 660; font-stretch: 85%; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-ink); }
+.vphones-steps { list-style: none; margin: 0; padding: 0; counter-reset: vstep; }
+.vphones-steps li { position: relative; padding: 16px 0 16px 36px; border-top: 1px solid var(--line); color: var(--ink-2); counter-increment: vstep; }
+.vphones-steps li::before {
+  content: counter(vstep); position: absolute; left: 0; top: 17px; width: 22px; height: 22px; display: grid; place-items: center;
+  border-radius: 50%; border: 1.5px solid var(--line-2); color: var(--accent-ink); font-size: 0.75rem; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.vphones-media { margin: 0; }
+.vphones-media figcaption { margin-top: 14px; color: var(--ink-2); font-size: 0.9375rem; }
 
 /* Use cases: four real runs side by side, each with its prompt, the recording and the agent's answer */
 /* The launch video: the real recordings, cut with a voice-over; native controls, so it plays with sound. */
@@ -531,6 +545,8 @@ html { scroll-padding-top: 84px; }
   .plain-title { grid-column: 1 / -1; }
   .runs { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 64px; }
   .targets { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 32px; }
+  .vphones-grid { grid-template-columns: minmax(0, 1fr); }
+  .vphones-copy { max-width: 44rem; }
   .runsheet li { grid-template-columns: minmax(0, 3fr) minmax(0, 7fr); }
   .rs-what { grid-column: 2; }
 }

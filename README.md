@@ -58,6 +58,19 @@ Real recordings at real speed, with the waits trimmed. Nobody touches the phones
 - **Record** the screen to an `.mp4`, or save a screenshot. What you capture in the app goes where macOS saves your
   own screenshots. Recordings an agent starts stay in PhoneDock's data folder, and the agent is told the path.
 
+## Virtual phones
+
+<a href="https://sushilk1991.github.io/phonedock/#virtual-phones"><img src="docs/media/launch/5-virtual-phones.png" alt="Virtual phones, new in PhoneDock 0.4.0: the PhoneDock window running a Pixel 7a virtual phone, beside the New Virtual Phone form set to a Google Pixel 8"></a>
+
+Some apps won't run on an emulator. A virtual phone is an Android emulator with Google Play that carries a real
+handset's identity: the model, build, IMEI, serial and carrier of a Pixel, Galaxy or OnePlus. Choose **＋ Add Device ›
+Virtual Phone**, pick the phone, and your agent drives it like any other. The first one on a system image takes a few
+minutes while PhoneDock patches that image once; later ones are ready in under a minute.
+
+It's in **Beta**. It's Wi-Fi only, so apps usually see no SIM, and apps that check hardware-backed security (Play
+Integrity's device verdict, key attestation) can still tell it's virtual. Presenting as a real phone can break an app's
+terms. [Details and limits](docs/VIRTUAL-PHONES.md)
+
 ## Put your agent to work
 
 <img src="docs/media/launch/3-uses.png" alt="Put your agent to work: replying to Instagram comments on an Android phone, testing Snackdoku on an iPhone, and research in Google and the Play Store on Android">

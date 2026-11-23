@@ -1,6 +1,6 @@
 # Launch images
 
-Four 2400x1350 (16:9) images for posts about PhoneDock. Every screen in them is a frame from a real recording
+Five 2400x1350 (16:9) images for posts about PhoneDock. Every screen in them is a frame from a real recording
 (PhoneDock's window at 2560x1600 or an iPhone at 1320x2868, both 60 fps, plus the Android runs on the site), shown in
 a plain window or phone frame. The layout and text were set in HTML and rendered with headless Chrome. Nothing is
 generated or mocked.
@@ -11,3 +11,4 @@ generated or mocked.
 | `2-bento.png` | "One window for every phone.": a real iPhone live at 60 fps, the Activity list from a handoff, real and virtual phones, and the Take Over control |
 | `3-uses.png` | "Put your agent to work.": Instagram comments on an Android phone, Snackdoku tested on an iPhone, Google and the Play Store on Android |
 | `4-handoff.png` | "It asks when it needs you." beside the real request in PhoneDock, with Take Over, Can't Do It and Done |
+| `5-virtual-phones.png` | "Now with virtual phones." beside the PhoneDock window with a Pixel 7a virtual phone and the New Virtual Phone form set to a Pixel 8 (frames from a 2880x1800 recording of 0.4.0, laid out in Remotion) |
