@@ -410,6 +410,10 @@ struct ContentView: View {
                 .onPreferenceChange(ToastLiftKey.self) { toastLift = $0 }
                 .navigationTitle(model.selectedDevice?.name ?? "PhoneDock")
                 .navigationSubtitle(model.selectedDevice?.pdWindowSubtitle ?? "")
+                // One surface per column (DESIGN.md › Window chrome): the stage runs up under the toolbar, as the
+                // sidebar and inspector run under theirs. A visible toolbar background painted a separate band here
+                // (white in light, #242424 in dark) with its own hairline, the only one in the window.
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
                 .onGeometryChange(for: Bool.self) { $0.size.width < Self.narrowToolbarBelow } action: { narrowDetail = $0 }
         }
         // Nothing to inspect without devices: the empty state gets the whole window (the toggle comes back with them).

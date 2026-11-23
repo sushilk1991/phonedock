@@ -28,7 +28,7 @@ approved mockups: an indigo-filled segment would be the loudest thing in the chr
 | Token | Light | Dark | Use |
 |---|---|---|---|
 | `Surface.window` | system `windowBackgroundColor` | system | chrome, inspector, sheets |
-| `Surface.content` | system `controlBackgroundColor` | system | lists, form rows, code and log wells |
+| `Surface.content` | system `controlBackgroundColor` | system | lists, form rows, fields and inset wells (rounded, inside the margins; never a full-width well in the inspector) |
 | `Surface.stage` | `#E8E8EC` | `#161618` | behind the device frame; the Settings panes |
 | `Surface.card` | `#FFFFFF` | `#2A2A2D` | cards, glass fallback |
 | `Ink.primary` | system `labelColor` | system | all primary text |
@@ -40,7 +40,8 @@ approved mockups: an indigo-filled segment would be the loudest thing in the chr
 | `Accent.fill` | `#5856D6` | `#5E5CE6` | prominent buttons, selection |
 | `Accent.text` | `#5856D6` | `#A5A3FF` | links, "you" text |
 
-Sidebar, toolbar and inspector use system materials. Never give them custom backgrounds.
+Sidebar, toolbar and inspector use system materials. Never give them custom backgrounds. How the three columns
+meet is in [Window chrome](#window-chrome).
 
 ### Status
 
@@ -112,6 +113,35 @@ macOS text styles only. Any number that changes in place uses monospaced digits.
   e.g. minimum and 1280 pt windows with sidebar and inspector open) the top slot is `topSlotStacked` (128 pt) so the
   handoff card stacks with a full-width, untruncated instruction above its action row. The slot depends only on the
   stage width, never on what the bar shows.
+
+## Window chrome
+
+The main window is three columns: sidebar, detail and inspector. Each one is **one surface from the top edge of the
+window to the bottom**, and its toolbar band is the top of that surface, not a strip of its own.
+
+| Column | Surface | Width (pt) | Toolbar band, leading → trailing |
+|---|---|---|---|
+| Sidebar | system sidebar material (measured `#E6E6EA` / `#1C1C1E`) | 225–360, ideal 250 | traffic lights · ＋ Add Device · Sidebar toggle |
+| Detail | `Surface.stage` up to the top edge (`.toolbarBackgroundVisibility(.hidden, for: .windowToolbar)`) | the rest; window minimum 960 × 640 | title and subtitle · Power ▾ · Screenshot · Record · Open in Separate Window |
+| Inspector | system inspector material, the same tone as the sidebar | 280–420, ideal 320 | tab picker · Inspector toggle |
+
+- **Lines.** The only lines in the chrome are the two vertical split dividers (system `separatorColor`). No hairline
+  under any toolbar band, no border along the top of a column, and no full-width well inside the inspector: Logs,
+  Apps, Elements and Activity draw their content on the inspector's own surface, as Info does. Inside a tab, separate
+  sections with `SectionHeader` spacing or Info's hairline.
+- **Toolbar controls** are the system's glass buttons and groups; never restyle them. A glass group holds controls
+  that act on the same thing (Screenshot · Record · Open in Separate Window; the inspector tabs).
+- **Text in the bands.** Title: the selected device's name ("PhoneDock" with none), subtitle "iPhone 17 Pro · iOS
+  27.2" (`pdWindowSubtitle`). Nothing else in a band is text: every control there is an icon with a tooltip and an
+  accessibility label.
+- **Hidden columns.** With the sidebar hidden, the system moves its band's items (＋ and the Sidebar toggle) to the
+  leading end of the main toolbar; with the inspector hidden, its toggle is the last item of the main toolbar. Never
+  add a second copy of a control for the hidden state.
+- **Light and dark.** In light mode the stage and the side columns are nearly one tone, and the dividers mark the
+  columns. In dark mode the stage is darker than the side columns, so the device reads as lit.
+- **Check it by measuring.** Capture the window from outside (`screencapture -l <window>`, since in-process drawing
+  paints the sidebar glass black) and sample a vertical line through each column from the top edge down. Each one
+  should be a single colour except where controls sit.
 
 ## Components
 
