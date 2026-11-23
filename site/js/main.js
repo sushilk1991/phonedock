@@ -71,7 +71,7 @@ for (const btn of document.querySelectorAll('[data-copy]')) {
 }
 
 // ---------- Reveals and section lights ----------
-const revealTargets = document.querySelectorAll('.sec-head, .what-lede, .roles, .chain, .calls, .handoff-media, .runs .run, .runsheet li, .fleet, .targets, .book, .setup-steps, .plain-col, .faq-list');
+const revealTargets = document.querySelectorAll('.sec-head, .what-lede, .roles, .chain, .calls, .handoff-media, .runs .run, .runsheet li, .fleet, .targets, .vphones-copy, .vphones-media, .book, .setup-steps, .plain-col, .faq-list');
 for (const el of revealTargets) el.classList.add('rv');
 const io = new IntersectionObserver((entries) => {
   for (const e of entries) {

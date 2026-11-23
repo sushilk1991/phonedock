@@ -425,10 +425,52 @@
           <p class="pl-name">iPhone</p>
           <p>iOS 27 or later, over Wi-Fi or USB, with live video at up to 60 fps. Nothing to install on the phone.</p>
         </li>
+        <li>
+          <p class="pl-name">Virtual phone <span class="beta">Beta</span></p>
+          <p>An Android emulator that presents as a real Pixel, Galaxy or OnePlus. <a href="#virtual-phones">How it works</a></p>
+        </li>
       </ul>
 
       <div class="agents-row">
         <p class="agents-lede"><span class="mono">phonedock setup</span> connects Claude Code, Codex, Cursor and Pi for you. Anything else that speaks MCP, like Claude Desktop, Windsurf or VS Code, needs three lines of JSON. There’s also a CLI, plus TypeScript and Python SDKs.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec vphones" id="virtual-phones" aria-labelledby="vphones-title">
+    <div class="wrap">
+      <div class="vphones-grid">
+        <div class="vphones-copy">
+          <div class="sec-head">
+            <p class="kicker">New in 0.4.0 <span class="beta">Beta</span></p>
+            <h2 id="vphones-title">A virtual phone that presents as a real Pixel.</h2>
+            <p class="sec-sub">Some apps won’t run on an emulator. A virtual phone is an Android emulator with Google Play that carries a real handset’s identity: its model, build, IMEI, serial and carrier. Your agent drives it like any other phone.</p>
+          </div>
+          <ol class="vphones-steps">
+            <li>
+              <p class="step-title">＋ Add Device › Virtual Phone.</p>
+              <p>Pick a Pixel, Galaxy or OnePlus to present as. Advanced › Carrier sets its SIM identity.</p>
+            </li>
+            <li>
+              <p class="step-title">Ready in under a minute.</p>
+              <p>The first one on a system image takes a few minutes while PhoneDock patches that image once. Later ones reuse it.</p>
+            </li>
+            <li>
+              <p class="step-title">Know its limits.</p>
+              <p>It’s Wi-Fi only, so apps usually see no SIM. Apps that check hardware-backed security, like Play Integrity’s device verdict, can still tell it’s virtual. Presenting as a real phone can break an app’s terms. <a href="https://github.com/sushilk1991/phonedock/blob/main/docs/VIRTUAL-PHONES.md">Details and limits</a></p>
+            </li>
+          </ol>
+        </div>
+
+        <figure class="vphones-media">
+          <div class="clip clip-wide" data-clip>
+            <video id="vphones-video" muted loop playsinline preload="none" poster="assets/vphone-poster.webp" width="1920" height="1080" aria-label="A recording of PhoneDock. Add Device, then Virtual Phone: the form picks a Pixel 8. It boots in 23 seconds, sped up here, and Claude Code opens its About screen, where the model reads Pixel 8.">
+              <source src="assets/vphone.mp4" type="video/mp4">
+            </video>
+            <button type="button" class="clip-hold" data-clip-hold data-paused aria-controls="vphones-video"><svg class="i-pause" aria-hidden="true" viewBox="0 0 12 12" width="12" height="12"><rect x="2" y="1.5" width="2.6" height="9" rx="1" fill="currentColor"/><rect x="7.4" y="1.5" width="2.6" height="9" rx="1" fill="currentColor"/></svg><svg class="i-play" aria-hidden="true" viewBox="0 0 12 12" width="12" height="12"><path d="M3 1.8v8.4c0 .6.6.9 1.1.6l6.4-4.2c.4-.3.4-.9 0-1.2L4.1 1.2C3.6.9 3 1.2 3 1.8z" fill="currentColor"/></svg><span data-hold-label>Play</span><span class="visually-hidden"> the virtual phone recording</span></button>
+          </div>
+          <figcaption>Recorded in PhoneDock 0.4.0. The boot is sped up; the counter shows the real seconds.</figcaption>
+        </figure>
       </div>
     </div>
   </section>
