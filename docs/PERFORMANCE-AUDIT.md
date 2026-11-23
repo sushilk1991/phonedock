@@ -149,4 +149,3 @@ The app harness's in-process screenshot verifies the layout/frame but can omit n
 | Preferences | Each app run's backup/restored parsed plists matched. Final `dev.phonedock.app` export matched the original pre-audit backup exactly. |
 
 [Verification and cleanup evidence](performance/2026-11-23/verification.json). The default daemon, existing devices and forbidden parallel-work paths were not changed. Measurement JSON, screenshots and profiles are retained; temporary runnable resources were removed.
-
