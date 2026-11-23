@@ -548,7 +548,9 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       await A.waitBootCompleted(serial, 240_000, () => exited);
       disguiseBoot?.commit();
       p?.(`boot completed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-      await A.adb(serial, ['shell', 'input', 'keyevent', '82'], { allowFail: true });
+      // Wake and unlock like a snapshot restore does. Not KEYCODE_MENU (82), the old emulator unlock: with no lock
+      // screen up, the launcher takes it and opens its Wallpaper/Widgets/Home settings menu on every fresh boot.
+      await A.adb(serial, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], { allowFail: true });
       await A.adb(serial, ['shell', 'wm', 'dismiss-keyguard'], { allowFail: true });
       if (a.managed) await presetChrome(serial);
       serialCache.delete(serial);
