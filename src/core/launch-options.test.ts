@@ -11,6 +11,8 @@ import {
   redactLaunchStep,
   validateLaunchOptions,
 } from './launch-options.ts';
+import { expandSecretForms, redactInputValue, redactSecretStrings } from './secrets.ts';
+import { PhoneDockError } from './types.ts';
 import { shQuote } from '../backends/android-common.ts';
 
 test('validateLaunchOptions: accepts string[], typed object args, and string env; normalises empty', () => {
@@ -112,4 +114,49 @@ test('secret helpers: launchLogMeta, launchSummarySuffix, launchSecretValues, re
   });
   const redactedArr = redactLaunchStep({ kind: 'launch', app: 'com.x', stop: true, arguments: ['-secret', 'val'] });
   assert.deepEqual(redactedArr.arguments, ['•••', '•••']);
+});
+
+test('launchSecretValues: redacts strings and finite numbers >= 3 chars; keeps booleans and < 3 chars unredacted', () => {
+  const secrets = launchSecretValues({
+    args: { token: 123456, neg: -42, pin: 99, zero: 0, flag: true, off: false, short: 'ab', minStr: 'abc' },
+    env: { OTP: '4567', SHORT: '12' },
+  });
+  assert.ok(secrets.includes('123456'));
+  assert.ok(secrets.includes('-42'));
+  assert.ok(secrets.includes('abc'));
+  assert.ok(secrets.includes('4567'));
+  assert.ok(!secrets.includes('99'));
+  assert.ok(!secrets.includes('0'));
+  assert.ok(!secrets.includes('true'));
+  assert.ok(!secrets.includes('false'));
+  assert.ok(!secrets.includes('ab'));
+  assert.ok(!secrets.includes('12'));
+});
+
+test('expandSecretForms and redactSecretStrings: scrub JSON-escaped forms without clobbering unrelated fields', () => {
+  const secret = 'abc"def';
+  const forms = expandSecretForms([secret]);
+  assert.ok(forms.includes('abc"def'));
+  assert.ok(forms.includes('abc\\"def'));
+  const diag = `Expected ${JSON.stringify(secret)} on screen`;
+  assert.equal(redactInputValue(diag, [secret]), 'Expected "•••" on screen');
+  assert.deepEqual(
+    redactSecretStrings({ text: 'Welcome', detail: diag }, [secret]),
+    { text: 'Welcome', detail: 'Expected "•••" on screen' },
+  );
+});
+
+test('validateLaunchOptions: rejects __proto__, constructor, and prototype keys in both args and env with 400', () => {
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    const rawArgs = JSON.parse(`{"${key}":"value"}`);
+    assert.throws(
+      () => validateLaunchOptions(rawArgs, undefined),
+      (e: unknown) => e instanceof PhoneDockError && e.status === 400 && e.code === 'bad_request' && e.delivery === 'not_sent',
+    );
+    const rawEnv = JSON.parse(`{"${key}":"value"}`);
+    assert.throws(
+      () => validateLaunchOptions(undefined, rawEnv),
+      (e: unknown) => e instanceof PhoneDockError && e.status === 400 && e.code === 'bad_request' && e.delivery === 'not_sent',
+    );
+  }
 });

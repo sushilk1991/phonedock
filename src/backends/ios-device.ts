@@ -154,11 +154,29 @@ export function normalizeWdaUrl(input: string): string {
 
 // ── devicectl ──────────────────────────────────────────────────────────────
 
+/** Build final `xcrun devicectl` argv, placing `--json-output` and `--quiet` strictly before any `--` separator. */
+export function buildDevicectlArgs(args: string[], outPath: string): string[] {
+  const sep = args.indexOf('--');
+  if (sep >= 0) return ['devicectl', ...args.slice(0, sep), '--json-output', outPath, '--quiet', ...args.slice(sep)];
+  return ['devicectl', ...args, '--json-output', outPath, '--quiet'];
+}
+
+/** Build `devicectl` subcommand args for `device process launch`, placing `--` after all devicectl options. */
+export function buildDevicectlLaunchArgs(dcDeviceId: string, appId: string, opts?: LaunchOptions): string[] {
+  const withOpts = hasLaunchOptions(opts);
+  const argv = iosLaunchArgv(opts?.args);
+  return [
+    'device', 'process', 'launch', '--device', dcDeviceId,
+    ...(withOpts ? ['--terminate-existing'] : []),
+    ...(argv.length ? ['--', appId, ...argv] : [appId]),
+  ];
+}
+
 async function devicectl<T = any>(args: string[], opts: RunOptions = {}): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'pd-devicectl-'));
   const out = join(dir, 'out.json');
   try {
-    const r = await run('xcrun', ['devicectl', ...args, '--json-output', out, '--quiet'], { env: toolEnv(), allowFail: true, timeoutMs: 120_000, ...opts });
+    const r = await run('xcrun', buildDevicectlArgs(args, out), { env: toolEnv(), allowFail: true, timeoutMs: 120_000, ...opts });
     let j: any;
     try { j = JSON.parse(readFileSync(out, 'utf8')); } catch { /* no json */ }
     if (r.code !== 0 || j?.info?.outcome === 'failed') {
@@ -974,6 +992,8 @@ export const backend: Backend & {
     const withOpts = hasLaunchOptions(opts);
     const argv = iosLaunchArgv(opts?.args);
     if (wdaUrl(udid)) {
+      // WDA only applies arguments/environment when starting a new process; terminate first when options are given.
+      if (withOpts) await wdaSession(udid, 'POST', '/wda/apps/terminate', { bundleId: appId }).catch(() => undefined);
       const payload: Record<string, unknown> = { bundleId: appId };
       if (argv.length) payload.arguments = argv;
       if (opts?.env && Object.keys(opts.env).length) payload.environment = opts.env;
@@ -983,8 +1003,7 @@ export const backend: Backend & {
     // Without args/env: no --terminate-existing, so an already-open draft survives.
     // With args/env: terminate existing instance so iOS applies the new launch arguments/environment.
     const env = iosPrefixedEnv('DEVICECTL_CHILD_', toolEnv(), opts?.env);
-    const dcArgs = ['device', 'process', 'launch', '--device', dcId(udid), ...(withOpts ? ['--terminate-existing'] : []), ...(argv.length ? ['--', appId, ...argv] : [appId])];
-    await devicectl(dcArgs, { env });
+    await devicectl(buildDevicectlLaunchArgs(dcId(udid), appId, opts), { env });
     void ensureNative(udid).catch(() => false); // warms the UI tree for the agent's next `ui`
   },
 

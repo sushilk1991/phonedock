@@ -16,12 +16,41 @@ export function inputSecretValues(body: unknown): string[] {
   }
   return [...new Set(out)];
 }
+/** Expand each secret with its JSON-string-escaped form (e.g. `abc"def` → `abc\"def`) so JSON.stringify diagnostics cannot bypass redaction. */
+export function expandSecretForms(secrets: readonly string[]): string[] {
+  const forms = new Set<string>();
+  for (const s of secrets) {
+    if (!s) continue;
+    forms.add(s);
+    const escaped = JSON.stringify(s).slice(1, -1);
+    if (escaped && escaped !== s) forms.add(escaped);
+  }
+  return [...forms].sort((a, b) => b.length - a.length);
+}
+
+/** Redact secret substrings (and their JSON-escaped forms) recursively without blanking unrelated field names. */
+export function redactSecretStrings<T>(value: T, secrets: readonly string[]): T {
+  const forms = expandSecretForms(secrets);
+  if (!forms.length) return value;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') {
+      let out = v;
+      for (const secret of forms) out = out.split(secret).join('•••');
+      return out;
+    }
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value) as T;
+}
+
 /** Redact diagnostics and structured field contents without ever storing the request body. */
 export function redactInputValue<T>(value: T, secrets: readonly string[], key = ''): T {
   if (typeof value === 'string') {
     if (secrets.length && /^(text|value|previousValue|finalValue|label)$/.test(key)) return '•••' as T;
     let out: string = value;
-    for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length)) out = out.split(secret).join('•••');
+    for (const secret of expandSecretForms(secrets)) out = out.split(secret).join('•••');
     return out as T;
   }
   if (Array.isArray(value)) return value.map((v) => redactInputValue(v, secrets)) as T;

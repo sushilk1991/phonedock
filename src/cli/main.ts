@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { PhoneDockClient, PhoneDockApiError, checkAppId, jobErrorText, matchName, tapMeta, readDaemonInfo, resolveDaemonEntry, daemonLogFile, phonedockHome } from '../sdk/client.ts';
 import type { Device, Job, DeviceSpec, Expect, ExpectReport, InputAction, OsImage, ElementMatch, Handoff, HandoffState, SystemGesture, SystemPrompt } from '../sdk/client.ts';
-import { parseArgs, str, num, bool, table, type ParsedArgs } from './args.ts';
+import { GLOBAL_ALIAS, GLOBAL_BOOLEAN, parseArgs, str, num, bool, table, type ParsedArgs } from './args.ts';
 import { localTime } from '../backends/ios-common.ts';
 import { appNotesDir, appNotesPath } from '../core/app-notes.ts';
 import { parseEnvironmentAction } from '../core/environment.ts';
@@ -112,27 +112,43 @@ function expectFlag(flags: Record<string, string | boolean>): Expect | undefined
   const mm = str(flags, 'expectMatch'); if (mm) e.match = mm as Expect['match'];
   return e;
 }
-/** Collect every value of a repeatable flag (`--arg -UITesting --arg foo` or `--env A=1 --env B=2`), stopping at `--`. */
-function manyFlag(argv: string[], flag: string): string[] {
-  const out: string[] = [];
+/** Parse `--arg`, `--extra`, `--args-json` and `--env` for `phonedock launch` in one left-to-right pass. Exported for tests. */
+export function parseLaunchFlags(argv: string[], _a?: ParsedArgs): { args?: LaunchArgs; env?: Record<string, string> } {
+  const posArgs: string[] = [];
+  const extrasRaw: string[] = [];
+  const envRaw: string[] = [];
+  let argsJsonRaw: string | undefined;
+  const boolSet = new Set(GLOBAL_BOOLEAN);
+
+  const take = (flag: string, i: number): [string, number] => {
+    if (i + 1 >= argv.length) usage(`--${flag} needs a value`);
+    return [argv[i + 1], i + 1];
+  };
+
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--') break;
-    if (argv[i] === `--${flag}`) {
-      if (i + 1 >= argv.length) usage(`--${flag} needs a value`);
-      out.push(argv[++i]);
-    } else if (argv[i].startsWith(`--${flag}=`)) {
-      out.push(argv[i].slice(flag.length + 3));
+    const tok = argv[i];
+    if (tok === '--') break;
+    if (tok === '--arg') { const [v, next] = take('arg', i); posArgs.push(v); i = next; continue; }
+    if (tok.startsWith('--arg=')) { posArgs.push(tok.slice(6)); continue; }
+    if (tok === '--extra') { const [v, next] = take('extra', i); extrasRaw.push(v); i = next; continue; }
+    if (tok.startsWith('--extra=')) { extrasRaw.push(tok.slice(8)); continue; }
+    if (tok === '--env') { const [v, next] = take('env', i); envRaw.push(v); i = next; continue; }
+    if (tok.startsWith('--env=')) { envRaw.push(tok.slice(6)); continue; }
+    if (tok === '--args-json') { const [v, next] = take('args-json', i); argsJsonRaw = v; i = next; continue; }
+    if (tok.startsWith('--args-json=')) { argsJsonRaw = tok.slice(12); continue; }
+    // Skip values of other flags so their values cannot be mistaken for launch flags.
+    if (tok.startsWith('--') && tok.length > 2) {
+      const name = tok.slice(2);
+      if (!name.includes('=') && !boolSet.has(name) && !(name.startsWith('no-') && !boolSet.has(name))) {
+        if (i + 1 < argv.length && (!argv[i + 1].startsWith('-') || /^-\.?\d/.test(argv[i + 1]))) i++;
+      }
+    } else if (tok.startsWith('-') && tok.length > 1 && !/^-\.?\d/.test(tok)) {
+      const short = tok.slice(1);
+      const name = GLOBAL_ALIAS[short] ?? short;
+      if (!boolSet.has(name) && i + 1 < argv.length) i++;
     }
   }
-  return out;
-}
 
-/** Parse `--arg`, `--extra`, `--args-json` and `--env` for `phonedock launch`. Exported for tests. */
-export function parseLaunchFlags(argv: string[], a: ParsedArgs): { args?: LaunchArgs; env?: Record<string, string> } {
-  const posArgs = manyFlag(argv, 'arg');
-  const extrasRaw = manyFlag(argv, 'extra');
-  const argsJsonRaw = a.flags.argsJson;
-  const envRaw = manyFlag(argv, 'env');
   const argSources = [posArgs.length > 0, extrasRaw.length > 0, argsJsonRaw !== undefined].filter(Boolean).length;
   if (argSources > 1) usage('launch: pass only one of --arg, --extra, or --args-json');
 
@@ -148,7 +164,6 @@ export function parseLaunchFlags(argv: string[], a: ParsedArgs): { args?: Launch
     }
     args = map;
   } else if (argsJsonRaw !== undefined) {
-    if (typeof argsJsonRaw !== 'string') usage('--args-json needs a JSON array or object');
     let parsed: unknown;
     try { parsed = JSON.parse(argsJsonRaw); } catch (e) { usage(`--args-json is not valid JSON: ${(e as Error).message}`); }
     if (!Array.isArray(parsed) && (!parsed || typeof parsed !== 'object')) usage('--args-json must be a JSON array or object');

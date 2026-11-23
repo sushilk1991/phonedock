@@ -6,6 +6,7 @@ const MAX_ENTRIES = 64;
 const MAX_KEY_LEN = 256;
 const MAX_VALUE_LEN = 4096;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const INT32_MIN = -2147483648;
 const INT32_MAX = 2147483647;
 
@@ -52,7 +53,7 @@ export function validateLaunchOptions(rawArgs: unknown, rawEnv: unknown): Launch
       if (entries.length > MAX_ENTRIES) throw badLaunch(`Too many launch arguments (max ${MAX_ENTRIES})`);
       const map: Record<string, LaunchArgValue> = {};
       for (const [k, v] of entries) {
-        if (!k || k.length > MAX_KEY_LEN || k.includes('\0')) throw badLaunch(`Invalid launch argument key ${JSON.stringify(k)}`);
+        if (!k || k.length > MAX_KEY_LEN || k.includes('\0') || FORBIDDEN_KEYS.has(k)) throw badLaunch(`Invalid launch argument key ${JSON.stringify(k)}`);
         map[k] = checkExtraValue(v, k);
       }
       if (entries.length) args = map;
@@ -68,7 +69,7 @@ export function validateLaunchOptions(rawArgs: unknown, rawEnv: unknown): Launch
     if (entries.length > MAX_ENTRIES) throw badLaunch(`Too many launch environment variables (max ${MAX_ENTRIES})`);
     const map: Record<string, string> = {};
     for (const [k, v] of entries) {
-      if (!ENV_KEY_RE.test(k)) throw badLaunch(`Invalid environment variable name ${JSON.stringify(k)} (expected [A-Za-z_][A-Za-z0-9_]*)`);
+      if (!ENV_KEY_RE.test(k) || FORBIDDEN_KEYS.has(k)) throw badLaunch(`Invalid environment variable name ${JSON.stringify(k)} (expected [A-Za-z_][A-Za-z0-9_]*)`);
       map[k] = checkString(v, `env.${k}`);
     }
     if (entries.length) env = map;
@@ -108,7 +109,7 @@ export function iosPrefixedEnv(prefix: 'SIMCTL_CHILD_' | 'DEVICECTL_CHILD_', bas
 export function androidIntentExtraFlags(args: Record<string, LaunchArgValue>, quote: (s: string) => string): string[] {
   const out: string[] = [];
   for (const [k, raw] of Object.entries(args)) {
-    if (!k || k.length > MAX_KEY_LEN || k.includes('\0')) throw badLaunch(`Invalid launch argument key ${JSON.stringify(k)}`);
+    if (!k || k.length > MAX_KEY_LEN || k.includes('\0') || FORBIDDEN_KEYS.has(k)) throw badLaunch(`Invalid launch argument key ${JSON.stringify(k)}`);
     const v = checkExtraValue(raw, k);
     if (typeof v === 'boolean') {
       out.push('--ez', quote(k), v ? 'true' : 'false');
@@ -125,13 +126,15 @@ export function androidIntentExtraFlags(args: Record<string, LaunchArgValue>, qu
   return out;
 }
 
-/** Sensitive string values from launch args/env for global error/log scrubbing (skips 1-char and true/false literals). */
+/** Sensitive string and stringified-number values (length >= 3) from launch args/env for redaction.
+ *  Booleans and values shorter than 3 characters stay unredacted in free-text scrubbing. */
 export function launchSecretValues(opts?: { args?: unknown; env?: unknown }): string[] {
   const out: string[] = [];
   const add = (v: unknown) => {
-    if (typeof v !== 'string' || v.length < 2) return;
-    if (v === 'true' || v === 'false') return;
-    out.push(v);
+    if (typeof v === 'boolean') return;
+    const s = typeof v === 'string' ? v : typeof v === 'number' && Number.isFinite(v) ? String(v) : undefined;
+    if (!s || s.length < 3) return;
+    out.push(s);
   };
   if (Array.isArray(opts?.args)) {
     for (const v of opts.args) add(v);

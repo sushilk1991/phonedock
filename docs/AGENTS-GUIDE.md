@@ -477,7 +477,7 @@ phonedock record pdtest-a start --max 120 ; phonedock record pdtest-a stop
 phonedock appdata pdtest-a save com.example.app logged-in             # restore | ls
 phonedock app-notes show com.example.app ; phonedock app-notes save com.example.app --file notes.md   # list | rm | path
 phonedock screenshot pdtest-a -o shot.png --max-size 1024
-phonedock apps pdtest-a ; phonedock launch pdtest-a com.example.app [--arg -UITesting] [--extra env=staging] [--args-json '{"debug":true}'] [--env API_URL=…]
+phonedock apps pdtest-a ; phonedock launch pdtest-a com.example.app [--arg -UITesting] [--extra env=staging] [--args-json '{"debug":true}'] [--env API_URL=…]  # on iOS, pass secrets via --env (launch args are visible to local processes)
 phonedock shell pdtest-a -- getprop ro.build.version.release
 phonedock flow save pdtest-a -o flows/sign-in.yaml --assert "Welcome"   # the latest session → a flow file
 phonedock test flows/ --device pdtest-a --junit junit.xml               # exit 0 only if every flow passed

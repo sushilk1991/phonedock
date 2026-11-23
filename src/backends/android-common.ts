@@ -627,7 +627,7 @@ export function parseResolvedActivity(out: string): string | undefined {
 export function buildAndroidLaunchCommand(component: string, args: Record<string, string | number | boolean>): string {
   if (!COMPONENT_RE.test(component)) throw new PhoneDockError('The launch activity is invalid', 'bad_request', 400, undefined, `Invalid component ${JSON.stringify(component)}`, 'not_sent');
   const extras = androidIntentExtraFlags(args, shQuote);
-  const cmd = ['am', 'start', '-S', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', '-n', component, ...extras].join(' ');
+  const cmd = ['am', 'start', '-S', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', '-n', shQuote(component), ...extras].join(' ');
   return `l=$(cmd window user-rotation 2>/dev/null); ${cmd}; rc=$?; case "$l" in "lock "[0-3]) cmd window user-rotation $l >/dev/null 2>&1;; esac; exit $rc`;
 }
 export async function launchApp(serial: string, id: string, opts?: LaunchOptions) {
@@ -660,7 +660,8 @@ export async function launchApp(serial: string, id: string, opts?: LaunchOptions
       throw new PhoneDockError("Couldn’t launch the app", 'launch_failed', 500, ['Check that the app is installed and has a launchable activity.'], `Could not resolve launcher activity for ${id}`, 'not_sent');
     }
     const shellCmd = buildAndroidLaunchCommand(component, opts.args);
-    const r = await adb(serial, ['shell', shellCmd], { allowFail: true });
+    // Pass the command on stdin so extra values never appear in host process argv (`ps`).
+    const r = await adb(serial, ['shell', 'sh', '-s'], { input: `${shellCmd}\n`, allowFail: true });
     const combined = redactInputValue((r.stdout + r.stderr).trim().slice(-400), secrets);
     if (r.code !== 0 || /(?:^|\n)\s*(?:Error:|Exception|SecurityException|Activity class .* does not exist)/i.test(r.stdout + r.stderr)) {
       throw new PhoneDockError("Couldn’t launch the app", 'launch_failed', 500, ['Check that the app is installed.'], `Could not launch ${id} with extras: ${combined}`);

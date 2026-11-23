@@ -8,11 +8,11 @@ import { sleep } from '../core/exec.ts';
 import { stateDir } from '../core/paths.ts';
 import { appNotesInfo } from '../core/app-notes.ts';
 import { PhoneDockError, type Backend, type BootOptions, type Device, type DeviceSpec, type InputAction, type LaunchOptions, type ScreenInfo, type SystemPrompt, type UiTree } from '../core/types.ts';
-import { launchLogMeta, validateLaunchOptions } from '../core/launch-options.ts';
+import { launchLogMeta, launchSecretValues, validateLaunchOptions } from '../core/launch-options.ts';
 import { describePrompt, detectPrompt } from '../core/prompts.ts';
 import {
-  acquireLease, backends, checkLease, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
-  loadFailures, logAction, readActions, record, releaseLease, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
+  acquireLease, backends, checkLease, clearLaunchSecrets, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
+  loadFailures, logAction, readActions, record, releaseLease, rememberLaunchSecrets, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
   stopStreamsFor, restartStreamsFor, withTransition, dropLeaseOnStop, streamStats, uiCache, upsertRecord, pollDevices, withTimeout, stopRecordingFor, fallbackFrame, waitForStreamFrame, type Job,
   assertDeviceAllowed, assertNameAllowed, assertPhysicalAllowed, touchLease, noteScreen, inventoryStatus,
 } from './core.ts';
@@ -169,7 +169,7 @@ r.del('/v1/devices/:id', async (c) => {
   await stopRecordingFor(id, 'device deleted');
   await stopTraceFor(id, 'device deleted').catch(() => undefined);
   await need(b, 'delete', 'delete')(nid);
-  removeRecord(id); uiCache.delete(id); releaseLease(id, c.owner, true);
+  removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
   invalidateDevices();
   return { ok: true };
 });
@@ -652,6 +652,7 @@ r.post('/v1/devices/:id/apps/:appId/launch', inputRoute(async (c) => {
   const launchOpts = validateLaunchOptions(body.args, body.env);
   const exp = await prepareExpect({ id, b, nid }, body.expect);
   await need(b, 'launchApp', 'launch')(nid, appId, launchOpts);
+  rememberLaunchSecrets(id, launchSecretValues(launchOpts));
   logAction(id, c.owner, { action: 'launch', appId, ...launchLogMeta(launchOpts) });
   const front = body.verify === false || !b.foregroundApp ? {} : await confirmInFront(b, nid, appId, 3000, launchOpts);
   const expect = exp ? await finishExpect({ id, b, nid }, exp) : undefined;

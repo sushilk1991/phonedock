@@ -1,7 +1,7 @@
 // POST /v1/devices/:id/flow – turn this device's action log (+ what the daemon saw on screen) into a flow file
 // (src/core/flow.ts). The caller writes the file; the daemon may run from the app bundle with no useful cwd.
 import { FlowError, flowFromLog, parseStep, writeFlow, type LogEntry, type Step } from '../core/flow.ts';
-import { getDevice, readActions, uiCache } from './core.ts';
+import { deviceLaunchSecrets, getDevice, readActions, uiCache } from './core.ts';
 import { badRequest } from './http.ts';
 import { cleanTree } from './media.ts';
 import { readObservations } from './observe.ts';
@@ -77,6 +77,7 @@ r.post('/v1/devices/:id/flow', async (c) => {
       osVersion: device.osVersion, device: device.name, model: device.model,
       screen: device.screen ? { width: device.screen.width, height: device.screen.height } : undefined,
       assertions, autoAssert: body.autoAssert === undefined ? true : yes(body.autoAssert), keepNoise: yes(body.keepNoise), now,
+      secrets: deviceLaunchSecrets(id),
     });
   } catch (e) {
     if (e instanceof FlowError) throw badRequest(e.message);

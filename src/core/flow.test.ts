@@ -361,4 +361,22 @@ steps:
   });
   assert.ok(saved.warnings.some((w) => w.includes('LAUNCH_ARG_USERROLE')));
   assert.ok(saved.warnings.some((w) => w.includes('API_TOKEN')));
+
+  // flowFromLog also scrubs unredacted screen observations when secrets are passed, and never asserts redacted text
+  const secretSaved = flowFromLog(
+    [{ at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['token'] } }],
+    [{ at: '2026-11-23T10:00:01.000Z', kind: 'screen', sig: 's1', texts: ['alpha-secret', 'Signed in'] }],
+    { secrets: ['alpha-secret'] },
+  );
+  assert.ok(!secretSaved.text.includes('alpha-secret'));
+  assert.ok(!secretSaved.text.includes('•••'));
+  assert.match(secretSaved.text, /assert_visible:\s*Signed in/);
+
+  const onlySecret = flowFromLog(
+    [{ at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['token'] } }],
+    [{ at: '2026-11-23T10:00:01.000Z', kind: 'screen', sig: 's2', texts: ['alpha-secret'] }],
+    { secrets: ['alpha-secret'] },
+  );
+  assert.ok(!onlySecret.text.includes('alpha-secret'));
+  assert.ok(!onlySecret.text.includes('assert_visible'));
 });

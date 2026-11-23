@@ -321,3 +321,52 @@ steps:
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runner: redacts numeric (>= 3 chars) and quote-containing (JSON-escaped) launch arguments from logs, results, and reports', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  const numToken = 123456;
+  const quoteSecret = 'abc"def';
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.logs = async () => `seen ${numToken} and ${JSON.stringify(quoteSecret)}`;
+  const oldUi = c.ui;
+  c.ui = async (id) => ({
+    ...await oldUi(id),
+    root: [
+      { ref: 'e1', type: 'Text', text: `Token: ${numToken}`, bounds: { x: 0, y: 0, width: 100, height: 20 } },
+      { ref: 'e2', type: 'Text', text: quoteSecret, bounds: { x: 0, y: 30, width: 100, height: 20 } },
+    ],
+  });
+  c.waitFor = async () => {
+    throw Object.assign(new Error(`Timed out waiting for "missing"`), {
+      code: 'wait_timeout',
+      detail: `Screen now: ${JSON.stringify(String(numToken))}, ${JSON.stringify(quoteSecret)}`,
+    });
+  };
+  try {
+    const flow = parseFlow(JSON.stringify({
+      name: 'Numeric and quoted launch secrets',
+      appId: 'dev.phonedock.sample',
+      steps: [
+        { launch: { arguments: { token: numToken, quote: quoteSecret, flag: true } } },
+        { assert_visible: 'missing' },
+      ],
+    }));
+    const logged: string[] = [];
+    const r = await runFlow(c, flow, {
+      deviceId: 'd', artifactsDir: dir, settle: false, timeoutMs: 0,
+      log: (l) => logged.push(l),
+    });
+    assert.equal(r.status, 'fail');
+    const escapedQuote = 'abc\\"def';
+    const check = (label: string, text: string) => {
+      assert.ok(!text.includes('123456'), `${label} leaked numeric secret`);
+      assert.ok(!text.includes(quoteSecret), `${label} leaked quoted secret`);
+      assert.ok(!text.includes(escapedQuote), `${label} leaked JSON-escaped secret`);
+    };
+    check('progress log', logged.join('\n'));
+    check('FlowResult', JSON.stringify(r));
+    for (const file of ['report.html', 'result.json', 'steps.txt', 'logs.txt', 'ui.json']) {
+      check(file, readFileSync(join(r.artifacts!, file), 'utf8'));
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

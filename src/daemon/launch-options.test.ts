@@ -15,6 +15,8 @@ delete process.env.PHONEDOCK_DEVICE_FILTER;
 const core = await import('./core.ts');
 const { guardedBackendCall } = await import('./execution.ts');
 const { router } = await import('./routes.ts');
+const { noteScreen, readObservations } = await import('./observe.ts');
+await import('./routes-flow.ts');
 
 const calls: { nid: string; appId: string; opts?: LaunchOptions }[] = [];
 let fgMode: 'match' | 'home-then-match' = 'match';
@@ -104,6 +106,8 @@ test('POST /apps/:appId/launch: rejects invalid args/env with 400 bad_request an
     { args: 'not-valid' },
     { env: { 'bad-key': '1' } },
     { env: { OK: 123 } },
+    JSON.parse('{"args":{"__proto__":"value"}}'),
+    JSON.parse('{"env":{"__proto__":"value"}}'),
   ]) {
     const e = await fails(call('POST', `/v1/devices/${encodeURIComponent(dev)}/apps/com.example.app/launch`, body));
     assert.equal(e.status, 400);
@@ -131,5 +135,64 @@ test('corellium backend: explicitly rejects launch args and env with 501 not_sup
     assert.equal(e.status, 501);
     assert.equal(e.code, 'not_supported');
     assert.equal(e.delivery, 'not_sent');
+  }
+});
+
+test('per-device launch secrets: scrub later observations & flow save, clear on shutdown, and enforce bounded cap', async () => {
+  calls.length = 0; failWith = undefined; fgMode = 'match';
+  const dev = 'fake-launch-ios:pdtest-obs-secret';
+  const secret = 'alpha-secret';
+
+  // Ensure listDevices can return this fake device for POST /v1/devices/:id/flow
+  const origList = fakeIos.listDevices;
+  fakeIos.listDevices = async () => [{
+    id: dev, backend: 'fake-launch-ios', nativeId: 'pdtest-obs-secret', name: 'pdtest-obs-secret',
+    platform: 'ios', kind: 'virtual', state: 'running', managed: true, capabilities: ['launch'],
+  }];
+  try {
+    const res = await call('POST', `/v1/devices/${encodeURIComponent(dev)}/apps/com.example.app/launch`, {
+      args: { token: secret },
+    });
+    assert.equal(res.ok, true);
+    assert.ok(core.deviceLaunchSecrets(dev).includes(secret));
+
+    // Later, outside the launch request scope, the app displays the secret on screen
+    noteScreen(dev, {
+      source: 'accessibility',
+      capturedAt: new Date().toISOString(),
+      screen: { width: 390, height: 844 },
+      root: [
+        { ref: 'e1', type: 'StaticText', text: secret, bounds: { x: 10, y: 120, width: 200, height: 30 } },
+        { ref: 'e2', type: 'StaticText', text: `Token: ${secret}`, bounds: { x: 10, y: 160, width: 200, height: 30 } },
+        { ref: 'e3', type: 'StaticText', text: 'Welcome Home', bounds: { x: 10, y: 200, width: 200, height: 30 } },
+      ],
+    });
+
+    const obs = readObservations(dev);
+    assert.ok(obs.length > 0, 'expected screen observation');
+    assert.ok(!JSON.stringify(obs).includes(secret), `observations.jsonl leaked secret: ${JSON.stringify(obs)}`);
+
+    // flow save must never emit the secret or a redacted placeholder as assert_visible
+    const saved = await call('POST', `/v1/devices/${encodeURIComponent(dev)}/flow`, { since: '5m' });
+    assert.ok(!saved.text.includes(secret), `saved flow leaked secret:\n${saved.text}`);
+    assert.ok(!saved.text.includes('•••'), `saved flow asserted redacted placeholder:\n${saved.text}`);
+    assert.match(saved.text, /assert_visible:\s*Welcome Home/);
+
+    // Device shutdown clears its in-memory launch secrets
+    core.dropLeaseOnStop(dev);
+    assert.deepEqual(core.deviceLaunchSecrets(dev), []);
+
+    // Bounded cap: FIFO eviction keeps newest MAX_DEVICE_LAUNCH_SECRETS entries
+    const cap = core.MAX_DEVICE_LAUNCH_SECRETS;
+    for (let i = 0; i < cap + 5; i++) core.rememberLaunchSecrets(dev, [`sec-${String(i).padStart(4, '0')}`]);
+    const kept = core.deviceLaunchSecrets(dev);
+    assert.equal(kept.length, cap);
+    assert.ok(!kept.includes('sec-0000'));
+    assert.ok(!kept.includes('sec-0004'));
+    assert.ok(kept.includes('sec-0005'));
+    assert.ok(kept.includes(`sec-${String(cap + 4).padStart(4, '0')}`));
+    core.clearLaunchSecrets(dev);
+  } finally {
+    fakeIos.listDevices = origList;
   }
 });

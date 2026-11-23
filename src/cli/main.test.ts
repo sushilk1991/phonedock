@@ -94,4 +94,16 @@ test('parseLaunchFlags: --arg (including leading dash), --extra, --args-json, --
     () => parseLaunchFlags(['launch', 'd', 'app', '--env', 'NO_EQUALS'], parseArgs(['launch', 'd', 'app', '--env', 'NO_EQUALS'])),
     /--env takes NAME=VALUE/,
   );
+
+  // Single left-to-right pass: a value that looks like another launch flag is consumed as a value, not re-parsed
+  const argvFlagVal = ['launch', 'sim', 'com.example', '--arg', '--env'];
+  const parsedFlagVal = parseArgs(argvFlagVal);
+  assert.deepEqual(parsedFlagVal.positionals, ['launch', 'sim', 'com.example']);
+  assert.deepEqual(parseLaunchFlags(argvFlagVal, parsedFlagVal), { args: ['--env'] });
+
+  const argvChained = ['launch', 'sim', 'com.example', '--arg', '--extra', '--arg', '--args-json', '--env', 'K=--arg', '--expect', 'Welcome'];
+  assert.deepEqual(parseLaunchFlags(argvChained, parseArgs(argvChained)), {
+    args: ['--extra', '--args-json'],
+    env: { K: '--arg' },
+  });
 });

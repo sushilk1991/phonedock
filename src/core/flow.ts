@@ -23,6 +23,7 @@
 // src/daemon/observe.ts (observations) and src/daemon/routes-flow.ts (POST /v1/devices/:id/flow).
 import { validateSettingsInput, type SettingsInput } from './device-settings.ts';
 import { validateLaunchOptions } from './launch-options.ts';
+import { redactSecretStrings } from './secrets.ts';
 import type { LaunchArgs } from './types.ts';
 import { YAML_COMMENT, YamlError, parse as parseYaml, stringify as stringifyYaml } from './yaml.ts';
 
@@ -535,6 +536,8 @@ export interface FromLogOptions {
   autoAssert?: boolean;
   /** Keep what looks like noise (undone taps, toggles flipped back). Default false. */
   keepNoise?: boolean;
+  /** Secret values (e.g. from this device's launch args/env) to scrub from logs, observations, and auto-assertions. */
+  secrets?: readonly string[];
   now?: string;
 }
 export interface FromLogResult {
@@ -567,7 +570,7 @@ export function pickAssertText(screen: { texts: string[] } | undefined, prev: { 
   const lower = (s: string) => s.toLowerCase();
   const old = new Set((prev?.texts ?? []).map(lower));
   const no = new Set(avoid.map(lower));
-  const ok = (t: string) => t.length >= 2 && t.length <= 40 && !GENERIC.has(lower(t)) && !no.has(lower(t));
+  const ok = (t: string) => t.length >= 2 && t.length <= 40 && !t.includes('•••') && !GENERIC.has(lower(t)) && !no.has(lower(t));
   const noDigits = (t: string) => !/\d/.test(t);
   const tiers = [
     (t: string) => ok(t) && noDigits(t) && !old.has(lower(t)),
@@ -612,14 +615,16 @@ function pct(x: number, y: number, screen?: { width: number; height: number }): 
 
 /** Turn an action log (+ screen observations) into a clean flow. Pure: the daemon reads the files and calls this. */
 export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: FromLogOptions = {}): FromLogResult {
+  const safeEntriesIn = o.secrets?.length ? redactSecretStrings(entriesIn, o.secrets) : entriesIn;
+  const safeObsIn = o.secrets?.length ? redactSecretStrings(obsIn, o.secrets) : obsIn;
   const t = (s: string) => Date.parse(s);
   const inRange = (at: string) => (!o.since || t(at) >= t(o.since)) && (!o.until || t(at) <= t(o.until));
-  const entries = entriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
+  const entries = safeEntriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
   // Only one owner's actions: screens after someone else took over the device are not this session's.
   const lastOwn = entries.length ? t(entries[entries.length - 1].at) : -Infinity;
-  const takeover = o.owner ? entriesIn.find((e) => e && e.at && t(e.at) > lastOwn && e.owner !== 'daemon' && !ownerOk(e.owner, o.owner) && !/^lease\./.test(String(e.action?.action ?? ''))) : undefined;
+  const takeover = o.owner ? safeEntriesIn.find((e) => e && e.at && t(e.at) > lastOwn && e.owner !== 'daemon' && !ownerOk(e.owner, o.owner) && !/^lease\./.test(String(e.action?.action ?? ''))) : undefined;
   const cutoff = takeover ? t(takeover.at) : Infinity;
-  const obs = obsIn.filter((x) => x && x.at && inRange(x.at) && t(x.at) < cutoff && (x.kind === 'screen' || ownerOk(x.owner, o.owner)));
+  const obs = safeObsIn.filter((x) => x && x.at && inRange(x.at) && t(x.at) < cutoff && (x.kind === 'screen' || ownerOk(x.owner, o.owner)));
   const warnings: string[] = []; const dropped: string[] = [];
   const counts = new Map<string, number>(); const bump = (one: string, many: string) => { const k = `${one}\u0000${many}`; counts.set(k, (counts.get(k) ?? 0) + 1); };
 

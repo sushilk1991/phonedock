@@ -304,8 +304,29 @@ export async function withTransition<T>(id: string, kind: Transition, fn: () => 
   try { return await fn(); }
   finally { transitions.delete(id); if (kind !== 'restoring') recentlyStopped.set(id, Date.now()); invalidateDevices(); }
 }
+// ── per-device launch secrets (in-memory only, bounded) ─────────────────────
+// Kept until the device shuts down, is deleted, or the daemon restarts, so observations and `flow save`
+// never record or emit launch secret values shown on screen after the launch request returns.
+export const MAX_DEVICE_LAUNCH_SECRETS = 128;
+const launchSecrets = new Map<string, string[]>();
+export function rememberLaunchSecrets(id: string, secrets: readonly string[]) {
+  if (!secrets.length) return;
+  const list = launchSecrets.get(id) ?? [];
+  for (const s of secrets) {
+    if (!s) continue;
+    const idx = list.indexOf(s);
+    if (idx >= 0) list.splice(idx, 1);
+    list.push(s);
+  }
+  if (list.length > MAX_DEVICE_LAUNCH_SECRETS) list.splice(0, list.length - MAX_DEVICE_LAUNCH_SECRETS);
+  launchSecrets.set(id, list);
+}
+export function deviceLaunchSecrets(id: string): string[] { return [...(launchSecrets.get(id) ?? [])]; }
+export function clearLaunchSecrets(id: string) { launchSecrets.delete(id); }
+
 /** A stopped phone has no one in control: the person's lease (and what it remembers) ends with the shutdown. */
 export function dropLeaseOnStop(id: string) {
+  clearLaunchSecrets(id);
   const l = leases.get(id);
   if (!l) return;
   leases.delete(id); releaseClaim(id); ownershipChanged(id);
