@@ -30,7 +30,7 @@ import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTEN
 import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;
