@@ -486,3 +486,112 @@ test('observe regressions: failed screenshot preserves delivered action, batch n
     assert.ok(explicitMs >= 100 && explicitMs < 550, `expected explicit ~120 ms settle on observe_at_end, took ${explicitMs} ms`);
   } finally { await s.close(); }
 });
+
+test('hidden batch observations never update snapshot/ref binding, suppression hash, or get_ui(diff) baseline', async () => {
+  const saveTree: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    snapshotId: 'snap-save',
+    root: [el('e8', 'Button', 100, 200, 200, 80, { text: 'Save', clickable: true })],
+  };
+  const deleteTree: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:01.000Z',
+    snapshotId: 'snap-delete',
+    root: [el('e8', 'Button', 600, 900, 200, 80, { text: 'Delete', clickable: true })],
+  };
+
+  let currentTree = saveTree;
+  const tapRefCalls: { ref: string; snapshotId?: string }[] = [];
+  const fillCalls: { ref?: string; snapshotId?: string }[] = [];
+
+  const makeFake = () => {
+    const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, saveTree.root);
+    fake.ui = async () => currentTree;
+    fake.tap = async (_id: string, _x: number, _y: number, _label?: string, meta?: Record<string, unknown>) => ({
+      ok: true,
+      delivery: 'sent',
+      retrySafe: false,
+      ...(meta?.returnUi ? { ui: currentTree } : {}),
+    });
+    fake.tapRef = async (_id: string, ref: string, opts?: Record<string, unknown>) => {
+      tapRefCalls.push({ ref, snapshotId: opts?.snapshotId as string | undefined });
+      return { ok: true, delivery: 'sent', retrySafe: false, resolved: { ref, x: 200, y: 240 } };
+    };
+    fake.fill = async (_id: string, body: Record<string, unknown>) => {
+      fillCalls.push({ ref: body.ref as string | undefined, snapshotId: body.snapshotId as string | undefined });
+      return { element: null, tapped: { x: 200, y: 240 }, warnings: [], elapsedMs: 1, verified: true };
+    };
+    return fake;
+  };
+
+  // Repro 1a + 2: prior get_ui delivered snap-save ("Save"), then batch hides snap-delete ("Delete") in step 1
+  const s1 = await connect(makeFake());
+  try {
+    const g1 = await s1.call('get_ui');
+    assert.match(g1.text, /e8 Button "Save"/);
+
+    currentTree = deleteTree;
+    const b1 = await s1.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+    });
+    assert.equal(b1.isError, false, b1.text);
+    assert.doesNotMatch(b1.text, /Output of the last step:/);
+
+    // 1) A later tap(ref="e8") MUST stay bound to snap-save (last delivered), NEVER snap-delete (hidden step 1)
+    await s1.call('tap', { ref: 'e8' });
+    assert.equal(tapRefCalls.length, 1);
+    assert.equal(tapRefCalls[0].snapshotId, 'snap-save');
+
+    // 2) [tap(observe="ui"), get_ui(diff=true)] MUST diff against Save (last delivered), NEVER "(unchanged)" against hidden step 1
+    const b2 = await s1.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'get_ui', args: { diff: true } },
+      ],
+    });
+    assert.equal(b2.isError, false, b2.text);
+    assert.match(b2.text, /- .*Button "Save"/);
+    assert.match(b2.text, /\+ .*e8 Button "Delete"/);
+    assert.doesNotMatch(b2.text, /\(unchanged\)/);
+
+    // Now Delete WAS delivered in step 2 of b2, so tap(ref="e8") binds to snap-delete
+    await s1.call('tap', { ref: 'e8' });
+    assert.equal(tapRefCalls[1].snapshotId, 'snap-delete');
+  } finally { await s1.close(); }
+
+  // Repro 1b: fresh session (no prior get_ui) + hidden batch observation -> later tap/fill by ref MUST refuse before sending
+  tapRefCalls.length = 0;
+  fillCalls.length = 0;
+  currentTree = deleteTree;
+  const s2 = await connect(makeFake());
+  try {
+    const b = await s2.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+    });
+    assert.equal(b.isError, false, b.text);
+
+    const refusedTap = await s2.call('tap', { ref: 'e8' });
+    assert.equal(refusedTap.isError, true);
+    assert.match(refusedTap.text, /No UI tree has been read/);
+    assert.equal(tapRefCalls.length, 0, 'hidden batch step must never allow tap(ref) to reach daemon');
+
+    const refusedFill = await s2.call('fill', { ref: 'e8', value: 'hello' });
+    assert.equal(refusedFill.isError, true);
+    assert.match(refusedFill.text, /No UI tree has been read/);
+    assert.equal(fillCalls.length, 0, 'hidden batch step must never allow fill(ref) to reach daemon');
+
+    // A standalone get_ui(diff=true) after a hidden batch step has no prior delivered baseline, so it returns full lines
+    const g = await s2.call('get_ui', { diff: true });
+    assert.match(g.text, /e8 Button "Delete"/);
+    assert.doesNotMatch(g.text, /\(unchanged\)/);
+  } finally { await s2.close(); }
+});

@@ -192,3 +192,25 @@ test('formatUiObservation: enforces 8000-char cap with notice on unchanged-scree
   assert.ok(emptyHuge.text.length <= OBSERVE_MAX_CHARS);
   assert.match(emptyHuge.text, /8000 char limit.*call get_ui for the full tree\./);
 });
+
+test('formatUiObservation: diff baseline only records lines actually delivered to the agent', () => {
+  const ctx = makeCtx();
+  const scale = standardSpace(1200, 2400);
+  const wideEls: UiElement[] = Array.from({ length: 110 }, (_, i) => ({
+    ref: `e${i + 1}`,
+    type: 'StaticText',
+    text: `Item ${i + 1} ${'abcdefghij'.repeat(7)}`,
+    id: `com.example:id/very_long_identifier_row_${i + 1}`,
+    clickable: true,
+    bounds: { x: 10, y: 10 + i * 10, width: 500, height: 10 },
+  }));
+  const tree = makeTree(wideEls, { snapshotId: 'snap-trunc' });
+  const rAction = formatUiObservation({ ctx, device: dev, tree, scale, mode: 'action' });
+  assert.equal(rAction.truncated, true);
+  assert.ok(rAction.shownElements > 0 && rAction.shownElements < 110);
+  assert.equal(ctx.outlines?.get(dev.id)?.lines.length, rAction.shownElements);
+
+  // Subsequent get_ui(diff=true) must surface the elements that were cut off from the action response
+  const rDiff = formatUiObservation({ ctx, device: dev, tree, scale, mode: 'full', diff: true });
+  assert.match(rDiff.text, /\+ e110 StaticText "Item 110/);
+});

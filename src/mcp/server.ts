@@ -53,6 +53,8 @@ export interface McpContext {
   snapshots?: Map<string, string>;
   outlines?: Map<string, { lines: string[] }>;
   uiObs?: Map<string, { hash: string; count: number }>;
+  /** Devices for which this MCP session has actually delivered a UI observation (or visible wait_for) to the agent. */
+  deliveredTree?: Set<string>;
   deviceCache?: { at: number; list: Device[] };
   leased?: Set<string>;                    // device ids this server acquired (released when the session ends)
   /** Per device: the last image returned was NOT in the standard space (other max_size): warn on coordinate input. */
@@ -707,6 +709,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
     }
     if (a.ref) {
       const snapshotId = ctx.snapshots?.get(d.id);
+      if (!snapshotId && !ctx.deliveredTree?.has(d.id)) {
+        throw new Error(`No UI tree has been read for ${d.name} in this session: call get_ui (or an action with observe="ui") before tapping ref "${a.ref}".`);
+      }
       const r = await c.tapRef(d.id, a.ref, { expect, ...uo, ...(snapshotId ? { snapshotId } : {}) }) as { expect?: ExpectReport; ui?: UiTree; observationUnavailable?: boolean; resolved?: { ref: string; x: number; y: number; coveredBy?: string; hidden?: boolean; keyboardHidden?: boolean; moved?: { from: { x: number; y: number } }; element?: { type?: string; text?: string; label?: string; id?: string } } };
       const el = r.resolved?.element; const sc = a.coordinate_space === 'device' ? 1 : (await scaleFor(d)).scale || 1;
       const desc = el && r.resolved ? describeMatch({ ref: r.resolved.ref, type: el.type ?? '', text: el.text, label: el.label, id: el.id, center: { x: r.resolved.x, y: r.resolved.y }, visible: true } as ElementMatch, sc) : a.ref;

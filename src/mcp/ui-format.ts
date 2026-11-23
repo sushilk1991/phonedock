@@ -89,7 +89,6 @@ export interface FormatUiResult {
 export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
   const { ctx, device: d, tree, mode } = opts;
   ctx.snapshots ??= new Map();
-  if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
   if (opts.coordinateSpace !== 'device') ctx.offSpace?.delete(d.id);
 
   ctx.uiObs ??= new Map();
@@ -200,6 +199,8 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
         const cappedUnchanged = capActionBlock(rawUnchanged, maxChars, emptyFoot);
         return { text: cappedUnchanged.text, hash, obsCount, unchanged: true, totalElements: 0, shownElements: 0, truncated: cappedUnchanged.capped };
       }
+      ctx.outlines ??= new Map();
+      ctx.outlines.set(d.id, { lines: [] });
       return { text: capped.text.replace(HASH_PLACEHOLDER, hash), hash, obsCount, unchanged: false, totalElements: 0, shownElements: 0, truncated: capped.capped };
     }
 
@@ -245,11 +246,13 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
     const hash = outlineHash(stableOut);
 
     ctx.uiObs.set(d.id, { hash, count: obsCount });
-    ctx.outlines ??= new Map();
-    ctx.outlines.set(d.id, { lines });
 
     // Action-mode unchanged-screen suppression: equal hashes guarantee identical printed outline by construction.
     if (prevObs && prevObs.hash && prevObs.hash === hash) {
+      if (!cappedHead.capped && kept.length > 0) {
+        if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
+        (ctx.deliveredTree ??= new Set()).add(d.id);
+      }
       const rawUnchanged = [
         `Screen unchanged (obs=#${obsCount}, hash=${hash}${tree.snapshotId ? `, snapshot=${tree.snapshotId}` : ''}).`,
         ...warnings,
@@ -259,13 +262,21 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
       return { text: cappedUnchanged.text, hash, obsCount, unchanged: true, totalElements: total, shownElements: 0, truncated: cappedUnchanged.capped };
     }
 
+    const deliveredLines = cappedHead.capped ? [] : kept;
+    if (deliveredLines.length > 0) {
+      if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
+      (ctx.deliveredTree ??= new Set()).add(d.id);
+    }
+    ctx.outlines ??= new Map();
+    ctx.outlines.set(d.id, { lines: deliveredLines });
+
     return {
       text: finalTemplate.replace(HASH_PLACEHOLDER, hash),
       hash,
       obsCount,
       unchanged: false,
       totalElements: total,
-      shownElements: cappedHead.capped ? 0 : kept.length,
+      shownElements: deliveredLines.length,
       truncated: truncated || cappedHead.capped,
     };
   }
@@ -278,10 +289,14 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
   if (!lines.length) {
     const hash = outlineHash(`${stablePrefix}${tail}\nNo UI elements found — take a screenshot to see the screen.`);
     ctx.uiObs.set(d.id, { hash, count: obsCount });
+    ctx.outlines ??= new Map();
+    ctx.outlines.set(d.id, { lines: [] });
     const head = `UI of ${d.name} via ${tree.source}; obs=#${obsCount} hash=${hash}; ${tail}`;
     return { text: `${head}\nNo UI elements found — take a screenshot to see the screen.`, hash, obsCount, unchanged: false, totalElements: 0, shownElements: 0, truncated: false };
   }
 
+  if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
+  (ctx.deliveredTree ??= new Set()).add(d.id);
   ctx.outlines ??= new Map();
   const previous = ctx.outlines.get(d.id);
   ctx.outlines.set(d.id, { lines });

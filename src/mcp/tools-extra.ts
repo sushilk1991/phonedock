@@ -72,7 +72,14 @@ export function registerExtraTools(k: ToolKit): void {
       else txt = t;
     }
     const body: Record<string, unknown> = { value: a.value, clear: a.clear, submit: a.submit, secret: a.secret, match: a.match, index: a.index, type: a.element_type, ...(expect ? { expect } : {}), ...uiOpts(mode, a.settle_ms, 700, !!expect) };
-    if (ref) { body.ref = ref; const snapshotId = k.ctx.snapshots?.get(d.id); if (snapshotId) body.snapshotId = snapshotId; }
+    if (ref) {
+      const snapshotId = k.ctx.snapshots?.get(d.id);
+      if (!snapshotId && !k.ctx.deliveredTree?.has(d.id)) {
+        throw new Error(`No UI tree has been read for ${d.name} in this session: call get_ui (or an action with observe="ui") before filling ref "${ref}".`);
+      }
+      body.ref = ref;
+      if (snapshotId) body.snapshotId = snapshotId;
+    }
     else if (txt || id || a.element_type) { body.text = txt; body.id = id; }
     else if (a.x !== undefined && a.y !== undefined) { const [x, y] = await toDevice(d, a.x, a.y, a.coordinate_space); body.x = x; body.y = y; }
     else throw new Error('Pass target (or text / ref / element_id), or x and y');
@@ -116,6 +123,7 @@ export function registerExtraTools(k: ToolKit): void {
     if (a.until === 'visible') {
       k.ctx.snapshots ??= new Map();
       if (r.snapshotId) k.ctx.snapshots.set(d.id, r.snapshotId); else k.ctx.snapshots.delete(d.id);
+      (k.ctx.deliveredTree ??= new Set()).add(d.id);
       k.spaceOf(d, r.screen);
     }
     const sc = await imgScale(d);
@@ -141,14 +149,36 @@ export function registerExtraTools(k: ToolKit): void {
   }, async (a, extra) => {
     const endMode = resolveObserve(a.observe_at_end, a.screenshot_at_end);
     const stop = a.stop_on_error !== false;
-    // Snapshot what the agent actually received before this batch: earlier steps are shortened to one line, so neither
-    // a later step nor observe_at_end may suppress against a tree that was dropped from this response.
-    const preBatchHashes = new Map<string, string>();
-    for (const [devId, obs] of k.ctx.uiObs ?? []) preBatchHashes.set(devId, obs.hash);
-    const restoreDeliveredHashes = () => {
-      if (!k.ctx.uiObs) return;
-      for (const [devId, obs] of k.ctx.uiObs) {
-        k.ctx.uiObs.set(devId, { ...obs, hash: preBatchHashes.get(devId) ?? '' });
+    // Snapshot all session observation state actually delivered to the agent before this batch: earlier steps are
+    // shortened to one line (and their images dropped), so hidden observations must never update ref/snapshot binding,
+    // suppression hashes, get_ui(diff=true) baselines, or off-space warnings.
+    const preSnapshots = new Map(k.ctx.snapshots);
+    const preOutlines = new Map(k.ctx.outlines);
+    const preHashes = new Map<string, string>();
+    for (const [devId, obs] of k.ctx.uiObs ?? []) preHashes.set(devId, obs.hash);
+    const preOffSpace = new Map(k.ctx.offSpace);
+    const preDelivered = new Set(k.ctx.deliveredTree);
+    const restoreDeliveredState = () => {
+      if (k.ctx.snapshots) {
+        k.ctx.snapshots.clear();
+        for (const [devId, snap] of preSnapshots) k.ctx.snapshots.set(devId, snap);
+      }
+      if (k.ctx.outlines) {
+        k.ctx.outlines.clear();
+        for (const [devId, outline] of preOutlines) k.ctx.outlines.set(devId, outline);
+      }
+      if (k.ctx.uiObs) {
+        for (const [devId, obs] of k.ctx.uiObs) {
+          k.ctx.uiObs.set(devId, { ...obs, hash: preHashes.get(devId) ?? '' });
+        }
+      }
+      if (k.ctx.offSpace) {
+        k.ctx.offSpace.clear();
+        for (const [devId, off] of preOffSpace) k.ctx.offSpace.set(devId, off);
+      }
+      if (k.ctx.deliveredTree) {
+        k.ctx.deliveredTree.clear();
+        for (const devId of preDelivered) k.ctx.deliveredTree.add(devId);
       }
     };
     const lines: string[] = []; let failed = 0; let ran = 0;
@@ -156,8 +186,8 @@ export function registerExtraTools(k: ToolKit): void {
     let lastStep: { tool: string; args?: Record<string, unknown> } | undefined;
     const t0 = Date.now();
     for (const [i, s] of a.steps.entries()) {
-      // Every prior step is no longer the last step, so its full output is shortened; discard its suppression hash.
-      if (i > 0) restoreDeliveredHashes();
+      // Every prior step is no longer the last step, so its observation was not delivered; roll back its session state.
+      if (i > 0) restoreDeliveredState();
       const n = i + 1;
       let r: ToolResult;
       const h = handlers.get(s.tool);
