@@ -279,3 +279,94 @@ test('runner: failure evidence is captured before releasing ownership', async ()
     assert.equal(r.status, 'fail'); assert.equal(captured, true); assert.equal(released, true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runner: passes interpolated launch args/env and redacts their values from logs, result.json and report.html', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  const launchedCalls: { app: string; opts?: unknown }[] = [];
+  const argSecret = 'pd-launch-arg-secret-9911';
+  const envSecret = 'pd-launch-env-secret-8822';
+  c.launch = async (_id, app, opts) => { launchedCalls.push({ app, opts }); return { ok: true, delivery: 'sent', retrySafe: false }; };
+  c.logs = async () => `app saw ${argSecret} and ${envSecret}`;
+  try {
+    const flow = parseFlow(`name: Secret launch
+appId: dev.phonedock.sample
+steps:
+  - launch:
+      arguments:
+        token: "\${ARG_SECRET}"
+        debug: true
+      env:
+        API_KEY: "\${ENV_SECRET}"
+  - assert_visible: missing
+`);
+    const logged: string[] = [];
+    const r = await runFlow(c, flow, {
+      deviceId: 'd', artifactsDir: dir, settle: false, timeoutMs: 0,
+      env: { ARG_SECRET: argSecret, ENV_SECRET: envSecret },
+      log: (l) => logged.push(l),
+    });
+    assert.equal(r.status, 'fail');
+    assert.deepEqual(launchedCalls, [{
+      app: 'dev.phonedock.sample',
+      opts: { args: { token: argSecret, debug: true }, env: { API_KEY: envSecret } },
+    }]);
+    assert.ok(!logged.join('\n').includes(argSecret));
+    assert.ok(!logged.join('\n').includes(envSecret));
+    assert.ok(!JSON.stringify(r).includes(argSecret));
+    assert.ok(!JSON.stringify(r).includes(envSecret));
+    for (const file of ['report.html', 'result.json', 'steps.txt', 'logs.txt']) {
+      const body = readFileSync(join(r.artifacts!, file), 'utf8');
+      assert.ok(!body.includes(argSecret), `${file} leaked launch arg secret`);
+      assert.ok(!body.includes(envSecret), `${file} leaked launch env secret`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: redacts numeric (>= 3 chars) and quote-containing (JSON-escaped) launch arguments from logs, results, and reports', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  const numToken = 123456;
+  const quoteSecret = 'abc"def';
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.logs = async () => `seen ${numToken} and ${JSON.stringify(quoteSecret)}`;
+  const oldUi = c.ui;
+  c.ui = async (id) => ({
+    ...await oldUi(id),
+    root: [
+      { ref: 'e1', type: 'Text', text: `Token: ${numToken}`, bounds: { x: 0, y: 0, width: 100, height: 20 } },
+      { ref: 'e2', type: 'Text', text: quoteSecret, bounds: { x: 0, y: 30, width: 100, height: 20 } },
+    ],
+  });
+  c.waitFor = async () => {
+    throw Object.assign(new Error(`Timed out waiting for "missing"`), {
+      code: 'wait_timeout',
+      detail: `Screen now: ${JSON.stringify(String(numToken))}, ${JSON.stringify(quoteSecret)}`,
+    });
+  };
+  try {
+    const flow = parseFlow(JSON.stringify({
+      name: 'Numeric and quoted launch secrets',
+      appId: 'dev.phonedock.sample',
+      steps: [
+        { launch: { arguments: { token: numToken, quote: quoteSecret, flag: true } } },
+        { assert_visible: 'missing' },
+      ],
+    }));
+    const logged: string[] = [];
+    const r = await runFlow(c, flow, {
+      deviceId: 'd', artifactsDir: dir, settle: false, timeoutMs: 0,
+      log: (l) => logged.push(l),
+    });
+    assert.equal(r.status, 'fail');
+    const escapedQuote = 'abc\\"def';
+    const check = (label: string, text: string) => {
+      assert.ok(!text.includes('123456'), `${label} leaked numeric secret`);
+      assert.ok(!text.includes(quoteSecret), `${label} leaked quoted secret`);
+      assert.ok(!text.includes(escapedQuote), `${label} leaked JSON-escaped secret`);
+    };
+    check('progress log', logged.join('\n'));
+    check('FlowResult', JSON.stringify(r));
+    for (const file of ['report.html', 'result.json', 'steps.txt', 'logs.txt', 'ui.json']) {
+      check(file, readFileSync(join(r.artifacts!, file), 'utf8'));
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

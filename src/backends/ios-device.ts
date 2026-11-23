@@ -17,8 +17,9 @@ import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
 import {
   PhoneDockError,
   type AppInfo, type Availability, type Backend, type Capability, type CrashReport, type Device, type DeviceState, type KeyName,
-  type ScreenInfo, type UiElement, type UiTree,
+  type LaunchOptions, type ScreenInfo, type UiElement, type UiTree,
 } from '../core/types.ts';
+import { hasLaunchOptions, iosLaunchArgv, iosPrefixedEnv } from '../core/launch-options.ts';
 import { JsonState, ScreenshotRecorder, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize } from './ios-common.ts';
 import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidPinch, hidSwipe, hidTap, hidType, hidTypable, isNativeInputCapable, type Geometry } from './ios-hid.ts';
 import { isNativeCapable, nativeSession, nativeUiTree } from './ios-native.ts';
@@ -153,11 +154,29 @@ export function normalizeWdaUrl(input: string): string {
 
 // ── devicectl ──────────────────────────────────────────────────────────────
 
+/** Build final `xcrun devicectl` argv, placing `--json-output` and `--quiet` strictly before any `--` separator. */
+export function buildDevicectlArgs(args: string[], outPath: string): string[] {
+  const sep = args.indexOf('--');
+  if (sep >= 0) return ['devicectl', ...args.slice(0, sep), '--json-output', outPath, '--quiet', ...args.slice(sep)];
+  return ['devicectl', ...args, '--json-output', outPath, '--quiet'];
+}
+
+/** Build `devicectl` subcommand args for `device process launch`, placing `--` after all devicectl options. */
+export function buildDevicectlLaunchArgs(dcDeviceId: string, appId: string, opts?: LaunchOptions): string[] {
+  const withOpts = hasLaunchOptions(opts);
+  const argv = iosLaunchArgv(opts?.args);
+  return [
+    'device', 'process', 'launch', '--device', dcDeviceId,
+    ...(withOpts ? ['--terminate-existing'] : []),
+    ...(argv.length ? ['--', appId, ...argv] : [appId]),
+  ];
+}
+
 async function devicectl<T = any>(args: string[], opts: RunOptions = {}): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'pd-devicectl-'));
   const out = join(dir, 'out.json');
   try {
-    const r = await run('xcrun', ['devicectl', ...args, '--json-output', out, '--quiet'], { env: toolEnv(), allowFail: true, timeoutMs: 120_000, ...opts });
+    const r = await run('xcrun', buildDevicectlArgs(args, out), { env: toolEnv(), allowFail: true, timeoutMs: 120_000, ...opts });
     let j: any;
     try { j = JSON.parse(readFileSync(out, 'utf8')); } catch { /* no json */ }
     if (r.code !== 0 || j?.info?.outcome === 'failed') {
@@ -969,10 +988,38 @@ export const backend: Backend & {
     }));
   },
 
-  async launchApp(udid, appId) {
-    if (wdaUrl(udid)) { await wdaSession(udid, 'POST', '/wda/apps/launch', { bundleId: appId }); return; }
-    // No --terminate-existing: bring the app to the front with its state intact (an open draft must survive).
-    await devicectl(['device', 'process', 'launch', '--device', dcId(udid), appId]);
+  async launchApp(udid, appId, opts?: LaunchOptions) {
+    const withOpts = hasLaunchOptions(opts);
+    const argv = iosLaunchArgv(opts?.args);
+    if (wdaUrl(udid)) {
+      // WDA only applies arguments/environment when starting a new process; terminate first when options are given.
+      if (withOpts) {
+        try {
+          await wdaSession(udid, 'POST', '/wda/apps/terminate', { bundleId: appId });
+        } catch (e) {
+          const msg = `${(e as Error)?.message ?? ''} ${(e as PhoneDockError)?.detail ?? ''}`;
+          if (!/not running|isn['’]t running|no such process/i.test(msg)) {
+            throw new PhoneDockError(
+              'Couldn’t restart the app with new launch options',
+              'launch_failed',
+              502,
+              ['Check that WebDriverAgent is reachable and retry launching the app.'],
+              `Failed to terminate existing ${appId} before launching with options: ${(e as PhoneDockError)?.detail ?? (e as Error)?.message ?? String(e)}`,
+              'not_sent',
+            );
+          }
+        }
+      }
+      const payload: Record<string, unknown> = { bundleId: appId };
+      if (argv.length) payload.arguments = argv;
+      if (opts?.env && Object.keys(opts.env).length) payload.environment = opts.env;
+      await wdaSession(udid, 'POST', '/wda/apps/launch', payload);
+      return;
+    }
+    // Without args/env: no --terminate-existing, so an already-open draft survives.
+    // With args/env: terminate existing instance so iOS applies the new launch arguments/environment.
+    const env = iosPrefixedEnv('DEVICECTL_CHILD_', toolEnv(), opts?.env);
+    await devicectl(buildDevicectlLaunchArgs(dcId(udid), appId, opts), { env });
     void ensureNative(udid).catch(() => false); // warms the UI tree for the agent's next `ui`
   },
 

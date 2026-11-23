@@ -755,8 +755,24 @@ class PhoneDock:
     def uninstall(self, device_id: str, app_id: str) -> Dict[str, Any]:
         return self._request("DELETE", self._dev(device_id, f"/apps/{_q(app_id)}"))
 
-    def launch(self, device_id: str, app_id: str, expect: Expect = None) -> Dict[str, Any]:
-        return self._request("POST", self._dev(device_id, f"/apps/{_q(app_id)}/launch"), {"expect": expect} if expect is not None else {})
+    def launch(self, device_id: str, app_id: str, expect: Expect = None,
+               args: Optional[Union[List[str], Dict[str, Any]]] = None,
+               env: Optional[Dict[str, str]] = None,
+               verify: Optional[bool] = None,
+               return_ui: bool = False,
+               request_id: Optional[str] = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {}
+        if expect is not None:
+            body["expect"] = expect
+        if args is not None:
+            body["args"] = args
+        if env is not None:
+            body["env"] = env
+        if verify is not None:
+            body["verify"] = verify
+        if return_ui:
+            body["returnUi"] = True
+        return self._request("POST", self._dev(device_id, f"/apps/{_q(app_id)}/launch"), body, request_id=request_id)
 
     def terminate(self, device_id: str, app_id: str) -> Dict[str, Any]:
         return self._request("POST", self._dev(device_id, f"/apps/{_q(app_id)}/terminate"), {})

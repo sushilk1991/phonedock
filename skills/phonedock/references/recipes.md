@@ -24,7 +24,7 @@ Pass `device` explicitly whenever more than one device is in play.
   `install_app path="<abs>/build/Build/Products/Debug-iphonesimulator/App.app"`. Device builds (`.ipa` for
   `iphoneos`) don't run in the simulator.
 - **Android emulator.** `./gradlew assembleDebug`, then `install_app path="<abs>/app/build/outputs/apk/debug/app-debug.apk"`.
-- `list_apps` shows the installed id; `launch_app app_id=…`; `get_foreground_app` confirms it's in front.
+- `list_apps` shows the installed id; `launch_app app_id=…` (optionally with `args` — `string[]` on iOS, or `{key: value}` Intent extras on Android / `-key value` on iOS — and iOS-only `env`; values are never logged); `get_foreground_app` confirms it's in front.
 - After a code change: rebuild, `install_app` again (it replaces the app), `terminate_app` + `launch_app`.
 - Start from a known state: `app_data action="save" app_id=… name="fresh"` once, `action="restore"` before each run.
   For the whole device: `snapshot_device action="save" name="clean"` / `action="restore"`.

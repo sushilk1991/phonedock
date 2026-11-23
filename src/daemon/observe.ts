@@ -13,9 +13,9 @@ import { PhoneDockError, type UiElement, type UiTree } from '../core/types.ts';
 import type { Observation, Selector } from '../core/flow.ts';
 import type { Ctx, Handler } from './http.ts';
 import { flatten, isEditable, keyboardInfo } from './media.ts';
-import { lastActionAt, safeId, uiCacheListeners } from './core.ts';
+import { deviceLaunchSecrets, lastActionAt, safeId, uiCacheListeners } from './core.ts';
 import { inputScope } from './execution.ts';
-import { redactInputValue } from '../core/secrets.ts';
+import { redactSecretStrings } from '../core/secrets.ts';
 
 const MAX_BYTES = 2 * 1024 * 1024;   // then observations.jsonl becomes observations.1.jsonl (one old file kept)
 const file = (id: string, n = '') => join(stateDir('devices', safeId(id)), `observations${n}.jsonl`);
@@ -63,7 +63,8 @@ export function noteScreen(id: string, tree: UiTree) {
   if (!tree?.root) return;
   const { sig, texts: rawTexts } = screenDigest(tree);
   const scope = inputScope();
-  const texts = redactInputValue(rawTexts, scope?.deviceId === id ? scope.secrets ?? [] : []);
+  const secrets = [...(scope?.deviceId === id ? scope.secrets ?? [] : []), ...deviceLaunchSecrets(id)];
+  const texts = secrets.length ? redactSecretStrings(rawTexts, secrets) : rawTexts;
   if (!texts.length) return;   // nothing readable (an app still launching, an empty tree): says nothing about the screen
   const prev = lastScreen.get(id); const now = Date.now();
   if (prev && prev.sig === sig && (lastActionAt.get(id) ?? 0) <= prev.at) return;
@@ -87,7 +88,9 @@ export function observeWait(h: Handler): Handler {
       const b = await c.body().catch(() => ({})) as Record<string, unknown>;
       const until = String(b.until ?? '') as 'visible' | 'gone' | 'idle';
       if (!['visible', 'gone', 'idle'].includes(until)) return;
-      append(c.params.id, { at: new Date().toISOString(), kind: 'wait', owner: c.owner, until, ...(until === 'idle' ? {} : { query: query(b) }), ok, elapsedMs: elapsedMs ?? Date.now() - t0 });
+      const secrets = deviceLaunchSecrets(c.params.id);
+      const q = until === 'idle' ? undefined : (secrets.length ? redactSecretStrings(query(b), secrets) : query(b));
+      append(c.params.id, { at: new Date().toISOString(), kind: 'wait', owner: c.owner, until, ...(q ? { query: q } : {}), ok, elapsedMs: elapsedMs ?? Date.now() - t0 });
     };
     try {
       const res = await h(c) as { ok?: boolean; elapsedMs?: number } | undefined;
@@ -106,7 +109,9 @@ export function observeScrollTo(h: Handler): Handler {
     const res = await h(c) as { found?: boolean; scrolls?: number; direction?: string } | undefined;
     const b = await c.body().catch(() => ({})) as Record<string, unknown>;
     const direction = typeof b.direction === 'string' ? b.direction as 'up' | 'down' | 'left' | 'right' : undefined;
-    append(c.params.id, { at: new Date().toISOString(), kind: 'scroll_to', owner: c.owner, query: query(b), ...(direction ? { direction } : {}), found: !!res?.found, scrolls: res?.scrolls ?? 0 });
+    const secrets = deviceLaunchSecrets(c.params.id);
+    const q = secrets.length ? redactSecretStrings(query(b), secrets) : query(b);
+    append(c.params.id, { at: new Date().toISOString(), kind: 'scroll_to', owner: c.owner, query: q, ...(direction ? { direction } : {}), found: !!res?.found, scrolls: res?.scrolls ?? 0 });
     return res;
   };
 }

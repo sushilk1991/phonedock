@@ -304,8 +304,49 @@ export async function withTransition<T>(id: string, kind: Transition, fn: () => 
   try { return await fn(); }
   finally { transitions.delete(id); if (kind !== 'restoring') recentlyStopped.set(id, Date.now()); invalidateDevices(); }
 }
+// ── per-device launch secrets (in-memory only, bounded) ─────────────────────
+// Kept until the device shuts down, disappears from inventory, is deleted, or the daemon restarts, so observations
+// and `flow save` never record or emit launch secret values shown on screen after the launch request returns.
+export const MAX_DEVICE_LAUNCH_SECRETS = 1024;
+export const MAX_LAUNCH_SECRET_DEVICES = 128;
+const launchSecrets = new Map<string, string[]>();
+export function rememberLaunchSecrets(id: string, secrets: readonly string[]) {
+  if (!secrets.length) return;
+  const list = launchSecrets.get(id) ?? [];
+  launchSecrets.delete(id);
+  for (const s of secrets) {
+    if (!s) continue;
+    const idx = list.indexOf(s);
+    if (idx >= 0) list.splice(idx, 1);
+    list.push(s);
+  }
+  if (list.length > MAX_DEVICE_LAUNCH_SECRETS) list.splice(0, list.length - MAX_DEVICE_LAUNCH_SECRETS);
+  launchSecrets.set(id, list);
+  while (launchSecrets.size > MAX_LAUNCH_SECRET_DEVICES) {
+    const oldest = launchSecrets.keys().next().value;
+    if (oldest === undefined) break;
+    launchSecrets.delete(oldest);
+  }
+}
+export function deviceLaunchSecrets(id: string): string[] { return [...(launchSecrets.get(id) ?? [])]; }
+export function clearLaunchSecrets(id: string) { launchSecrets.delete(id); }
+function pruneLaunchSecrets(list: readonly Device[], backend?: string) {
+  if (!launchSecrets.size) return;
+  const present = new Set(list.map((d) => d.id));
+  for (const id of [...launchSecrets.keys()]) {
+    const sep = id.indexOf(':');
+    if (sep <= 0) continue;
+    const bId = id.slice(0, sep);
+    if (backend && bId !== backend) continue;
+    // Prune only when the device is absent from a completed, non-stale inventory scan (never based on state or pending refresh).
+    if (!inventory.isFresh(bId)) continue;
+    if (!present.has(id)) launchSecrets.delete(id);
+  }
+}
+
 /** A stopped phone has no one in control: the person's lease (and what it remembers) ends with the shutdown. */
 export function dropLeaseOnStop(id: string) {
+  clearLaunchSecrets(id);
   const l = leases.get(id);
   if (!l) return;
   leases.delete(id); releaseClaim(id); ownershipChanged(id);
@@ -315,7 +356,13 @@ export function dropLeaseOnStop(id: string) {
 // ── devices (aggregated, 2s cache) ──────────────────────────────────────────
 let devCache: { at: number; list: Device[] } | undefined;
 // Publish the completed scan; forcing a refresh here would immediately scan every backend again.
-const inventory = new BackendInventory({ onUpdate() { devCache = undefined; if (sseClients.size) setTimeout(() => void pollDevices(false), 50).unref(); } });
+const inventory = new BackendInventory({
+  onUpdate(backend, devices) {
+    devCache = undefined;
+    if (devices) pruneLaunchSecrets(devices, backend);
+    if (sseClients.size) setTimeout(() => void pollDevices(false), 50).unref();
+  },
+});
 export const inventoryStatus = () => inventory.status();
 export function invalidateDevices() { devCache = undefined; inventory.invalidate(); if (sseClients.size) setTimeout(() => void pollDevices(), 50).unref(); }
 /** A fresh read of the screen (UI tree, screenshot) has this size: when the cached list says otherwise (the screen
@@ -335,6 +382,7 @@ export async function listDevices(fresh = false, backend?: string): Promise<Devi
     raw = await inventory.list(backends, { fresh: true, backend, waitMs: 30_000 });
   }
   if (!backend) devCache = { at: Date.now(), list: raw };
+  pruneLaunchSecrets(raw, backend);
   const list = applyFilter(decorate(raw));
   refreshScreens(list);
   return list;

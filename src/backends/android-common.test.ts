@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appFixedOrientation, clockOffsetFrom, imeFrameFrom, H264_AUD, orientationOf, parseCurrentSize, parseDisplayChange, parseRotation, rotationFor, rotationPending, startsWithStartCode } from './android-common.ts';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { appFixedOrientation, buildAndroidLaunchCommand, clockOffsetFrom, imeFrameFrom, H264_AUD, launchApp, orientationOf, parseCurrentSize, parseDisplayChange, parseResolvedActivity, parseRotation, rotationFor, rotationPending, startsWithStartCode } from './android-common.ts';
+import { PhoneDockError } from '../core/types.ts';
 
 test('startsWithStartCode: 3- and 4-byte Annex B start codes only', () => {
   assert.equal(startsWithStartCode(Buffer.from([0, 0, 1, 0x65])), true);
@@ -99,4 +103,81 @@ test('imeFrameFrom: the keyboard window frame only while the IME is shown', () =
   assert.deepEqual(imeFrameFrom(landscape), { x: 142, y: 137, width: 2282, height: 943 });
   assert.equal(imeFrameFrom('      mImeWindowVis=0\n      mInputShown=false\n'), undefined);
   assert.equal(imeFrameFrom('      mInputShown=true\n'), undefined);   // shown, frame not reported
+});
+
+test('android launchApp: parses resolved activity, builds am start -S with typed extras and safe quoting, rejects env & positional args', async () => {
+  assert.equal(
+    parseResolvedActivity('priority=0 preferredOrder=0 match=0x108000\ncom.android.settings/.Settings\n'),
+    'com.android.settings/.Settings',
+  );
+  assert.equal(parseResolvedActivity('No activity found\n'), undefined);
+
+  const cmd = buildAndroidLaunchCommand('com.example.app/.MainActivity', {
+    enabled: true,
+    count: 7,
+    big: 3000000000,
+    ratio: 1.5,
+    quoted: `hi 'there' "world" $PATH \`id\` ; & \n café`,
+  });
+  assert.match(cmd, /am start -S -a android\.intent\.action\.MAIN -c android\.intent\.category\.LAUNCHER -n 'com\.example\.app\/\.MainActivity'/);
+  assert.ok(cmd.includes(`--ez 'enabled' true`));
+  assert.ok(cmd.includes(`--ei 'count' 7`));
+  assert.ok(cmd.includes(`--el 'big' 3000000000`));
+  assert.ok(cmd.includes(`--ef 'ratio' 1.5`));
+  assert.ok(cmd.includes(`--es 'quoted' 'hi '\\''there'\\'' "world" $PATH \`id\` ; & \n café'`));
+
+  // Inner-class activity name containing `$` must be shell-quoted so `$Inner` is not expanded
+  const innerCmd = buildAndroidLaunchCommand('com.example/.Outer$Inner', { k: 'v' });
+  assert.ok(innerCmd.includes(`-n 'com.example/.Outer$Inner'`), `expected quoted inner activity: ${innerCmd}`);
+
+  await assert.rejects(
+    () => launchApp('emulator-5554', 'com.example.app', { env: { API_KEY: 'secret' } }),
+    (e: unknown) => e instanceof PhoneDockError && e.status === 501 && e.code === 'not_supported' && e.delivery === 'not_sent',
+  );
+  await assert.rejects(
+    () => launchApp('emulator-5554', 'com.example.app', { args: ['-UITesting'] }),
+    (e: unknown) => e instanceof PhoneDockError && e.status === 501 && e.code === 'not_supported' && e.delivery === 'not_sent',
+  );
+});
+
+test('android launchApp: passes am start command via adb shell sh -s stdin, keeping secret extras off host argv', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pd-fake-adb-'));
+  const ptDir = join(dir, 'platform-tools');
+  mkdirSync(ptDir, { recursive: true });
+  const logFile = join(dir, 'adb-calls.jsonl');
+  const fakeAdb = join(ptDir, 'adb');
+  writeFileSync(fakeAdb, `#!/usr/bin/env node
+const fs = require('node:fs');
+const stdin = fs.readFileSync(0, 'utf8');
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logFile)}, JSON.stringify({ args, stdin }) + '\\n');
+if (args.join(' ').includes('resolve-activity')) {
+  process.stdout.write('priority=0 preferredOrder=0\\ncom.example/.Outer$Inner\\n');
+} else {
+  process.stdout.write('Starting: Intent { cmp=com.example/.Outer$Inner }\\n');
+}
+`);
+  chmodSync(fakeAdb, 0o755);
+  const prevPath = process.env.PATH;
+  const prevSdk = process.env.ANDROID_HOME;
+  const prevSdkRoot = process.env.ANDROID_SDK_ROOT;
+  process.env.PATH = `${dir}:${prevPath ?? ''}`;
+  process.env.ANDROID_HOME = dir;
+  process.env.ANDROID_SDK_ROOT = dir;
+  try {
+    const secret = 'android-stdin-secret-9988';
+    await launchApp('emulator-5554', 'com.example', { args: { token: secret } });
+    const calls = readFileSync(logFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { args: string[]; stdin: string });
+    const launchCall = calls.find((c) => c.args.includes('sh') && c.args.includes('-s'));
+    assert.ok(launchCall, `expected adb shell sh -s call, got: ${JSON.stringify(calls)}`);
+    assert.deepEqual(launchCall.args, ['-s', 'emulator-5554', 'shell', 'sh', '-s']);
+    assert.ok(!JSON.stringify(launchCall.args).includes(secret), 'secret must not appear in host argv');
+    assert.ok(launchCall.stdin.includes(`-n 'com.example/.Outer$Inner'`));
+    assert.ok(launchCall.stdin.includes(`--es 'token' '${secret}'`));
+  } finally {
+    if (prevPath === undefined) delete process.env.PATH; else process.env.PATH = prevPath;
+    if (prevSdk === undefined) delete process.env.ANDROID_HOME; else process.env.ANDROID_HOME = prevSdk;
+    if (prevSdkRoot === undefined) delete process.env.ANDROID_SDK_ROOT; else process.env.ANDROID_SDK_ROOT = prevSdkRoot;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

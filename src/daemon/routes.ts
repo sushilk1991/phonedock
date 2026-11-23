@@ -7,11 +7,12 @@ import { randomBytes } from 'node:crypto';
 import { sleep } from '../core/exec.ts';
 import { stateDir } from '../core/paths.ts';
 import { appNotesInfo } from '../core/app-notes.ts';
-import { PhoneDockError, type Backend, type BootOptions, type Device, type DeviceSpec, type InputAction, type ScreenInfo, type SystemPrompt, type UiTree } from '../core/types.ts';
+import { PhoneDockError, type Backend, type BootOptions, type Device, type DeviceSpec, type InputAction, type LaunchOptions, type ScreenInfo, type SystemPrompt, type UiTree } from '../core/types.ts';
+import { launchLogMeta, launchSecretValues, validateLaunchOptions } from '../core/launch-options.ts';
 import { describePrompt, detectPrompt } from '../core/prompts.ts';
 import {
-  acquireLease, backends, checkLease, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
-  loadFailures, logAction, readActions, record, releaseLease, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
+  acquireLease, backends, checkLease, clearLaunchSecrets, getBackend, getDevice, getJob, invalidateDevices, listDevices, listJobs,
+  loadFailures, logAction, readActions, record, releaseLease, rememberLaunchSecrets, removeRecord, sharedStream, sharedVideo, splitId, sseClients, startJob,
   stopStreamsFor, restartStreamsFor, withTransition, dropLeaseOnStop, streamStats, uiCache, upsertRecord, pollDevices, withTimeout, stopRecordingFor, fallbackFrame, waitForStreamFrame, type Job,
   assertDeviceAllowed, assertNameAllowed, assertPhysicalAllowed, touchLease, noteScreen, inventoryStatus,
 } from './core.ts';
@@ -168,7 +169,7 @@ r.del('/v1/devices/:id', async (c) => {
   await stopRecordingFor(id, 'device deleted');
   await stopTraceFor(id, 'device deleted').catch(() => undefined);
   await need(b, 'delete', 'delete')(nid);
-  removeRecord(id); uiCache.delete(id); releaseLease(id, c.owner, true);
+  removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
   invalidateDevices();
   return { ok: true };
 });
@@ -648,10 +649,12 @@ r.post('/v1/devices/:id/apps/:appId/launch', inputRoute(async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);
   const appId = c.params.appId;
   const body = await c.body().catch(() => ({} as Record<string, unknown>));
+  const launchOpts = validateLaunchOptions(body.args, body.env);
   const exp = await prepareExpect({ id, b, nid }, body.expect);
-  await need(b, 'launchApp', 'launch')(nid, appId);
-  logAction(id, c.owner, { action: 'launch', appId });
-  const front = body.verify === false || !b.foregroundApp ? {} : await confirmInFront(b, nid, appId);
+  rememberLaunchSecrets(id, launchSecretValues(launchOpts));
+  await need(b, 'launchApp', 'launch')(nid, appId, launchOpts);
+  logAction(id, c.owner, { action: 'launch', appId, ...launchLogMeta(launchOpts) });
+  const front = body.verify === false || !b.foregroundApp ? {} : await confirmInFront(b, nid, appId, 3000, launchOpts);
   const expect = exp ? await finishExpect({ id, b, nid }, exp) : undefined;
   // agents' notes for this app (src/core/app-notes.ts): one stat, so clients can point the agent at them
   const notes = appNotesInfo(appId);
@@ -659,7 +662,7 @@ r.post('/v1/devices/:id/apps/:appId/launch', inputRoute(async (c) => {
 }));
 /** After a launch: is the app in front? A launch right after Home (iOS) can leave the home screen showing while the
  *  app starts behind it (blind run 4: "Launched" over the home screen): then launch once more. Polls ≤3 s. */
-export async function confirmInFront(b: Backend, nid: string, appId: string, waitMs = 3000): Promise<{ inFront?: boolean; foreground?: string | null; relaunched?: boolean }> {
+export async function confirmInFront(b: Backend, nid: string, appId: string, waitMs = 3000, launchOpts?: LaunchOptions): Promise<{ inFront?: boolean; foreground?: string | null; relaunched?: boolean }> {
   const t0 = Date.now(); let relaunched = false; let fg: string | null = null;
   for (;;) {
     const app = await b.foregroundApp!(nid).catch(() => undefined);
@@ -667,7 +670,7 @@ export async function confirmInFront(b: Backend, nid: string, appId: string, wai
     fg = app?.id ?? null;
     if (fg === appId) return { inFront: true, foreground: fg, ...(relaunched ? { relaunched } : {}) };
     // still the home screen after a second (or after one slow read, under load): launch once more, then look again
-    if (!relaunched && fg === null && b.platform === 'ios' && Date.now() - t0 > 1000) { await b.launchApp!(nid, appId).catch(() => undefined); relaunched = true; await sleep(300); continue; }
+    if (!relaunched && fg === null && b.platform === 'ios' && Date.now() - t0 > 1000) { await b.launchApp!(nid, appId, launchOpts).catch(() => undefined); relaunched = true; await sleep(300); continue; }
     if (Date.now() - t0 >= waitMs) break;
     await sleep(300);
   }

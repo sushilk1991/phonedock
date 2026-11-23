@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FlowError, compareVersions, flowFromLog, interpolate, parseFlow, parseStep, pickAssertText, stepOut, toMaestro, writeFlow, type LogEntry, type Observation, type Step } from './flow.ts';
+import { FlowError, compareVersions, describeStep, flowFromLog, interpolate, interpolateStep, parseFlow, parseStep, pickAssertText, redactFlowStep, stepOut, toMaestro, writeFlow, type LogEntry, type Observation, type Step } from './flow.ts';
 
 const SAMPLE = `# hand-written
 name: Greet
@@ -293,4 +293,168 @@ test('visual assertion options validate and round trip with ignored pixel region
   for (const bad of ['tolerance: -1', 'tolerance: NaN', 'tolerance: 2', 'comparison: unknown', 'pixelThreshold: 300', 'ignore: [{ x: 0, y: 0, width: -1, height: 1 }]']) {
     assert.throws(() => parseFlow(`steps:\n  - screenshot: { name: home, ${bad} }\n`));
   }
+});
+
+test('launch step: arguments (map/array), args alias, launchApp alias, env, Maestro export, and secret-safe flowFromLog', () => {
+  const f = parseFlow(`name: Launch options
+appId: com.example.app
+env: { API_TOKEN: tok-123 }
+steps:
+  - launchApp:
+      arguments:
+        isUITestRunning: true
+        retries: 3
+        token: "\${API_TOKEN}"
+      env:
+        API_TOKEN: "\${API_TOKEN}"
+  - launch:
+      app: com.other.app
+      stop: false
+      args: ["-UITesting", "-server", "staging"]
+`);
+  assert.equal(f.steps.length, 2);
+  assert.deepEqual(f.steps[0], {
+    kind: 'launch', stop: true,
+    arguments: { isUITestRunning: true, retries: 3, token: '${API_TOKEN}' },
+    env: { API_TOKEN: '${API_TOKEN}' },
+  });
+  assert.deepEqual(f.steps[1], {
+    kind: 'launch', app: 'com.other.app', stop: false,
+    arguments: ['-UITesting', '-server', 'staging'],
+  });
+  // Round-trip write -> parse
+  assert.deepEqual(parseFlow(writeFlow(f)).steps, f.steps);
+  // describeStep must never include values
+  const d0 = describeStep(f.steps[0]);
+  assert.match(d0, /args: isUITestRunning, retries, token/);
+  assert.match(d0, /env: API_TOKEN/);
+  assert.ok(!d0.includes('tok-123'));
+  assert.ok(!describeStep(f.steps[1]).includes('staging'));
+  // Interpolation resolves ${VAR} inside arguments & env
+  const interp = interpolateStep(f.steps[0], { API_TOKEN: 'tok-123' });
+  assert.equal(interp.kind, 'launch');
+  assert.deepEqual(interp.arguments, { isUITestRunning: true, retries: 3, token: 'tok-123' });
+  assert.deepEqual(interp.env, { API_TOKEN: 'tok-123' });
+  // Cannot pass both arguments and args
+  assert.throws(() => parseFlow('steps:\n  - launch: { arguments: { a: 1 }, args: ["-x"] }\n'), /not both/);
+  // Unsafe integer rejected
+  assert.throws(() => parseFlow('steps:\n  - launch: { arguments: { big: 9007199254740992 } }\n'), /safe 53-bit range/);
+
+  // Maestro export keeps map arguments compatible and comments positional args / env
+  const m = toMaestro(f);
+  assert.match(m.text, /launchApp:/);
+  assert.match(m.text, /isUITestRunning: true/);
+  assert.match(m.text, /retries: 3/);
+  assert.match(m.text, /Maestro launchApp has no per-step env/);
+  assert.match(m.text, /positional args were not exported/);
+
+  // flowFromLog turns logged argKeys/envKeys into ${VAR} placeholders + warnings (never values)
+  const saved = flowFromLog(
+    [{ at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['userRole'], envKeys: ['API_TOKEN'] } }],
+    [],
+    { autoAssert: false },
+  );
+  assert.deepEqual(saved.flow.steps[0], {
+    kind: 'launch', app: 'com.example.app', stop: true,
+    arguments: { userRole: '${LAUNCH_ARG_USERROLE}' },
+    env: { API_TOKEN: '${API_TOKEN}' },
+  });
+  assert.ok(saved.warnings.some((w) => w.includes('LAUNCH_ARG_USERROLE')));
+  assert.ok(saved.warnings.some((w) => w.includes('API_TOKEN')));
+
+  // flowFromLog also scrubs unredacted screen observations when secrets are passed, and never asserts redacted text
+  const secretSaved = flowFromLog(
+    [{ at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['token'] } }],
+    [{ at: '2026-11-23T10:00:01.000Z', kind: 'screen', sig: 's1', texts: ['alpha-secret', 'Signed in'] }],
+    { secrets: ['alpha-secret'] },
+  );
+  assert.ok(!secretSaved.text.includes('alpha-secret'));
+  assert.ok(!secretSaved.text.includes('•••'));
+  assert.match(secretSaved.text, /assert_visible:\s*Signed in/);
+
+  const onlySecret = flowFromLog(
+    [{ at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['token'] } }],
+    [{ at: '2026-11-23T10:00:01.000Z', kind: 'screen', sig: 's2', texts: ['alpha-secret'] }],
+    { secrets: ['alpha-secret'] },
+  );
+  assert.ok(!onlySecret.text.includes('alpha-secret'));
+  assert.ok(!onlySecret.text.includes('assert_visible'));
+
+  // Structural fields (timestamps, action names, owners, launch app id) must never be corrupted; output YAML parses cleanly
+  const structural = flowFromLog(
+    [
+      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.tap.mcp2026', hasArgs: true, argKeys: ['year'] } },
+      { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: 'Continue', id: 'btn_continue' } } },
+      { at: '2026-11-23T10:00:02.000Z', owner: 'mcp:a:1', action: { action: 'type', text: 'pin 2026' } },
+    ],
+    [
+      { at: '2026-11-23T10:00:03.000Z', kind: 'screen', sig: 's3', texts: ['Code 2026', 'Dashboard'] },
+    ],
+    { owner: 'mcp:a:1', since: '2026-11-23T09:59:00.000Z', secrets: ['2026', 'tap', 'mcp'] },
+  );
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'launch' && s.app === 'com.tap.mcp2026'), 'launch app id must stay intact');
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'tap' && s.sel?.id === 'btn_continue' && s.sel?.text === 'Continue'), `tap step corrupted: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'type' && s.text === 'pin •••'), `typed secret not redacted: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'assert_visible' && s.sel.text === 'Dashboard'), `expected Dashboard assert: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(!structural.flow.steps.some((s) => s.kind === 'assert_visible' && (s.sel.text ?? '').includes('2026')));
+  assert.doesNotThrow(() => parseFlow(structural.text));
+
+  // Output redaction pass catches assembled legacy fill chunks, arguments.action / env.owner, and all six action kinds
+  const tok = 'launch-token-7744';
+  const allSix = flowFromLog(
+    [
+      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['action'], envKeys: ['owner'] } },
+      { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: `Open ${tok}` } } },
+      { at: '2026-11-23T10:00:02.000Z', owner: 'mcp:a:1', action: { action: 'tap' }, fill: { text: `Field ${tok}`, value: `Bearer ${tok}` } },
+      { at: '2026-11-23T10:00:03.000Z', owner: 'mcp:a:1', action: { action: 'openUrl', url: `myapp://cb?t=${tok}` } },
+      // Legacy fill chunks split across two type events whose joined text equals the secret
+      { at: '2026-11-23T10:00:03.500Z', owner: 'mcp:a:1', via: 'fill', action: { action: 'tap', selector: { text: 'Token' } } },
+      { at: '2026-11-23T10:00:03.600Z', owner: 'mcp:a:1', via: 'fill', action: { action: 'type', text: 'launch-token-' } },
+      { at: '2026-11-23T10:00:03.700Z', owner: 'mcp:a:1', via: 'fill', action: { action: 'type', text: '7744' } },
+      { at: '2026-11-23T10:00:06.000Z', owner: 'mcp:a:1', via: 'alert', action: { action: 'tap' }, resolved: { element: { text: `Trust ${tok}` } } },
+    ],
+    [
+      { at: '2026-11-23T10:00:04.000Z', kind: 'wait', owner: 'mcp:a:1', until: 'visible', query: { text: `Loaded ${tok}` }, ok: true },
+      { at: '2026-11-23T10:00:05.000Z', kind: 'scroll_to', owner: 'mcp:a:1', query: { text: `Row ${tok}` }, found: true },
+    ],
+    {
+      owner: 'mcp:a:1', autoAssert: false, secrets: [tok],
+      assertions: [{ kind: 'launch', app: 'com.example.app', stop: true, arguments: { action: tok, kept: '${LAUNCH_ARG_KEPT}' }, env: { owner: tok, KEEP: '${KEEP}' } }],
+    },
+  );
+  assert.ok(!allSix.text.includes(tok), `saved flow leaked secret:\n${allSix.text}`);
+  assert.ok(!JSON.stringify(allSix.flow).includes(tok));
+  const kinds = allSix.flow.steps.map((s) => s.kind);
+  assert.deepEqual(kinds, ['launch', 'tap', 'fill', 'open_url', 'fill', 'wait_for', 'scroll_to', 'alert', 'launch']);
+  // Legacy fill chunks were assembled then redacted to •••
+  assert.equal((allSix.flow.steps[4] as { value?: string }).value, '•••');
+  // launch arguments.action and env.owner redacted while ${VAR} placeholders preserved
+  const lastLaunch = allSix.flow.steps[8] as { arguments?: Record<string, unknown>; env?: Record<string, string> };
+  assert.deepEqual(lastLaunch.arguments, { action: '•••', kept: '${LAUNCH_ARG_KEPT}' });
+  assert.deepEqual(lastLaunch.env, { owner: '•••', KEEP: '${KEEP}' });
+  // Direct helper check for arguments.action and env.owner
+  const directRedacted = redactFlowStep(
+    { kind: 'launch', app: `com.app.${tok}`, stop: true, arguments: { action: tok }, env: { owner: tok } },
+    [tok],
+  );
+  assert.equal(directRedacted.kind, 'launch');
+  assert.equal(directRedacted.app, `com.app.${tok}`);
+  assert.deepEqual(directRedacted.arguments, { action: '•••' });
+  assert.deepEqual(directRedacted.env, { owner: '•••' });
+  // Output YAML still parses cleanly
+  assert.doesNotThrow(() => parseFlow(allSix.text));
+});
+
+test('redactFlowStep: keeps whole ${VAR} placeholders and key/gesture tokens when a secret matches them', () => {
+  const secrets = ['SECRET', 'enter', 'go_home', 'launch-token-7744'];
+  // a secret-marked type/fill becomes ${SECRET_1}: still a reference that interpolates
+  assert.deepEqual(redactFlowStep({ kind: 'type', text: '${SECRET_1}' } as Step, secrets), { kind: 'type', text: '${SECRET_1}' });
+  assert.deepEqual(redactFlowStep({ kind: 'fill', field: { text: 'Password' }, value: '${SECRET_1}' } as Step, secrets),
+    { kind: 'fill', field: { text: 'Password' }, value: '${SECRET_1}' });
+  // fixed tokens survive
+  assert.deepEqual(redactFlowStep({ kind: 'key', key: 'enter' } as Step, secrets), { kind: 'key', key: 'enter' });
+  assert.deepEqual(redactFlowStep({ kind: 'gesture', gesture: 'go_home' } as Step, secrets), { kind: 'gesture', gesture: 'go_home' });
+  // real content around them is still scrubbed
+  const typed = redactFlowStep({ kind: 'type', text: 'code launch-token-7744 SECRET' } as Step, secrets) as { text: string };
+  assert.ok(!typed.text.includes('launch-token-7744') && !typed.text.includes('SECRET'), typed.text);
 });

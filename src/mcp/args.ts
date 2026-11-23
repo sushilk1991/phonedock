@@ -13,6 +13,9 @@ export const ARG_ALIASES: Record<string, Record<string, string>> = {
     start_x: 'x1', start_y: 'y1', end_x: 'x2', end_y: 'y2',
     duration: 'duration_ms',
   },
+  launch_app: {
+    arguments: 'args',
+  },
 };
 
 function editDistance(a: string, b: string): number {

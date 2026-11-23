@@ -2,10 +2,11 @@
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { FlowResult, SuiteResult } from './flow-runner.ts';
+import { expandSecretForms } from './secrets.ts';
 
 export const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 export function redactText(s: string, secrets: readonly string[]): string {
-  for (const secret of [...new Set(secrets)].filter(Boolean).sort((a, b) => b.length - a.length)) s = s.replaceAll(secret, '•••');
+  for (const secret of expandSecretForms(secrets)) s = s.replaceAll(secret, '•••');
   return s;
 }
 /** Redact all string values, including a secret echoed by a backend in an error or an assertion. */

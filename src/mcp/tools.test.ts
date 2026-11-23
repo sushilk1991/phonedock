@@ -256,3 +256,24 @@ test('create_device forwards optional disguise, carrier and seed into spec.optio
     assert.equal((seen[1] as Record<string, unknown>).options, undefined);
   } finally { await s.close(); }
 });
+
+test('launch_app forwards args/env (and arguments alias) without echoing secret values', async () => {
+  const launched: unknown[] = [];
+  const fake = androidFake({ width: 1080, height: 2424 }, { width: 1080, height: 2424 }, []);
+  fake.launch = async (_id: string, appId: string, opts?: unknown) => {
+    launched.push({ appId, opts });
+    return { ok: true, inFront: true, delivery: 'sent', retrySafe: false };
+  };
+  const s = await connect(fake);
+  try {
+    const secret = 'pd-mcp-launch-secret-7733';
+    const r1 = await s.call('launch_app', { app_id: 'com.example.app', arguments: { token: secret, debug: true }, env: { API_KEY: secret }, settle_ms: 0 });
+    assert.equal(r1.isError, false, r1.text);
+    assert.match(r1.text, /Launched com\.example\.app \(with 2 args, 1 env var\)\./);
+    assert.ok(!r1.text.includes(secret), 'MCP launch_app output leaked secret');
+    assert.deepEqual(launched[0], {
+      appId: 'com.example.app',
+      opts: { expect: undefined, args: { token: secret, debug: true }, env: { API_KEY: secret } },
+    });
+  } finally { await s.close(); }
+});

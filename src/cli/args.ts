@@ -14,6 +14,8 @@ export interface ParseSpec {
 
 export const GLOBAL_BOOLEAN = ['json', 'help', 'wait', 'no-wait', 'window', 'cold', 'boot', 'auto-start', 'force', 'system', 'headless', 'no-ocr', 'load', 'quiet', 'debug', 'pool',
   'reset', 'secret', 'submit', 'full', 'all', 'restart-adb', 'android', 'dry-run', 'check', 'uninstall', 'launch', 'get'];
+/** Flags that always consume the next token as a value, even when it starts with `-` (e.g. `--arg -UITesting`). */
+export const VALUE_FLAGS = new Set(['arg', 'extra', 'args-json', 'env']);
 export const GLOBAL_ALIAS: Record<string, string> = { o: 'output', n: 'lines', h: 'help', j: 'json', q: 'quiet' };
 
 const camel = (s: string) => s.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
@@ -33,7 +35,7 @@ export function parseArgs(argv: string[], spec: ParseSpec = {}): ParsedArgs {
       if (val === undefined && name.startsWith('no-') && !bool.has(name)) { out.flags[camel(name.slice(3))] = false; continue; }
       if (val === undefined) {
         if (bool.has(name)) val = true;
-        else if (i + 1 < argv.length && (!argv[i + 1].startsWith('-') || /^-\.?\d/.test(argv[i + 1]))) val = argv[++i];
+        else if (i + 1 < argv.length && (VALUE_FLAGS.has(name) || !argv[i + 1].startsWith('-') || /^-\.?\d/.test(argv[i + 1]))) val = argv[++i];
         else val = true;
       }
       out.flags[camel(name)] = val;

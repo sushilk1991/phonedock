@@ -22,6 +22,9 @@
 // (`flowFromLog`), and export to Maestro. The runner is src/core/flow-runner.ts; the daemon side is
 // src/daemon/observe.ts (observations) and src/daemon/routes-flow.ts (POST /v1/devices/:id/flow).
 import { validateSettingsInput, type SettingsInput } from './device-settings.ts';
+import { validateLaunchOptions } from './launch-options.ts';
+import { redactSecretStrings } from './secrets.ts';
+import type { LaunchArgs } from './types.ts';
 import { YAML_COMMENT, YamlError, parse as parseYaml, stringify as stringifyYaml } from './yaml.ts';
 
 export type MatchMode = 'contains' | 'exact' | 'regex';
@@ -38,7 +41,7 @@ interface StepBase {
   fragile?: boolean;       // raw coordinates: breaks on other screen sizes or layouts
 }
 export type Step = StepBase & (
-  | { kind: 'launch'; app?: string; stop: boolean }
+  | { kind: 'launch'; app?: string; stop: boolean; arguments?: LaunchArgs; env?: Record<string, string> }
   | { kind: 'terminate'; app?: string }
   | { kind: 'tap' | 'long_press' | 'double_tap'; sel?: Selector; at?: Point; durationMs?: number }
   | { kind: 'fill'; field?: Selector; at?: Point; value: string; submit?: boolean; clear?: boolean; secret?: boolean }
@@ -93,7 +96,7 @@ export const COMMANDS: StepKind[] = ['launch', 'terminate', 'tap', 'long_press',
   'hide_keyboard', 'scroll_to', 'swipe', 'wait_for', 'set_appearance', 'settings', 'rotate', 'open_url', 'gesture', 'alert', 'sleep',
   'assert_visible', 'assert_not_visible', 'assert_text', 'screenshot'];
 const ALIASES: Record<string, StepKind> = {
-  launch_app: 'launch', stop_app: 'terminate', terminate_app: 'terminate', go_back: 'back', press_key: 'key', go_home: 'home',
+  launch_app: 'launch', launchApp: 'launch', stop_app: 'terminate', terminate_app: 'terminate', go_back: 'back', press_key: 'key', go_home: 'home',
   type_text: 'type', open: 'open_url', appearance: 'set_appearance', handle_alert: 'alert', wait: 'sleep',
 };
 const MODIFIERS = new Set(['optional', 'timeout', 'label', 'fragile']);
@@ -208,9 +211,16 @@ export function parseStep(raw: unknown): Step {
   switch (kind) {
     case 'launch': case 'terminate': {
       if (o) {
-        only(o, kind === 'launch' ? ['app', 'stop'] : ['app'], kind);
+        only(o, kind === 'launch' ? ['app', 'stop', 'arguments', 'args', 'env'] : ['app'], kind);
         const app = o.app === undefined ? {} : { app: str(o.app) };
-        return kind === 'launch' ? { ...base, kind, ...app, stop: o.stop === undefined ? true : bool(o.stop, 'stop') } : { ...base, kind, ...app };
+        if (kind === 'terminate') return { ...base, kind, ...app };
+        if (o.arguments !== undefined && o.args !== undefined) throw new Error('launch: pass arguments or args, not both');
+        const opts = validateLaunchOptions(o.arguments ?? o.args, o.env);
+        return {
+          ...base, kind, ...app, stop: o.stop === undefined ? true : bool(o.stop, 'stop'),
+          ...(opts?.args ? { arguments: opts.args } : {}),
+          ...(opts?.env ? { env: opts.env } : {}),
+        };
       }
       const app = arg === null || arg === undefined || arg === true ? {} : { app: str(arg) };
       return kind === 'launch' ? { ...base, kind, ...app, stop: true } : { ...base, kind, ...app };
@@ -355,7 +365,11 @@ export function stepOut(s: Step): unknown {
   if (s.label) mods.label = s.label;
   let body: unknown;
   switch (s.kind) {
-    case 'launch': body = s.stop ? (s.app ?? null) : { ...(s.app ? { app: s.app } : {}), stop: false }; break;
+    case 'launch':
+      body = (!s.stop || s.arguments || s.env)
+        ? { ...(s.app ? { app: s.app } : {}), ...(!s.stop ? { stop: false } : {}), ...(s.arguments ? { arguments: s.arguments } : {}), ...(s.env ? { env: s.env } : {}) }
+        : (s.app ?? null);
+      break;
     case 'terminate': body = s.app ?? null; break;
     case 'tap': case 'long_press': case 'double_tap':
       body = s.at ? { at: pointText(s.at), ...(s.durationMs !== undefined ? { duration: s.durationMs } : {}) }
@@ -425,7 +439,16 @@ export function describeStep(s: Step): string {
   const sel = (x?: Selector) => describeSelector(x);
   const frag = s.fragile ? ' (fragile: coordinates)' : '';
   switch (s.kind) {
-    case 'launch': return `launch ${s.app ?? '(flow app)'}${s.stop ? '' : ' (keep running)'}`;
+    case 'launch': {
+      const extras: string[] = [];
+      if (!s.stop) extras.push('keep running');
+      if (s.arguments) {
+        if (Array.isArray(s.arguments)) extras.push(`${s.arguments.length} arg${s.arguments.length === 1 ? '' : 's'}`);
+        else extras.push(`args: ${Object.keys(s.arguments).join(', ')}`);
+      }
+      if (s.env) extras.push(`env: ${Object.keys(s.env).join(', ')}`);
+      return `launch ${s.app ?? '(flow app)'}${extras.length ? ` (${extras.join('; ')})` : ''}`;
+    }
     case 'terminate': return `terminate ${s.app ?? '(flow app)'}`;
     case 'tap': case 'long_press': case 'double_tap': return `${s.kind} ${s.at ? `at ${pointText(s.at)}` : sel(s.sel)}${frag}`;
     case 'fill': return `fill ${s.at ? `at ${pointText(s.at)}` : sel(s.field)} = ${s.secret ? '•••' : JSON.stringify(s.value)}${s.submit ? ' + submit' : ''}${frag}`;
@@ -513,6 +536,8 @@ export interface FromLogOptions {
   autoAssert?: boolean;
   /** Keep what looks like noise (undone taps, toggles flipped back). Default false. */
   keepNoise?: boolean;
+  /** Secret values (e.g. from this device's launch args/env) to scrub from logs, observations, and auto-assertions. */
+  secrets?: readonly string[];
   now?: string;
 }
 export interface FromLogResult {
@@ -545,7 +570,7 @@ export function pickAssertText(screen: { texts: string[] } | undefined, prev: { 
   const lower = (s: string) => s.toLowerCase();
   const old = new Set((prev?.texts ?? []).map(lower));
   const no = new Set(avoid.map(lower));
-  const ok = (t: string) => t.length >= 2 && t.length <= 40 && !GENERIC.has(lower(t)) && !no.has(lower(t));
+  const ok = (t: string) => t.length >= 2 && t.length <= 40 && !t.includes('•••') && !GENERIC.has(lower(t)) && !no.has(lower(t));
   const noDigits = (t: string) => !/\d/.test(t);
   const tiers = [
     (t: string) => ok(t) && noDigits(t) && !old.has(lower(t)),
@@ -588,8 +613,79 @@ function pct(x: number, y: number, screen?: { width: number; height: number }): 
   return { x: +(x / screen.width * 100).toFixed(1), y: +(y / screen.height * 100).toFixed(1), unit: '%' };
 }
 
+const PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+
+/** Final output pass: redact every string value in a built Step except grammar/enum tokens, launch app id,
+ *  and launch arguments/env values that are already `${VAR}` placeholders. */
+export function redactFlowStep(step: Step, secrets: readonly string[]): Step {
+  if (!secrets.length) return step;
+  // A whole `${VAR}` placeholder (a launch value, or the `${SECRET_1}` a secret-marked fill or type becomes) is a
+  // reference, not a value: scrubbing it would leave `${•••_1}`, which never interpolates.
+  const scrub = (s: string) => (PLACEHOLDER_RE.test(s) ? s : redactSecretStrings(s, secrets));
+  const scrubPlaceholderSafe = scrub;
+  const scrubSel = (sel: Selector): Selector => ({
+    ...sel,
+    ...(sel.text !== undefined ? { text: scrub(sel.text) } : {}),
+    ...(sel.id !== undefined ? { id: scrub(sel.id) } : {}),
+    ...(sel.type !== undefined ? { type: scrub(sel.type) } : {}),
+  });
+  const baseLabel = step.label !== undefined ? { label: scrub(step.label) } : {};
+  switch (step.kind) {
+    case 'launch': {
+      let args = step.arguments;
+      if (Array.isArray(args)) args = args.map(scrubPlaceholderSafe);
+      else if (args && typeof args === 'object') {
+        args = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? scrubPlaceholderSafe(v) : v]));
+      }
+      const env = step.env ? Object.fromEntries(Object.entries(step.env).map(([k, v]) => [k, scrubPlaceholderSafe(v)])) : undefined;
+      return { ...step, ...baseLabel, ...(args !== undefined ? { arguments: args } : {}), ...(env !== undefined ? { env } : {}) };
+    }
+    case 'terminate':
+      return { ...step, ...baseLabel, ...(step.app !== undefined ? { app: scrub(step.app) } : {}) };
+    case 'tap': case 'long_press': case 'double_tap':
+      return { ...step, ...baseLabel, ...(step.sel ? { sel: scrubSel(step.sel) } : {}) };
+    case 'fill':
+      return { ...step, ...baseLabel, ...(step.field ? { field: scrubSel(step.field) } : {}), value: scrub(step.value) };
+    case 'type':
+      return { ...step, ...baseLabel, text: scrub(step.text) };
+    case 'key': // key and gesture names are fixed tokens (enter, go_home), not values: a secret "enter" must not break them
+      return { ...step, ...baseLabel };
+    case 'scroll_to':
+      return { ...step, ...baseLabel, sel: scrubSel(step.sel) };
+    case 'wait_for':
+      return { ...step, ...baseLabel, ...(step.sel ? { sel: scrubSel(step.sel) } : {}) };
+    case 'open_url':
+      return { ...step, ...baseLabel, url: scrub(step.url) };
+    case 'gesture':
+      return { ...step, ...baseLabel };
+    case 'alert':
+      return { ...step, ...baseLabel, ...(step.button !== undefined ? { button: scrub(step.button) } : {}) };
+    case 'assert_visible': case 'assert_not_visible':
+      return { ...step, ...baseLabel, sel: scrubSel(step.sel) };
+    case 'assert_text':
+      return {
+        ...step, ...baseLabel,
+        field: scrubSel(step.field),
+        ...(step.equals !== undefined ? { equals: scrub(step.equals) } : {}),
+        ...(step.contains !== undefined ? { contains: scrub(step.contains) } : {}),
+        ...(step.matches !== undefined ? { matches: scrub(step.matches) } : {}),
+      };
+    case 'screenshot':
+      return {
+        ...step, ...baseLabel,
+        name: scrub(step.name),
+        ...(step.baseline !== undefined ? { baseline: scrub(step.baseline) } : {}),
+      };
+    case 'settings':
+      return { ...step, ...baseLabel, settings: redactSecretStrings(step.settings, secrets) };
+    default:
+      return { ...step, ...baseLabel };
+  }
+}
+
 /** Turn an action log (+ screen observations) into a clean flow. Pure: the daemon reads the files and calls this. */
 export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: FromLogOptions = {}): FromLogResult {
+  const secrets = o.secrets?.length ? o.secrets : [];
   const t = (s: string) => Date.parse(s);
   const inRange = (at: string) => (!o.since || t(at) >= t(o.since)) && (!o.until || t(at) <= t(o.until));
   const entries = entriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
@@ -682,7 +778,27 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
     closeFill();
     if (e.replay) bump('replayed action (replay of an earlier session)', 'replayed actions (replay of an earlier session)');
     switch (kind) {
-      case 'launch': push({ kind: 'launch', app: String(a.appId), stop: true }, e.at); break;
+      case 'launch': {
+        const argKeys = Array.isArray(a.argKeys) ? a.argKeys.map(String).filter(Boolean) : [];
+        const envKeys = Array.isArray(a.envKeys) ? a.envKeys.map(String).filter(Boolean) : [];
+        const toEnvName = (k: string) => k.replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1').toUpperCase() || secretVar();
+        const step: Extract<Step, { kind: 'launch' }> = { kind: 'launch', app: String(a.appId), stop: true };
+        if (argKeys.length) {
+          const map: Record<string, string> = {};
+          const vars: string[] = [];
+          for (const k of argKeys) { const v = `LAUNCH_ARG_${toEnvName(k)}`; map[k] = `\${${v}}`; vars.push(v); }
+          step.arguments = map;
+          warnings.push(`step ${raws.length + 1}: launch argument values are not recorded; set ${vars.join(', ')} in the environment when you run the flow`);
+        } else if (a.hasArgs) {
+          warnings.push(`step ${raws.length + 1}: positional launch arguments (${a.argCount ?? '?'}) are not recorded; add arguments: with \${VAR} references if needed`);
+        }
+        if (envKeys.length) {
+          step.env = Object.fromEntries(envKeys.map((k) => [k, `\${${k}}`]));
+          warnings.push(`step ${raws.length + 1}: launch environment values are not recorded; set ${envKeys.join(', ')} in the environment when you run the flow`);
+        }
+        push(step, e.at);
+        break;
+      }
       case 'terminate': push({ kind: 'terminate', app: String(a.appId) }, e.at); break;
       case 'openUrl': push({ kind: 'open_url', url: String(a.url) }, e.at); break;
       case 'rotate': push({ kind: 'rotate', orientation: a.orientation === 'landscape' ? 'landscape' : 'portrait' }, e.at); break;
@@ -798,6 +914,7 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
 
   // ── assertions ─────────────────────────────────────────────────────────
   const auto = o.autoAssert !== false;
+  const safeScreen = (s?: ScreenObs) => (s && secrets.length ? { texts: s.texts.map((x) => redactSecretStrings(x, secrets)) } : s);
   const final: Raw[] = []; let nAssert = 0;
   const isCheck = (s?: Step) => !!s && ((s.kind === 'wait_for' && s.until === 'visible') || s.kind === 'assert_visible');
   for (let i = 0; i < steps.length; i++) {
@@ -807,10 +924,11 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
       // the screen the next step acted on (the last read before it), compared with the screen before the launch
       const nextAt = steps[i + 1] ? t(steps[i + 1].at) : Infinity;
       const seen = obs.filter((x): x is ScreenObs => x.kind === 'screen' && t(x.at) >= t(r.at) && t(x.at) <= nextAt);
-      const scr = seen[seen.length - 1];
+      const scr = safeScreen(seen[seen.length - 1]);
+      const prevScr = safeScreen(r.before);
       const next = steps[i + 1]?.step as { sel?: Selector; field?: Selector } | undefined;
       const nextTarget = next?.sel?.text ?? next?.field?.text;
-      const txt = pickAssertText(scr, r.before, nextTarget ? [nextTarget] : []) ?? pickAssertText(scr, r.before);
+      const txt = pickAssertText(scr, prevScr, nextTarget ? [nextTarget] : []) ?? pickAssertText(scr, prevScr);
       if (txt) { final.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: r.at, src: -1, note: 'auto' }); nAssert++; }
       else warnings.push(`${scr ? 'nothing distinctive was on screen' : 'the screen was not read (or had no readable text)'} after launching ${(r.step as { app?: string }).app}: add an assert_visible for its first screen yourself`);
     }
@@ -820,11 +938,20 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
   if (o.assertions?.length) {
     for (const s of o.assertions) { steps.push({ step: s, at: o.now ?? new Date().toISOString(), src: -1, note: 'explicit' }); nAssert++; }
   } else if (auto && lastAct && !isCheck(steps[steps.length - 1]?.step)) {
-    const after = finalScreen && t(finalScreen.at) >= t(lastAct.at) && finalScreen !== lastAct.before ? finalScreen : undefined;
+    const after = finalScreen && t(finalScreen.at) >= t(lastAct.at) && finalScreen !== lastAct.before ? safeScreen(finalScreen) : undefined;
+    const prevScr = safeScreen(lastAct.before);
     const already = steps.filter((r) => r.step.kind === 'assert_visible').map((r) => (r.step as { sel: Selector }).sel.text ?? '');
-    const txt = after ? (pickAssertText(after, lastAct.before, already) ?? pickAssertText(after, undefined, already)) : undefined;
-    if (txt) { steps.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: after!.at, src: -1, note: 'auto' }); nAssert++; }
+    const txt = after ? (pickAssertText(after, prevScr, already) ?? pickAssertText(after, undefined, already)) : undefined;
+    if (txt) { steps.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: finalScreen!.at, src: -1, note: 'auto' }); nAssert++; }
     else warnings.push(after ? 'nothing distinctive on the final screen to assert: add an assert_visible yourself' : 'the screen was not read after the last step, so there is no final assertion: add one (or read the screen and save again)');
+  }
+
+  // ── final output redaction pass ────────────────────────────────────────
+  // One pass over the built steps, warnings, and dropped notes (inputs stay unredacted during parsing/assembly).
+  if (secrets.length) {
+    steps = steps.map((r) => ({ ...r, step: redactFlowStep(r.step, secrets), ...(r.note ? { note: redactSecretStrings(r.note, secrets) } : {}) }));
+    for (let i = 0; i < warnings.length; i++) warnings[i] = redactSecretStrings(warnings[i], secrets);
+    for (let i = 0; i < dropped.length; i++) dropped[i] = redactSecretStrings(dropped[i], secrets);
   }
 
   // ── header ─────────────────────────────────────────────────────────────
@@ -912,6 +1039,11 @@ export function toMaestro(f: Flow): { text: string; unsupported: string[] } {
         const o: Record<string, unknown> = {};
         if (s.app && s.app !== app) o.appId = s.app;
         if (!s.stop) o.stopApp = false;
+        if (s.arguments) {
+          if (Array.isArray(s.arguments)) notes.push('Maestro launchApp.arguments expects a key-value map; positional args were not exported');
+          else o.arguments = s.arguments;
+        }
+        if (s.env) notes.push('Maestro launchApp has no per-step env; pass environment variables via flow env or -e');
         cmd(s, Object.keys(o).length ? { launchApp: o } : 'launchApp', notes); break;
       }
       case 'terminate': cmd(s, s.app && s.app !== app ? { stopApp: s.app } : 'stopApp', notes); break;

@@ -707,7 +707,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   async installApp(name, path) { return A.installApp(await requireSerial(name), path); },
   async uninstallApp(name, id) { await A.uninstallApp(await requireSerial(name), id); },
   async listApps(name: string, opts?: { system?: boolean }) { return A.listApps(await requireSerial(name), !!opts?.system); },
-  async launchApp(name, id) { await A.launchApp(await requireSerial(name), id); },
+  async launchApp(name, id, opts) { await A.launchApp(await requireSerial(name), id, opts); },
   async terminateApp(name, id) { await A.terminateApp(await requireSerial(name), id); },
   async openUrl(name, url) { await A.openUrl(await requireSerial(name), url); },
   async shell(name, cmd) { return A.shell(await requireSerial(name), cmd); },
