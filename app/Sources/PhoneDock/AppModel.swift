@@ -382,6 +382,8 @@ final class AppModel {
             Task { await refresh() }
         case "action":
             NotificationCenter.default.post(name: .phoneDockAction, object: nil)
+        case "run":
+            NotificationCenter.default.post(name: .phoneDockRun, object: nil)
         case "recording":
             if let obj = try? JSONDecoder().decode(JSONValue.self, from: d), let id = obj["deviceId"]?.stringValue {
                 applyRecordingEvent(id, obj)
@@ -830,6 +832,7 @@ struct RecordingState: Equatable {
 
 extension Notification.Name {
     static let phoneDockAction = Notification.Name("PhoneDockAction")
+    static let phoneDockRun = Notification.Name("PhoneDockRun")
 }
 
 extension Device {

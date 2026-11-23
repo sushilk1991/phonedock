@@ -984,8 +984,23 @@ export const backend: Backend & {
       devicectl<{ apps?: any[] }>(['device', 'info', 'apps', '--device', udid]));
     return (r?.apps ?? []).map((a): AppInfo => ({
       id: a.bundleIdentifier, name: a.name, version: a.version,
+      ...(a.bundleVersion !== undefined ? { build: String(a.bundleVersion) } : {}),
       system: a.appClip ? false : (a.removable === false || /^com\.apple\./.test(a.bundleIdentifier ?? '') && !a.builtByDeveloper),
     }));
+  },
+
+  async appInfo(nid, appId) {
+    const udid = dcId(nid);
+    const r = await devicectl<{ apps?: any[] }>(['device', 'info', 'apps', '--device', udid, '--bundle-id', appId, '--include-all-apps']).catch(() => undefined);
+    const hit = (r?.apps ?? []).find((a) => a.bundleIdentifier === appId);
+    if (!hit) return null;
+    return {
+      id: hit.bundleIdentifier,
+      ...(hit.name ? { name: String(hit.name) } : {}),
+      ...(hit.version ? { version: String(hit.version) } : {}),
+      ...(hit.bundleVersion !== undefined ? { build: String(hit.bundleVersion) } : {}),
+      system: hit.appClip ? false : (hit.removable === false || /^com\.apple\./.test(hit.bundleIdentifier ?? '') && !hit.builtByDeveloper),
+    };
   },
 
   async launchApp(udid, appId, opts?: LaunchOptions) {

@@ -174,6 +174,8 @@ const TOOL_META: Record<string, [string, Hints]> = {
   // its delete/overwrite only touch agents' own notes, never a device or app: not marked destructive, so clients that
   // gate destructive tools don't prompt for every read
   app_notes: ['Read / save app notes', { ...SAFE, idempotentHint: true }],
+  list_runs: ['List recorded flow runs', READ],
+  get_run: ['Get flow run details or PR Markdown', READ],
 };
 /** Title + hints for a tool; tools not in the table get a title from their name ("save_flow" → "Save flow"). */
 export function toolMeta(name: string): Hints & { title: string } {

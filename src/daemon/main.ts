@@ -9,6 +9,7 @@ import { router, VERSION } from './routes.ts';
 import { metrics } from './metrics.ts';
 import './routes-extra.ts'; // v0.2 routes (registers onto `router`; must load after routes.ts)
 import './routes-flow.ts'; // POST /v1/devices/:id/flow (flow save)
+import './routes-runs.ts'; // GET/POST /v1/runs (retrievable flow run records)
 import './routes-trace.ts'; // performance traces (same)
 import './routes-notes.ts'; // app notes (same)
 import './routes-environment.ts';
@@ -43,7 +44,7 @@ const server = createServer(async (req, res) => {
     const ctx: Ctx = {
       req, res, url, params: m.params,
       owner: String(req.headers['x-phonedock-owner'] ?? 'anonymous').slice(0, 200) || 'anonymous',
-      body: () => (bodyP ??= readBody(req)),
+      body: (limit?: number) => (bodyP ??= readBody(req, limit)),
       q: (k) => url.searchParams.get(k) ?? undefined,
     };
     const started = performance.now();

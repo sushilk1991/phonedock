@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { parseFlow } from './flow.ts';
 import { junitXml, runFlow, runFlowFiles, screenNow, type FlowClient } from './flow-runner.ts';
-import type { ElementMatch } from './types.ts';
+import { formatRunMarkdown, sha256Hex, toRunSummary, validateRunRecord } from './run-store.ts';
+import type { ElementMatch, RunRecord } from './types.ts';
 
 // A fake PhoneDock client playing the sample app: a name field, Greet, a greeting, a Notifications switch.
 function fakeApp(opts: { greetingAppearsOnAttempt?: number } = {}) {
@@ -322,6 +323,57 @@ steps:
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('runner: persists schemaVersion=1 RunRecord with app provenance and redacted secrets via saveRun', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: import('./types.ts').RunRecord[] = [];
+  const argSecret = 'run-record-arg-secret-7733';
+  const envSecret = 'run-record-env-secret-6644';
+  const typedSecret = 'run-record-typed-secret-5522';
+  c.appInfo = async (_id, appId) => ({ id: appId, name: 'Demo App', version: '3.4.5', build: '345', system: false });
+  c.saveRun = async (rec) => { saved.push(rec); return { schemaVersion: 1, id: rec.id, status: rec.status, startedAt: rec.startedAt, durationMs: rec.durationMs, attempts: rec.attempts, owner: rec.owner, flowName: rec.flow.name, flowFile: rec.flow.fileDisplay, deviceId: rec.device.id, deviceName: rec.device.name, platform: rec.device.platform, osVersion: rec.device.osVersion, appId: rec.app.id, appVersion: rec.app.version, appBuild: rec.app.build, commit: rec.source.commit, dirty: rec.source.dirty, stepCount: rec.steps.length, passedSteps: 0, failedSteps: 0 }; };
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.type = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  try {
+    const flowPath = join(dir, 'provenance.yaml');
+    const yaml = `name: Provenance check
+appId: com.example.demo
+steps:
+  - launch:
+      arguments:
+        apiKey: "\${ARG_S}"
+      env:
+        TOKEN: "\${ENV_S}"
+  - type:
+      text: "\${TYPE_S}"
+      secret: true
+`;
+    writeFileSync(flowPath, yaml);
+    const r = await runFlow(c, parseFlow(yaml, flowPath), {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      settle: false,
+      env: { ARG_S: argSecret, ENV_S: envSecret, TYPE_S: typedSecret },
+    });
+    assert.equal(r.status, 'pass');
+    assert.ok(r.runId, 'FlowResult must carry runId');
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.schemaVersion, 1);
+    assert.equal(rec.id, r.runId);
+    assert.equal(rec.app.id, 'com.example.demo');
+    assert.equal(rec.app.name, 'Demo App');
+    assert.equal(rec.app.version, '3.4.5');
+    assert.equal(rec.app.build, '345');
+    assert.equal(rec.flow.fileDisplay, 'provenance.yaml');
+    assert.match(rec.flow.sha256, /^[0-9a-f]{64}$/);
+    const serialized = JSON.stringify(rec);
+    assert.ok(!serialized.includes(argSecret), 'RunRecord leaked launch arg secret');
+    assert.ok(!serialized.includes(envSecret), 'RunRecord leaked launch env secret');
+    assert.ok(!serialized.includes(typedSecret), 'RunRecord leaked typed secret');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('runner: redacts numeric (>= 3 chars) and quote-containing (JSON-escaped) launch arguments from logs, results, and reports', async () => {
   const { c } = fakeApp(); const dir = tmp();
   const numToken = 123456;
@@ -368,5 +420,261 @@ test('runner: redacts numeric (>= 3 chars) and quote-containing (JSON-escaped) l
     for (const file of ['report.html', 'result.json', 'steps.txt', 'logs.txt', 'ui.json']) {
       check(file, readFileSync(join(r.artifacts!, file), 'utf8'));
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: secrets matching structural values ("android", "pass") never corrupt RunRecord structural fields', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.type = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flow = parseFlow(JSON.stringify({
+      name: 'Structural redaction safety',
+      appId: 'com.android.sample',
+      steps: [
+        { launch: { arguments: { env: 'android', word: 'pass' } } },
+        { type: { text: 'android', secret: true }, label: 'enter android and pass' },
+      ],
+    }));
+    const r = await runFlow(c, flow, { deviceId: 'd', artifactsDir: dir, settle: false });
+    assert.equal(r.status, 'pass');
+    assert.ok(r.runId, 'passing flow with secret "android"/"pass" must still receive a runId');
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.status, 'pass');
+    assert.equal(rec.device.platform, 'android');
+    assert.equal(rec.device.backend, 'fake');
+    assert.equal(rec.app.id, 'com.android.sample');
+    assert.equal(rec.steps[0].status, 'pass');
+    assert.equal(rec.steps[1].status, 'pass');
+    // Free-text step description still redacts the secret
+    assert.equal(rec.steps[1].description, 'enter ••• and •••');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: suite-level --platform skip records a skip RunRecord with runId and flow sha256', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flowPath = join(dir, 'ios-only.yaml');
+    const yaml = 'name: iOS Only Flow\nplatform: ios\nappId: com.apple.Preferences\nsteps:\n  - launch\n';
+    writeFileSync(flowPath, yaml);
+    const suite = await runFlowFiles(c, [flowPath], {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      platform: 'android',
+      settle: false,
+    });
+    assert.equal(suite.skipped, 1);
+    assert.equal(suite.flows.length, 1);
+    assert.ok(suite.flows[0].runId, 'suite-level skipped flow must record a runId');
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].status, 'skip');
+    assert.equal(saved[0].id, suite.flows[0].runId);
+    assert.equal(saved[0].flow.sha256, sha256Hex(yaml));
+    assert.equal(saved[0].app.id, 'com.apple.Preferences');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: flow sha256 hashes the exact bytes loaded for execution even if the file changes mid-run', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flowPath = join(dir, 'mutated.yaml');
+    const original = 'name: Mutated mid-run\nappId: com.example.app\nsteps:\n  - launch\n';
+    writeFileSync(flowPath, original);
+    c.launch = async () => {
+      // Mutate the file on disk during execution; the run record must still hash `original`.
+      writeFileSync(flowPath, original + '# mutated after load\n');
+      return { ok: true, delivery: 'sent', retrySafe: false };
+    };
+    const suite = await runFlowFiles(c, [flowPath], {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts-suite'),
+      settle: false,
+    });
+    assert.equal(suite.passed, 1);
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].flow.sha256, sha256Hex(original));
+
+    // Also verify direct runFlow(c, parseFlow(text, file)) without rawSource never re-reads the file
+    const directPath = join(dir, 'direct.yaml');
+    const directOriginal = 'name: Direct mutated\nappId: com.example.app\nsteps:\n  - launch\n';
+    writeFileSync(directPath, directOriginal);
+    const parsed = parseFlow(directOriginal, directPath);
+    writeFileSync(directPath, directOriginal + '# changed before runFlow\n');
+    const res = await runFlow(c, parsed, { deviceId: 'd', artifactsDir: join(dir, 'artifacts-direct'), settle: false });
+    assert.equal(res.status, 'pass');
+    assert.equal(saved.length, 2);
+    assert.equal(saved[1].flow.sha256, sha256Hex(directOriginal));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: collects app provenance while still holding the lease and uses interpolated launch app id', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  const order: string[] = [];
+  let buildNum = '100';
+  const origLease = c.lease;
+  const origRelease = c.releaseLease;
+  c.lease = async (id, opts) => {
+    order.push('lease');
+    return origLease(id, opts);
+  };
+  c.launch = async (_id, appId) => {
+    order.push(`launch:${appId}`);
+    return { ok: true, delivery: 'sent', retrySafe: false };
+  };
+  c.appInfo = async (_id, appId) => {
+    order.push(`appInfo:${appId}`);
+    return { id: appId, name: 'Interpolated App', version: '2.0.0', build: buildNum, system: false };
+  };
+  c.releaseLease = async (id) => {
+    order.push('releaseLease');
+    // Simulate another owner installing a newer build as soon as the lease is released
+    buildNum = '999';
+    return origRelease(id);
+  };
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flow = parseFlow(`name: Interpolated launch
+steps:
+  - launch: "\${APP_ID}"
+`);
+    const r = await runFlow(c, flow, {
+      deviceId: 'd',
+      artifactsDir: dir,
+      settle: false,
+      env: { APP_ID: 'com.example.interpolated' },
+    });
+    assert.equal(r.status, 'pass');
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].app.id, 'com.example.interpolated');
+    assert.equal(saved[0].app.version, '2.0.0');
+    assert.equal(saved[0].app.build, '100', 'must capture build before lease release');
+    assert.deepEqual(order, [
+      'lease',
+      'launch:com.example.interpolated',
+      'appInfo:com.example.interpolated',
+      'releaseLease',
+    ]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: redacts secrets appearing in flow, device, and app display names across record, md export, and suite report', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  const secret = 'SecretDisplay99';
+  const origDevice = c.device;
+  c.device = async (id) => ({ ...(await origDevice(id)), name: `Phone ${secret}` });
+  c.appInfo = async (_id, appId) => ({ id: appId, name: `App ${secret}`, version: '1.2.3', build: '45', system: false });
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.type = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flowPath = join(dir, 'names.yaml');
+    writeFileSync(flowPath, `name: "Flow ${secret}"
+appId: com.example.names
+steps:
+  - launch
+  - type:
+      text: "${secret}"
+      secret: true
+`);
+    const suite = await runFlowFiles(c, [flowPath], {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      settle: false,
+    });
+    assert.equal(suite.passed, 1);
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.flow.name, 'Flow •••');
+    assert.equal(rec.device.name, 'Phone •••');
+    assert.equal(rec.app.name, 'App •••');
+    // Structural fields stay intact
+    assert.equal(rec.device.platform, 'android');
+    assert.equal(rec.app.id, 'com.example.names');
+    assert.equal(rec.app.version, '1.2.3');
+    assert.equal(rec.app.build, '45');
+    // Neither record, Markdown export, FlowResult, nor suite HTML report leaks the secret
+    assert.ok(!JSON.stringify(rec).includes(secret), 'RunRecord leaked secret in display name');
+    assert.ok(!formatRunMarkdown(rec).includes(secret), 'Markdown export leaked secret in display name');
+    assert.ok(!JSON.stringify(suite.flows[0]).includes(secret), 'FlowResult leaked secret in display name');
+    assert.ok(suite.report && !readFileSync(suite.report, 'utf8').includes(secret), 'Suite HTML report leaked secret in display name');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: platform-filtered skip redacts flow secrets from skip record, md export, suite HTML, and logs', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  const logged: string[] = [];
+  const secret = 'SkipSecret77';
+  const origDevice = c.device;
+  c.device = async (id) => ({ ...(await origDevice(id)), name: `Device ${secret}` });
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flowPath = join(dir, 'android-secret.yaml');
+    writeFileSync(flowPath, `name: "Android ${secret}"
+platform: android
+appId: com.example.android
+steps:
+  - launch
+  - type:
+      text: "${secret}"
+      secret: true
+`);
+    const suite = await runFlowFiles(c, [flowPath], {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      platform: 'ios',
+      settle: false,
+      log: (line) => logged.push(line),
+    });
+    assert.equal(suite.skipped, 1);
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.status, 'skip');
+    assert.equal(rec.flow.name, 'Android •••');
+    assert.equal(rec.device.name, 'Device •••');
+    assert.ok(!JSON.stringify(rec).includes(secret), 'skip RunRecord leaked secret');
+    assert.ok(!formatRunMarkdown(rec).includes(secret), 'skip Markdown export leaked secret');
+    assert.ok(!JSON.stringify(suite.flows[0]).includes(secret), 'skip FlowResult leaked secret');
+    assert.ok(suite.report && !readFileSync(suite.report, 'utf8').includes(secret), 'skip suite HTML leaked secret');
+    assert.ok(!logged.join('\n').includes(secret), 'skip log output leaked secret');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

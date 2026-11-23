@@ -7,12 +7,40 @@ import { z } from 'zod';
 import { parseFlow } from '../core/flow.ts';
 import { collectFlowFiles, displayPath, junitXml, runFlow, runFlowFiles, type SuiteResult } from '../core/flow-runner.ts';
 import { writeSuiteReport } from '../core/flow-report.ts';
-import { phonedockHome } from '../sdk/client.ts';
+import { phonedockHome, type RunRecord, type RunSummary } from '../sdk/client.ts';
 import type { ToolKit } from './server.ts';
 
 const expandHome = (p: string) => (p === '~' ? homedir() : p.startsWith('~/') ? homedir() + p.slice(1) : p);
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'flow';
 const rel = displayPath;
+const fmtDur = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`);
+
+function fmtRunRow(r: RunSummary): string {
+  const app = r.appId === 'unknown' ? 'app=unknown' : `${r.appId}@${r.appVersion}(${r.appBuild})`;
+  const rev = r.commit === 'unknown' ? 'commit=unknown' : `${r.commit.slice(0, 8)}${r.dirty === true ? '*' : ''}`;
+  return `${r.id} | ${r.status.toUpperCase()} | ${r.flowName} | ${r.deviceName} (${r.platform} ${r.osVersion}) | ${app} | ${rev} | ${r.passedSteps}/${r.stepCount} steps | ${fmtDur(r.durationMs)} | ${r.startedAt}`;
+}
+
+function fmtRunSummary(r: RunRecord): string {
+  const lines = [
+    `Run ${r.id}: ${r.flow.name} — ${r.status.toUpperCase()} (${fmtDur(r.durationMs)}, ${r.attempts} attempt${r.attempts === 1 ? '' : 's'})`,
+    `Flow: ${r.flow.file ?? r.flow.fileDisplay} (display: ${r.flow.fileDisplay}, sha256: ${r.flow.sha256 === 'unknown' ? 'unknown' : r.flow.sha256.slice(0, 12)})`,
+    `Device: ${r.device.name} (${r.device.id}; ${r.device.platform} ${r.device.osVersion}, ${r.device.model}, ${r.device.backend})`,
+    `App: ${r.app.id} (${r.app.name}) version=${r.app.version} build=${r.app.build}`,
+    `Source: commit=${r.source.commit} branch=${r.source.branch} dirty=${String(r.source.dirty)}`,
+    `Started: ${r.startedAt} | Ended: ${r.endedAt} | Owner: ${r.owner}`,
+  ];
+  if (r.message) lines.push(`Message: ${r.message}`);
+  if (r.artifacts?.report) lines.push(`Report: ${r.artifacts.report}`);
+  if (r.artifacts?.dir) lines.push(`Artifacts: ${r.artifacts.dir}`);
+  if (r.steps.length) {
+    lines.push('', 'Steps:');
+    for (const s of r.steps) {
+      lines.push(`  ${s.index}. [${s.status.toUpperCase()}] ${s.description} (${fmtDur(s.ms)})${s.message ? ` — ${s.message}` : ''}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 export function registerFlowTools(k: ToolKit): void {
   const { tool, c, target, text } = k;
@@ -85,7 +113,7 @@ export function registerFlowTools(k: ToolKit): void {
     if (a.flow) {
       const f = parseFlow(a.flow, join(tmpdir(), 'inline-flow.yaml'));
       f.file = undefined;
-      const t0 = Date.now(); const r = await runFlow(c, f, opts);
+      const t0 = Date.now(); const r = await runFlow(c, f, { ...opts, rawSource: a.flow });
       suite = { flows: [r], passed: r.status === 'pass' ? 1 : 0, failed: r.status === 'fail' ? 1 : 0, skipped: r.status === 'skip' ? 1 : 0, ms: Date.now() - t0, artifactsDir };
       suite.report = writeSuiteReport(suite);
       lines.push(`${r.status.toUpperCase()}  ${r.name}${r.message && r.status !== 'pass' ? `: ${r.message.split('\n')[0]}` : ''}`);
@@ -97,8 +125,43 @@ export function registerFlowTools(k: ToolKit): void {
     if (a.junit) { const j = resolve(expandHome(a.junit)); mkdirSync(dirname(j), { recursive: true }); writeFileSync(j, junitXml(suite)); lines.push(`JUnit: ${j}`); }
     const ok = suite.failed === 0 && suite.passed > 0;
     const head = `${ok ? 'PASSED' : 'FAILED'}: ${suite.passed} passed, ${suite.failed} failed, ${suite.skipped} skipped on ${d.name} (${(suite.ms / 1000).toFixed(1)} s).`;
+    const runIds = suite.flows.map((f) => f.runId).filter((id): id is string => !!id);
+    const runLine = runIds.length === 1 ? `Run ID: ${runIds[0]}` : runIds.length > 1 ? `Run IDs: ${runIds.join(', ')}` : undefined;
     const arts = suite.flows.filter((f) => f.artifacts).map((f) => `Artifacts for "${f.name}": ${f.artifacts} (report.html, screenshots and available diagnostics)`);
-    return { content: [text([head, ...(suite.report ? [`Report: ${suite.report}`] : []), ...arts, '', ...lines].join('\n').trimEnd())], ...(ok ? {} : { isError: true }) };
+    return { content: [text([head, ...(runLine ? [runLine] : []), ...(suite.report ? [`Report: ${suite.report}`] : []), ...arts, '', ...lines].join('\n').trimEnd())], ...(ok ? {} : { isError: true }) };
+  });
+
+  tool('list_runs', 'List recorded flow runs (schemaVersion 1, newest first) with status, flow, device, app version/build, git commit, step counts and duration. Use get_run(run_id) to inspect a run or export a public-safe PR Markdown summary.', {
+    device: k.deviceParam.describe('Optional device id or name to filter by (omit for all devices)'),
+    status: z.enum(['pass', 'fail', 'skip']).optional().describe('Filter by run status'),
+    flow: z.string().optional().describe('Substring filter on flow name or file'),
+    app_id: z.string().optional().describe('Exact package name / bundle id filter'),
+    limit: z.number().int().min(1).max(200).optional().describe('Maximum runs to return (default 20, max 200)'),
+  }, async (a) => {
+    const runs = await c.listRuns({
+      device: a.device,
+      status: a.status,
+      flow: a.flow,
+      appId: a.app_id,
+      limit: a.limit ?? 20,
+    });
+    if (!runs.length) return { content: [text('No recorded flow runs match the filter.')] };
+    return { content: [text(runs.map(fmtRunRow).join('\n'))] };
+  });
+
+  tool('get_run', 'Fetch a recorded flow run by run_id with full device, app version/build, git commit and step provenance. format="summary" (default) returns a detailed local summary (including local artifact/report paths); format="md" returns public-safe Markdown suitable for PR descriptions (no absolute local paths); format="json" returns the schemaVersion 1 JSON manifest.', {
+    run_id: z.string().min(1).max(128).describe('Run ID from run_flow, phonedock test, or list_runs'),
+    format: z.enum(['summary', 'md', 'json']).optional().describe('Output format: summary (default), md (public-safe PR Markdown), or json'),
+  }, async (a) => {
+    const fmt = a.format ?? 'summary';
+    if (fmt === 'md') {
+      return { content: [text(await c.exportRun(a.run_id, 'md'))] };
+    }
+    const run = await c.getRun(a.run_id);
+    if (fmt === 'json') {
+      return { content: [text(JSON.stringify(run, null, 2))] };
+    }
+    return { content: [text(fmtRunSummary(run))] };
   });
 }
 

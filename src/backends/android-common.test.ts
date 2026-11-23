@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appFixedOrientation, buildAndroidLaunchCommand, clockOffsetFrom, imeFrameFrom, H264_AUD, launchApp, orientationOf, parseCurrentSize, parseDisplayChange, parseResolvedActivity, parseRotation, rotationFor, rotationPending, startsWithStartCode } from './android-common.ts';
+import { appFixedOrientation, buildAndroidLaunchCommand, clockOffsetFrom, imeFrameFrom, H264_AUD, launchApp, orientationOf, parseCurrentSize, parseDisplayChange, parseDumpsysPackage, parseResolvedActivity, parseRotation, rotationFor, rotationPending, startsWithStartCode } from './android-common.ts';
 import { PhoneDockError } from '../core/types.ts';
 
 test('startsWithStartCode: 3- and 4-byte Annex B start codes only', () => {
@@ -180,4 +180,39 @@ if (args.join(' ').includes('resolve-activity')) {
     if (prevSdkRoot === undefined) delete process.env.ANDROID_SDK_ROOT; else process.env.ANDROID_SDK_ROOT = prevSdkRoot;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('parseDumpsysPackage extracts active versionName, versionCode and system flag while ignoring hidden factory blocks', () => {
+  const sample = `
+Packages:
+  Package [com.android.settings] (a1b2c3):
+    userId=1000
+    versionCode=340100 minSdk=34 targetSdk=34
+    versionName=14.1
+    flags=[ SYSTEM HAS_CODE ALLOW_CLEAR_USER_DATA ]
+Hidden system packages:
+  Package [com.android.settings] (deadbeef):
+    versionCode=340000 minSdk=34 targetSdk=34
+    versionName=14.0
+`;
+  assert.deepEqual(parseDumpsysPackage(sample, 'com.android.settings'), {
+    id: 'com.android.settings',
+    version: '14.1',
+    build: '340100',
+    system: true,
+  });
+  assert.equal(parseDumpsysPackage('Unable to find package: com.missing', 'com.missing'), null);
+
+  const nullVersion = `
+Packages:
+  Package [com.example.noversion] (1234):
+    versionCode=7 minSdk=26 targetSdk=34
+    versionName=null
+    flags=[ HAS_CODE ]
+`;
+  assert.deepEqual(parseDumpsysPackage(nullVersion, 'com.example.noversion'), {
+    id: 'com.example.noversion',
+    build: '7',
+    system: false,
+  });
 });

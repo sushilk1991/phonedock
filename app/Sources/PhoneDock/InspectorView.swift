@@ -3,9 +3,9 @@ import AppKit
 import UniformTypeIdentifiers
 
 enum InspectorTab: String, CaseIterable, Identifiable {
-    case info = "Info", apps = "Apps", elements = "Elements", logs = "Logs", activity = "Activity", crashes = "Crashes"
+    case info = "Info", apps = "Apps", elements = "Elements", logs = "Logs", activity = "Activity", crashes = "Crashes", runs = "Runs"
     var id: String { rawValue }
-    /// Six shapes that don't look alike at 13 pt: no two are "lines of text".
+    /// Seven distinct shapes at 13 pt.
     var symbol: String {
         switch self {
         case .info: return "info.circle"
@@ -14,6 +14,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .logs: return "terminal"
         case .activity: return "clock.arrow.circlepath"
         case .crashes: return "exclamationmark.octagon"
+        case .runs: return "checklist"
         }
     }
 
@@ -26,6 +27,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
         case .logs: return "Logs: the device’s log"
         case .activity: return "Activity: what you and agents did"
         case .crashes: return "Crashes: crash reports"
+        case .runs: return "Runs: recorded flow runs and provenance"
         }
     }
 
@@ -62,6 +64,7 @@ struct InspectorView: View {
             // A fresh tab per device: row ids are log indexes, so reusing one could show the last device's rows.
             case .activity: ActivityTab(device: device).id(device.id)
             case .crashes: CrashesTab(device: device)
+            case .runs: RunsTab(device: device).id(device.id)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -84,8 +87,8 @@ struct InspectorTabPicker: View {
             .testAnchor("Inspector tabs")
     }
 
-    /// 36 pt per tab so tabs + inspector toggle fit inside the 280 pt minimum inspector column without overflowing.
-    static let width: CGFloat = 216
+    /// 32 pt per tab × 7 = 224 pt so tabs + inspector toggle fit inside the 280 pt minimum inspector column without overflowing.
+    static let width: CGFloat = 224
 
     private struct Segments: NSViewRepresentable {
         @Binding var tab: InspectorTab
@@ -95,7 +98,11 @@ struct InspectorTabPicker: View {
             let images = tabs.map { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.rawValue) ?? NSImage() }
             let c = NSSegmentedControl(images: images, trackingMode: .selectOne, target: context.coordinator,
                                        action: #selector(Coordinator.changed(_:)))
-            for (i, t) in tabs.enumerated() { c.setToolTip(t.help, forSegment: i) }
+            let segWidth = InspectorTabPicker.width / CGFloat(tabs.count)
+            for (i, t) in tabs.enumerated() {
+                c.setToolTip(t.help, forSegment: i)
+                c.setWidth(segWidth, forSegment: i)
+            }
             c.setAccessibilityLabel("Inspector")
             c.segmentDistribution = .fillEqually
             c.selectedSegment = tabs.firstIndex(of: tab) ?? 0

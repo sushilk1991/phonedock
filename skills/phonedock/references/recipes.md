@@ -35,7 +35,7 @@ Pass `device` explicitly whenever more than one device is in play.
    comes back, so it costs no context).
 2. Motion or a bug that needs time: `record_screen action="start" max_seconds=60`, do the steps,
    `record_screen action="stop"` (returns the `.mp4` path and size).
-3. Note device name, model and OS from `list_devices` with each file.
+3. Note device name, model and OS from `list_devices` with each file, or run a saved flow (`run_flow` / `phonedock test`) and export its public-safe PR table with `get_run run_id="<id>" format="md"` (`phonedock runs export <id> --format md`), which includes app version/build and git commit with zero local paths.
 4. Attaching files to the PR or posting them anywhere needs the user's OK.
 
 ## Debug a crash

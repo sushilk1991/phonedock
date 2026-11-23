@@ -489,7 +489,8 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 ## Apps & system
 | Method | Path | Body / query | Response |
 |---|---|---|---|
-| GET | /v1/devices/:id/apps | `?system=1` | `AppInfo[]`, without system apps unless `system=1` (all backends, iOS simulator included). Android fills `name` with the app's label (see *Android notes*); it is absent until known |
+| GET | /v1/devices/:id/apps | `?system=1` | `AppInfo[]`, without system apps unless `system=1` (all backends, iOS simulator included). Includes `build` (Android `versionCode` / iOS `CFBundleVersion`) when known. Android fills `name` with the app's label (see *Android notes*); it is absent until known |
+| GET | /v1/devices/:id/apps/:appId | – | Single `AppInfo` (`id`, `name?`, `version?`, `build?`, `system?`), or `404 not_found` when not installed |
 | POST | /v1/devices/:id/apps | `{ path }` (local .apk/.app/.ipa/.zip path on the Mac) or `{ url }` (daemon downloads it first) | `{ ok, app? }` |
 | DELETE | /v1/devices/:id/apps/:appId | – | `{ ok }` |
 | POST | /v1/devices/:id/apps/:appId/launch | `{ verify?: true, expect?, args?, env?, returnUi? }` | `{ ok, inFront?, foreground?, relaunched?, appNotes?, delivery, retrySafe, expect?, ui? }` (added; `expect` is checked after the in-front check): after launching, polls the foreground app for up to 3 s. `inFront` = the app is in front, `foreground` = the app id that is (`null` = home screen). On iOS, when the home screen is still up after 1 s (a launch right after Home), it launches once more (forwarding `args`/`env`): `relaunched: true`. All three are absent when the backend can't read the foreground app or `verify: false`. `appNotes: { updatedAt, sizeBytes }` (added) when agents saved notes for this app (see *App notes*). See *Launch arguments & environment* below for `args` and `env` |
@@ -824,6 +825,28 @@ Every flow run writes a self-contained, script-free `report.html`; a suite also 
 markers; it defaults off to avoid screen-capture latency. Known secret text is redacted from textual reports and
 diagnostics. Screenshot pixels remain unchanged and may contain sensitive information; inspect artifacts before
 sharing them.
+
+### Retrievable run records (`schemaVersion: 1`)
+
+Every completed flow run from `phonedock test` and MCP `run_flow` records a versioned `RunRecord` (`schemaVersion: 1`)
+under `<PHONEDOCK_HOME>/runs/<runId>.json` via `POST /v1/runs`, surviving daemon restarts. Retention defaults to 200
+manifests (`PHONEDOCK_MAX_RUNS`, valid integer `1..5000`); pruning deletes only oldest manifest files and never touches
+external `--artifacts` directories. Anything unknown (e.g. git commit outside a repo, uninstalled app version/build) is
+recorded literally as `"unknown"`. Values from launch args/env and secret-marked typing are redacted in one final pass
+before persistence.
+
+| Method | Path | Body / query | Response |
+|---|---|---|---|
+| GET | /v1/runs | `?device=&status=pass\|fail\|skip&flow=&appId=&limit=50` (max 200) | `RunSummary[]`, newest first |
+| GET | /v1/runs/:runId | – | Full `RunRecord` (`schemaVersion: 1`, provenance, steps, local artifact paths); `404` if missing |
+| GET | /v1/runs/:runId/export | `?format=md\|json` (default `md`) | `text/markdown` (public-safe PR summary: repo-relative flow path inside git or bare filename outside, zero absolute local paths) or `application/json` |
+| POST | /v1/runs | `RunRecord` (`<= 2 MB`, `<= 2000` steps, `schemaVersion: 1`, UTC `Z` timestamps, id matching `[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}`) | `201` `RunSummary` (emits SSE `event: run`); `400` on invalid schema/fields, `413` over 2 MB, `409 conflict` on existing id (never overwrites) |
+
+CLI: `phonedock runs [--device ID] [--status pass|fail|skip] [--flow NAME] [--app ID] [--limit N]`,
+`phonedock runs show <runId>` (keeps local paths), and `phonedock runs export <runId> [--format md|json] [-o file]`.
+MCP: `list_runs`, `get_run` (`format: "summary" | "md" | "json"`). SDKs (TS & Python): `appInfo`/`app_info`,
+`listRuns`/`list_runs`, `getRun`/`get_run`, `exportRun`/`export_run`, `saveRun`/`save_run`. Mac app: **Runs**
+inspector tab with live SSE refresh and detail sheet (`Copy PR Summary`, `Open Report`, `Show Artifacts`).
 
 * Folders are searched for `*.yaml`, `*.yml`, `*.json` (not `*.maestro.yaml`), in name order. A file that doesn't
   parse fails. Without `--device`: `$PHONEDOCK_DEVICE`, else the only running device.

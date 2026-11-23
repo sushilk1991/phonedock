@@ -19,7 +19,7 @@ const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | r
 // Keep flow parsing, visual comparison and report generation out of ordinary CLI startup.
 // Help still uses the commands' own text, so it cannot drift from their usage output.
 async function helpText(): Promise<string> {
-  const [{ FLOW_HELP }, { TRACE_USAGE }] = await Promise.all([import('./flow-cmds.ts'), import('./trace-cmds.ts')]);
+  const [{ FLOW_HELP }, { RUNS_HELP }, { TRACE_USAGE }] = await Promise.all([import('./flow-cmds.ts'), import('./runs-cmds.ts'), import('./trace-cmds.ts')]);
   return `phonedock – device runtime for AI agents
 
 Usage: phonedock <command> [args] [--json] [--owner NAME]
@@ -75,6 +75,7 @@ App data:   appdata <id> save|restore|ls <appId> [name]
 App notes:  ${NOTES_USAGE}
               What agents learned about an app, shared by every agent on this Mac. save reads --file or stdin.
 ${FLOW_HELP}
+${RUNS_HELP}
 Diagnostics: doctor [--device ID] | audit <id> | environment <id> | request-result <id> <requestId>
 Test setup: permissions <id> <appId> grant|revoke|reset <service...>
             biometric <id> enroll|unenroll|match|fail [--modality face|fingerprint] [--finger-id N]
@@ -984,6 +985,9 @@ export async function run(argv: string[]): Promise<number> {
     }
     case 'test': {
       const { testCmd } = await import('./flow-cmds.ts'); return testCmd(c, a, argv, JSON_OUT);
+    }
+    case 'run': case 'runs': {
+      const { runsCmd } = await import('./runs-cmds.ts'); return runsCmd(c, a, JSON_OUT);
     }
     case 'trace': case 'perf': {
       const { traceCmd } = await import('./trace-cmds.ts'); return traceCmd(c, a, JSON_OUT);

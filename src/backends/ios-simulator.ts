@@ -1326,6 +1326,7 @@ export const backend: Backend = {
         id: String(info.CFBundleIdentifier),
         name: (info.CFBundleDisplayName ?? info.CFBundleName) as string | undefined,
         version: info.CFBundleShortVersionString as string | undefined,
+        ...(info.CFBundleVersion !== undefined ? { build: String(info.CFBundleVersion) } : {}),
         system: false,
       } satisfies AppInfo;
     } finally { if (tmp) rmSync(tmp, { recursive: true, force: true }); }
@@ -1342,9 +1343,36 @@ export const backend: Backend = {
       id,
       name: (a.CFBundleDisplayName ?? a.CFBundleName ?? a.CFBundleExecutable) as string | undefined,
       version: a.CFBundleShortVersionString as string | undefined,
+      ...(a.CFBundleVersion !== undefined ? { build: String(a.CFBundleVersion) } : {}),
       system: a.ApplicationType === 'System',
     })).filter((a) => opts?.system || !a.system) // like Android: user apps only unless system apps are asked for
       .sort((a, b) => Number(a.system) - Number(b.system) || a.id.localeCompare(b.id));
+  },
+
+  async appInfo(udid, appId) {
+    await requireBooted(udid);
+    const c = await simctl(['get_app_container', udid, appId, 'app'], { allowFail: true, timeoutMs: 10_000 });
+    const appDir = c.code === 0 ? c.stdout.trim() : '';
+    if (appDir) {
+      const plist = join(appDir, 'Info.plist');
+      if (existsSync(plist)) {
+        try {
+          const info = await plistJson(plist);
+          const name = (info.CFBundleDisplayName ?? info.CFBundleName ?? info.CFBundleExecutable) as string | undefined;
+          const version = info.CFBundleShortVersionString as string | undefined;
+          const build = info.CFBundleVersion !== undefined ? String(info.CFBundleVersion) : undefined;
+          return {
+            id: appId,
+            ...(name ? { name } : {}),
+            ...(version ? { version } : {}),
+            ...(build ? { build } : {}),
+            system: appDir.includes('/System/Applications/') || appDir.includes('/RuntimeRoot/'),
+          };
+        } catch { /* fall back to listApps */ }
+      }
+    }
+    const all = await (backend.listApps as (u: string, o?: { system?: boolean }) => Promise<AppInfo[]>)(udid, { system: true });
+    return all.find((a) => a.id === appId) ?? null;
   },
 
   async getSettings(udid) {

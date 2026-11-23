@@ -13,6 +13,7 @@ import type {
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, Appearance, TapSelector,
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
+  RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
 } from '../core/types.ts';
 import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
@@ -27,6 +28,7 @@ export type {
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, Appearance, TapSelector,
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
+  RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
 };
 
 /** Every input result: how far it got (`delivery`: sent / not_sent), whether sending it again is safe (`retrySafe`:
@@ -896,6 +898,33 @@ export class PhoneDockClient {
   // ── apps / system ──────────────────────────────────────────────────────
   apps(id: string, opts: { system?: boolean } = {}): Promise<AppInfo[]> {
     return this.request('GET', this.dev(id, '/apps'), { query: { system: opts.system ? 1 : undefined } });
+  }
+  /** Single-app metadata (version + build). Returns null when the app is not installed. */
+  async appInfo(id: string, appId: string): Promise<AppInfo | null> {
+    try {
+      return await this.request<AppInfo>('GET', this.dev(id, `/apps/${enc(appId)}`));
+    } catch (e) {
+      if (e instanceof PhoneDockApiError && e.status === 404 && e.code === 'not_found') return null;
+      throw e;
+    }
+  }
+  // ── flow run records (schemaVersion: 1) ────────────────────────────────
+  listRuns(opts: { device?: string; status?: RunStatus; flow?: string; appId?: string; limit?: number } = {}): Promise<RunSummary[]> {
+    return this.request('GET', '/v1/runs', { query: opts });
+  }
+  getRun(runId: string): Promise<RunRecord> {
+    return this.request('GET', `/v1/runs/${enc(runId)}`);
+  }
+  async exportRun(runId: string, format: 'md' | 'json' = 'md'): Promise<string> {
+    const res = await this.request<Response>('GET', `/v1/runs/${enc(runId)}/export`, { query: { format }, raw: true });
+    try {
+      return await res.text();
+    } catch (e) {
+      throw this.unreachable(e);
+    }
+  }
+  saveRun(record: RunRecord): Promise<RunSummary> {
+    return this.request('POST', '/v1/runs', { body: record });
   }
   /** Install from a local path on the Mac or an http(s) URL (daemon downloads it). */
   install(id: string, pathOrUrl: string): Promise<{ ok: boolean; app?: AppInfo }> {
