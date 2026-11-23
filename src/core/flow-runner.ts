@@ -139,9 +139,7 @@ function baselinePath(path: string, flowFile: string | undefined, approvedRoot =
   return resolved;
 }
 
-/** One flow on one device. */
-export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promise<FlowResult> {
-  const env = { ...flowIn.env, ...process.env, ...(o.env ?? {}) };
+function collectFlowSecrets(flowIn: Flow, env: Record<string, string | undefined>): string[] {
   const secrets: string[] = [];
   for (const s of flowIn.steps) {
     if ((s.kind === 'fill' || s.kind === 'type') && s.secret) {
@@ -151,6 +149,13 @@ export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promi
       try { const resolved = interpolateStep(s, env); if (resolved.kind === 'launch') secrets.push(...launchSecretValues({ args: resolved.arguments, env: resolved.env })); } catch { /* interpolation is reported by attemptFlow */ }
     }
   }
+  return secrets;
+}
+
+/** One flow on one device. */
+export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promise<FlowResult> {
+  const env = { ...flowIn.env, ...process.env, ...(o.env ?? {}) };
+  const secrets = collectFlowSecrets(flowIn, env);
   const log = (line: string) => o.log?.(redactText(line, secrets));
   const retries = Math.max(0, Math.floor(o.retries ?? 0));
   let res: FlowResult | undefined;
@@ -707,15 +712,19 @@ export async function runFlowFiles(c: FlowClient, files: string[], o: RunOptions
     }
     for (const w of flow.warnings) log(`  note: ${displayPath(f)}: ${w}`);
     if (o.platform && flow.platform && flow.platform !== o.platform) {
-      const skipped: FlowResult = { name: flow.name, file: f, status: 'skip', message: `for ${flow.platform} (--platform ${o.platform})`, steps: [], ms: 0, attempts: 0, startedAt: new Date().toISOString() };
+      const env = { ...flow.env, ...process.env, ...(o.env ?? {}) };
+      const secrets = collectFlowSecrets(flow, env);
+      const skipped: FlowResult = redactFlowResult(
+        { name: flow.name, file: f, status: 'skip', message: `for ${flow.platform} (--platform ${o.platform})`, steps: [], ms: 0, attempts: 0, startedAt: new Date().toISOString() },
+        secrets,
+      );
       if (o.recordRun !== false) {
         const device = await c.device(o.deviceId).catch(() => undefined);
-        const env = { ...flow.env, ...process.env, ...(o.env ?? {}) };
-        const runId = await persistRunRecord(c, flow, skipped, device, { ...o, rawSource: rawBytes }, [], env);
+        const runId = await persistRunRecord(c, flow, skipped, device, { ...o, rawSource: rawBytes }, secrets, env);
         if (runId) skipped.runId = runId;
       }
       flows.push(skipped);
-      log(`SKIP  ${flow.name}: for ${flow.platform}`); continue;
+      log(redactText(`SKIP  ${flow.name}: for ${flow.platform}`, secrets)); continue;
     }
     const r = await runFlow(c, flow, { ...o, rawSource: rawBytes });
     flows.push(r);

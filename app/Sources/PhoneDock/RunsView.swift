@@ -366,7 +366,7 @@ struct RunDetailSheet: View {
         if r.status == "fail",
            let failedStep = r.steps.first(where: { $0.status == "fail" && !($0.message ?? "").isEmpty }),
            let stepMsg = failedStep.message,
-           msg.contains(stepMsg) {
+           msg == "step \(failedStep.index) (\(failedStep.description)): \(stepMsg)" {
             return "Failed at step \(failedStep.index): \(failedStep.description)"
         }
         return msg

@@ -633,3 +633,48 @@ steps:
     assert.ok(suite.report && !readFileSync(suite.report, 'utf8').includes(secret), 'Suite HTML report leaked secret in display name');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runner: platform-filtered skip redacts flow secrets from skip record, md export, suite HTML, and logs', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  const logged: string[] = [];
+  const secret = 'SkipSecret77';
+  const origDevice = c.device;
+  c.device = async (id) => ({ ...(await origDevice(id)), name: `Device ${secret}` });
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flowPath = join(dir, 'android-secret.yaml');
+    writeFileSync(flowPath, `name: "Android ${secret}"
+platform: android
+appId: com.example.android
+steps:
+  - launch
+  - type:
+      text: "${secret}"
+      secret: true
+`);
+    const suite = await runFlowFiles(c, [flowPath], {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      platform: 'ios',
+      settle: false,
+      log: (line) => logged.push(line),
+    });
+    assert.equal(suite.skipped, 1);
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.status, 'skip');
+    assert.equal(rec.flow.name, 'Android •••');
+    assert.equal(rec.device.name, 'Device •••');
+    assert.ok(!JSON.stringify(rec).includes(secret), 'skip RunRecord leaked secret');
+    assert.ok(!formatRunMarkdown(rec).includes(secret), 'skip Markdown export leaked secret');
+    assert.ok(!JSON.stringify(suite.flows[0]).includes(secret), 'skip FlowResult leaked secret');
+    assert.ok(suite.report && !readFileSync(suite.report, 'utf8').includes(secret), 'skip suite HTML leaked secret');
+    assert.ok(!logged.join('\n').includes(secret), 'skip log output leaked secret');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
