@@ -263,6 +263,22 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(seen[1][1].endswith("android-emulator%3Apdtest-mock/requests/pdtest-recover"))
         self.assertEqual(len(seen), 2)
 
+    def test_launch_sends_args_env_and_return_ui(self):
+        captured = []
+
+        def reply(handler, body):
+            captured.append((handler.command, handler.path, json.loads(body.decode())))
+            json_reply(handler, {"ok": True, "delivery": "sent", "retrySafe": False})
+
+        with serve(reply) as url:
+            c = self.client(url, auto_start=False)
+            c.launch("ios-simulator:pdtest-1", "com.example.app", args=["-UITesting"], env={"API_KEY": "secret"}, return_ui=True)
+            c.launch("android-emulator:pdtest-2", "com.example.app", args={"debug": True, "count": 2}, verify=False)
+        self.assertEqual(captured[0][0], "POST")
+        self.assertTrue(captured[0][1].endswith("/apps/com.example.app/launch"))
+        self.assertEqual(captured[0][2], {"args": ["-UITesting"], "env": {"API_KEY": "secret"}, "returnUi": True})
+        self.assertEqual(captured[1][2], {"args": {"debug": True, "count": 2}, "verify": False})
+
 
 if __name__ == "__main__":
     unittest.main()

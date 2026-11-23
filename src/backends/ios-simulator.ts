@@ -17,9 +17,11 @@ import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
 import {
   PhoneDockError,
   type AppInfo, type Availability, type Backend, type BootOptions, type Capability, type CrashReport, type Device, type DeviceSpec,
-  type DeviceState, type ExecResult, type FrameStream, type HardwareProfile, type KeyName, type OsImage,
+  type DeviceState, type ExecResult, type FrameStream, type HardwareProfile, type KeyName, type LaunchOptions, type OsImage,
   type Orientation, type ScreenInfo, type Snapshot, type UiElement, type UiTree,
 } from '../core/types.ts';
+import { hasLaunchOptions, iosLaunchArgv, iosPrefixedEnv, launchSecretValues } from '../core/launch-options.ts';
+import { redactInputValue } from '../core/secrets.ts';
 import {
   JpegSplitter, JsonState, ffmpegBin, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize, probeVideo, splitArgs, type IpsReport,
 } from './ios-common.ts';
@@ -1389,13 +1391,25 @@ export const backend: Backend = {
     await simctl(['pbcopy', udid], { input: text, timeoutMs: 20_000, failureMessage: 'Couldn’t set the simulator’s clipboard' });
   },
 
-  async launchApp(udid, appId) {
+  async launchApp(udid, appId, opts?: LaunchOptions) {
     // Under heavy host load `simctl launch` can block long after the app is up (seen: SIGKILL at 60s while
     // the app was already foreground). On failure, check launchd for the app before reporting an error.
-    try { await simctl(['launch', udid, appId], { timeoutMs: 120_000 }); }
-    catch (e) {
-      const r = await run('xcrun', ['simctl', 'spawn', udid, 'launchctl', 'list'], { env: toolEnv(), allowFail: true, timeoutMs: 30_000 });
-      if (r.stdout.includes(`UIKitApplication:${appId}[`)) return;
+    const withOpts = hasLaunchOptions(opts);
+    const argv = iosLaunchArgv(opts?.args);
+    const env = iosPrefixedEnv('SIMCTL_CHILD_', toolEnv(), opts?.env);
+    const cmd = ['launch', ...(withOpts ? ['--terminate-running-process'] : []), udid, appId, ...argv];
+    try {
+      const r = await simctl(cmd, { env, timeoutMs: 120_000, allowFail: withOpts });
+      if (withOpts && r.code !== 0) {
+        const secrets = launchSecretValues(opts);
+        const detail = redactInputValue(`simctl launch ${appId} exited ${r.code}: ${r.stderr.trim().slice(0, 2048)}`, secrets);
+        throw new PhoneDockError('Couldn’t complete the simulator action', 'exec_failed', 500, undefined, detail);
+      }
+    } catch (e) {
+      if (!withOpts) {
+        const r = await run('xcrun', ['simctl', 'spawn', udid, 'launchctl', 'list'], { env: toolEnv(), allowFail: true, timeoutMs: 30_000 });
+        if (r.stdout.includes(`UIKitApplication:${appId}[`)) return;
+      }
       throw e;
     }
   },

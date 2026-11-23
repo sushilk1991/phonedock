@@ -22,6 +22,8 @@
 // (`flowFromLog`), and export to Maestro. The runner is src/core/flow-runner.ts; the daemon side is
 // src/daemon/observe.ts (observations) and src/daemon/routes-flow.ts (POST /v1/devices/:id/flow).
 import { validateSettingsInput, type SettingsInput } from './device-settings.ts';
+import { validateLaunchOptions } from './launch-options.ts';
+import type { LaunchArgs } from './types.ts';
 import { YAML_COMMENT, YamlError, parse as parseYaml, stringify as stringifyYaml } from './yaml.ts';
 
 export type MatchMode = 'contains' | 'exact' | 'regex';
@@ -38,7 +40,7 @@ interface StepBase {
   fragile?: boolean;       // raw coordinates: breaks on other screen sizes or layouts
 }
 export type Step = StepBase & (
-  | { kind: 'launch'; app?: string; stop: boolean }
+  | { kind: 'launch'; app?: string; stop: boolean; arguments?: LaunchArgs; env?: Record<string, string> }
   | { kind: 'terminate'; app?: string }
   | { kind: 'tap' | 'long_press' | 'double_tap'; sel?: Selector; at?: Point; durationMs?: number }
   | { kind: 'fill'; field?: Selector; at?: Point; value: string; submit?: boolean; clear?: boolean; secret?: boolean }
@@ -93,7 +95,7 @@ export const COMMANDS: StepKind[] = ['launch', 'terminate', 'tap', 'long_press',
   'hide_keyboard', 'scroll_to', 'swipe', 'wait_for', 'set_appearance', 'settings', 'rotate', 'open_url', 'gesture', 'alert', 'sleep',
   'assert_visible', 'assert_not_visible', 'assert_text', 'screenshot'];
 const ALIASES: Record<string, StepKind> = {
-  launch_app: 'launch', stop_app: 'terminate', terminate_app: 'terminate', go_back: 'back', press_key: 'key', go_home: 'home',
+  launch_app: 'launch', launchApp: 'launch', stop_app: 'terminate', terminate_app: 'terminate', go_back: 'back', press_key: 'key', go_home: 'home',
   type_text: 'type', open: 'open_url', appearance: 'set_appearance', handle_alert: 'alert', wait: 'sleep',
 };
 const MODIFIERS = new Set(['optional', 'timeout', 'label', 'fragile']);
@@ -208,9 +210,16 @@ export function parseStep(raw: unknown): Step {
   switch (kind) {
     case 'launch': case 'terminate': {
       if (o) {
-        only(o, kind === 'launch' ? ['app', 'stop'] : ['app'], kind);
+        only(o, kind === 'launch' ? ['app', 'stop', 'arguments', 'args', 'env'] : ['app'], kind);
         const app = o.app === undefined ? {} : { app: str(o.app) };
-        return kind === 'launch' ? { ...base, kind, ...app, stop: o.stop === undefined ? true : bool(o.stop, 'stop') } : { ...base, kind, ...app };
+        if (kind === 'terminate') return { ...base, kind, ...app };
+        if (o.arguments !== undefined && o.args !== undefined) throw new Error('launch: pass arguments or args, not both');
+        const opts = validateLaunchOptions(o.arguments ?? o.args, o.env);
+        return {
+          ...base, kind, ...app, stop: o.stop === undefined ? true : bool(o.stop, 'stop'),
+          ...(opts?.args ? { arguments: opts.args } : {}),
+          ...(opts?.env ? { env: opts.env } : {}),
+        };
       }
       const app = arg === null || arg === undefined || arg === true ? {} : { app: str(arg) };
       return kind === 'launch' ? { ...base, kind, ...app, stop: true } : { ...base, kind, ...app };
@@ -355,7 +364,11 @@ export function stepOut(s: Step): unknown {
   if (s.label) mods.label = s.label;
   let body: unknown;
   switch (s.kind) {
-    case 'launch': body = s.stop ? (s.app ?? null) : { ...(s.app ? { app: s.app } : {}), stop: false }; break;
+    case 'launch':
+      body = (!s.stop || s.arguments || s.env)
+        ? { ...(s.app ? { app: s.app } : {}), ...(!s.stop ? { stop: false } : {}), ...(s.arguments ? { arguments: s.arguments } : {}), ...(s.env ? { env: s.env } : {}) }
+        : (s.app ?? null);
+      break;
     case 'terminate': body = s.app ?? null; break;
     case 'tap': case 'long_press': case 'double_tap':
       body = s.at ? { at: pointText(s.at), ...(s.durationMs !== undefined ? { duration: s.durationMs } : {}) }
@@ -425,7 +438,16 @@ export function describeStep(s: Step): string {
   const sel = (x?: Selector) => describeSelector(x);
   const frag = s.fragile ? ' (fragile: coordinates)' : '';
   switch (s.kind) {
-    case 'launch': return `launch ${s.app ?? '(flow app)'}${s.stop ? '' : ' (keep running)'}`;
+    case 'launch': {
+      const extras: string[] = [];
+      if (!s.stop) extras.push('keep running');
+      if (s.arguments) {
+        if (Array.isArray(s.arguments)) extras.push(`${s.arguments.length} arg${s.arguments.length === 1 ? '' : 's'}`);
+        else extras.push(`args: ${Object.keys(s.arguments).join(', ')}`);
+      }
+      if (s.env) extras.push(`env: ${Object.keys(s.env).join(', ')}`);
+      return `launch ${s.app ?? '(flow app)'}${extras.length ? ` (${extras.join('; ')})` : ''}`;
+    }
     case 'terminate': return `terminate ${s.app ?? '(flow app)'}`;
     case 'tap': case 'long_press': case 'double_tap': return `${s.kind} ${s.at ? `at ${pointText(s.at)}` : sel(s.sel)}${frag}`;
     case 'fill': return `fill ${s.at ? `at ${pointText(s.at)}` : sel(s.field)} = ${s.secret ? '•••' : JSON.stringify(s.value)}${s.submit ? ' + submit' : ''}${frag}`;
@@ -682,7 +704,27 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
     closeFill();
     if (e.replay) bump('replayed action (replay of an earlier session)', 'replayed actions (replay of an earlier session)');
     switch (kind) {
-      case 'launch': push({ kind: 'launch', app: String(a.appId), stop: true }, e.at); break;
+      case 'launch': {
+        const argKeys = Array.isArray(a.argKeys) ? a.argKeys.map(String).filter(Boolean) : [];
+        const envKeys = Array.isArray(a.envKeys) ? a.envKeys.map(String).filter(Boolean) : [];
+        const toEnvName = (k: string) => k.replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1').toUpperCase() || secretVar();
+        const step: Extract<Step, { kind: 'launch' }> = { kind: 'launch', app: String(a.appId), stop: true };
+        if (argKeys.length) {
+          const map: Record<string, string> = {};
+          const vars: string[] = [];
+          for (const k of argKeys) { const v = `LAUNCH_ARG_${toEnvName(k)}`; map[k] = `\${${v}}`; vars.push(v); }
+          step.arguments = map;
+          warnings.push(`step ${raws.length + 1}: launch argument values are not recorded; set ${vars.join(', ')} in the environment when you run the flow`);
+        } else if (a.hasArgs) {
+          warnings.push(`step ${raws.length + 1}: positional launch arguments (${a.argCount ?? '?'}) are not recorded; add arguments: with \${VAR} references if needed`);
+        }
+        if (envKeys.length) {
+          step.env = Object.fromEntries(envKeys.map((k) => [k, `\${${k}}`]));
+          warnings.push(`step ${raws.length + 1}: launch environment values are not recorded; set ${envKeys.join(', ')} in the environment when you run the flow`);
+        }
+        push(step, e.at);
+        break;
+      }
       case 'terminate': push({ kind: 'terminate', app: String(a.appId) }, e.at); break;
       case 'openUrl': push({ kind: 'open_url', url: String(a.url) }, e.at); break;
       case 'rotate': push({ kind: 'rotate', orientation: a.orientation === 'landscape' ? 'landscape' : 'portrait' }, e.at); break;
@@ -912,6 +954,11 @@ export function toMaestro(f: Flow): { text: string; unsupported: string[] } {
         const o: Record<string, unknown> = {};
         if (s.app && s.app !== app) o.appId = s.app;
         if (!s.stop) o.stopApp = false;
+        if (s.arguments) {
+          if (Array.isArray(s.arguments)) notes.push('Maestro launchApp.arguments expects a key-value map; positional args were not exported');
+          else o.arguments = s.arguments;
+        }
+        if (s.env) notes.push('Maestro launchApp has no per-step env; pass environment variables via flow env or -e');
         cmd(s, Object.keys(o).length ? { launchApp: o } : 'launchApp', notes); break;
       }
       case 'terminate': cmd(s, s.app && s.app !== app ? { stopApp: s.app } : 'stopApp', notes); break;

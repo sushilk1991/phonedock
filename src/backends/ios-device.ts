@@ -17,8 +17,9 @@ import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
 import {
   PhoneDockError,
   type AppInfo, type Availability, type Backend, type Capability, type CrashReport, type Device, type DeviceState, type KeyName,
-  type ScreenInfo, type UiElement, type UiTree,
+  type LaunchOptions, type ScreenInfo, type UiElement, type UiTree,
 } from '../core/types.ts';
+import { hasLaunchOptions, iosLaunchArgv, iosPrefixedEnv } from '../core/launch-options.ts';
 import { JsonState, ScreenshotRecorder, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize } from './ios-common.ts';
 import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidPinch, hidSwipe, hidTap, hidType, hidTypable, isNativeInputCapable, type Geometry } from './ios-hid.ts';
 import { isNativeCapable, nativeSession, nativeUiTree } from './ios-native.ts';
@@ -969,10 +970,21 @@ export const backend: Backend & {
     }));
   },
 
-  async launchApp(udid, appId) {
-    if (wdaUrl(udid)) { await wdaSession(udid, 'POST', '/wda/apps/launch', { bundleId: appId }); return; }
-    // No --terminate-existing: bring the app to the front with its state intact (an open draft must survive).
-    await devicectl(['device', 'process', 'launch', '--device', dcId(udid), appId]);
+  async launchApp(udid, appId, opts?: LaunchOptions) {
+    const withOpts = hasLaunchOptions(opts);
+    const argv = iosLaunchArgv(opts?.args);
+    if (wdaUrl(udid)) {
+      const payload: Record<string, unknown> = { bundleId: appId };
+      if (argv.length) payload.arguments = argv;
+      if (opts?.env && Object.keys(opts.env).length) payload.environment = opts.env;
+      await wdaSession(udid, 'POST', '/wda/apps/launch', payload);
+      return;
+    }
+    // Without args/env: no --terminate-existing, so an already-open draft survives.
+    // With args/env: terminate existing instance so iOS applies the new launch arguments/environment.
+    const env = iosPrefixedEnv('DEVICECTL_CHILD_', toolEnv(), opts?.env);
+    const dcArgs = ['device', 'process', 'launch', '--device', dcId(udid), ...(withOpts ? ['--terminate-existing'] : []), ...(argv.length ? ['--', appId, ...argv] : [appId])];
+    await devicectl(dcArgs, { env });
     void ensureNative(udid).catch(() => false); // warms the UI tree for the agent's next `ui`
   },
 

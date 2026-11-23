@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PhoneDockApiError } from '../sdk/client.ts';
 import type { Device } from '../sdk/client.ts';
-import { cliDetail, cliHints, devicesTable, humanCell, leaseCell, parseSpec } from './main.ts';
+import { cliDetail, cliHints, devicesTable, humanCell, leaseCell, parseLaunchFlags, parseSpec } from './main.ts';
 import { parseArgs } from './args.ts';
 
 const base = { id: 'android-emulator:pdtest-a', name: 'pdtest-a', backend: 'android-emulator', platform: 'android', kind: 'emulator', state: 'running', managed: true } as unknown as Device;
@@ -64,5 +64,34 @@ test('parseSpec: --disguise, --carrier and --seed populate spec.options.disguise
   assert.throws(
     () => parseSpec(parseArgs(['create', '--backend', 'android-emulator', '--name', 'pdtest-bad', '--no-disguise', '--carrier', 'ee_uk'])),
     /require --disguise/,
+  );
+});
+
+test('parseLaunchFlags: --arg (including leading dash), --extra, --args-json, --env, and mutual exclusion', () => {
+  const argv1 = ['launch', 'sim', 'com.example.app', '--arg', '-UITesting', '--arg=-server', '--arg', 'staging', '--env', 'API_KEY=sec=ret'];
+  const parsed1 = parseArgs(argv1);
+  assert.deepEqual(parsed1.positionals, ['launch', 'sim', 'com.example.app']);
+  assert.deepEqual(parseLaunchFlags(argv1, parsed1), {
+    args: ['-UITesting', '-server', 'staging'],
+    env: { API_KEY: 'sec=ret' },
+  });
+
+  const argv2 = ['launch', 'emu', 'com.example.app', '--extra', 'route=/home', '--extra=user=ada'];
+  assert.deepEqual(parseLaunchFlags(argv2, parseArgs(argv2)), {
+    args: { route: '/home', user: 'ada' },
+  });
+
+  const argv3 = ['launch', 'emu', 'com.example.app', '--args-json', '{"flag":true,"count":3}'];
+  assert.deepEqual(parseLaunchFlags(argv3, parseArgs(argv3)), {
+    args: { flag: true, count: 3 },
+  });
+
+  assert.throws(
+    () => parseLaunchFlags(['launch', 'd', 'app', '--arg', '-a', '--extra', 'k=v'], parseArgs(['launch', 'd', 'app', '--arg', '-a', '--extra', 'k=v'])),
+    /pass only one of --arg, --extra, or --args-json/,
+  );
+  assert.throws(
+    () => parseLaunchFlags(['launch', 'd', 'app', '--env', 'NO_EQUALS'], parseArgs(['launch', 'd', 'app', '--env', 'NO_EQUALS'])),
+    /--env takes NAME=VALUE/,
   );
 });

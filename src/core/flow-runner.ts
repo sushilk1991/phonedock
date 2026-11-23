@@ -14,6 +14,7 @@ import {
 } from './flow.ts';
 import { compareImages, type ImageComparisonOptions } from './image-comparison.ts';
 import { redactText, redactValue, writeFlowReport, writeSuiteReport } from './flow-report.ts';
+import { launchSecretValues, redactLaunchStep } from './launch-options.ts';
 
 /** The part of PhoneDockClient the runner uses (tests pass a fake). */
 export type FlowClient = Pick<PhoneDockClient, 'owner' | 'device' | 'lease' | 'releaseLease' | 'launch' | 'terminate' | 'openUrl' | 'setAppearance'
@@ -131,8 +132,12 @@ function baselinePath(path: string, flowFile: string | undefined, approvedRoot =
 export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promise<FlowResult> {
   const env = { ...flowIn.env, ...process.env, ...(o.env ?? {}) };
   const secrets: string[] = [];
-  for (const s of flowIn.steps) if ((s.kind === 'fill' || s.kind === 'type') && s.secret) {
-    try { const resolved = interpolateStep(s, env); if (resolved.kind === 'fill') secrets.push(resolved.value); else if (resolved.kind === 'type') secrets.push(resolved.text); } catch { /* interpolation is reported by attemptFlow */ }
+  for (const s of flowIn.steps) {
+    if ((s.kind === 'fill' || s.kind === 'type') && s.secret) {
+      try { const resolved = interpolateStep(s, env); if (resolved.kind === 'fill') secrets.push(resolved.value); else if (resolved.kind === 'type') secrets.push(resolved.text); } catch { /* interpolation is reported by attemptFlow */ }
+    } else if (s.kind === 'launch' && (s.arguments || s.env)) {
+      try { const resolved = interpolateStep(s, env); if (resolved.kind === 'launch') secrets.push(...launchSecretValues({ args: resolved.arguments, env: resolved.env })); } catch { /* interpolation is reported by attemptFlow */ }
+    }
   }
   const log = (line: string) => o.log?.(redactText(line, secrets));
   const retries = Math.max(0, Math.floor(o.retries ?? 0));
@@ -193,19 +198,19 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   let failed: StepResult | undefined;
   try {
     for (let i = 0; i < steps.length; i++) {
-      const s = steps[i]; const desc = describeStep(s); const st = Date.now();
-      if (o.signal?.aborted) { results.push({ index: i + 1, step: s, description: desc, status: 'skip', ms: 0, message: 'cancelled' }); continue; }
-      if (failed) { results.push({ index: i + 1, step: s, description: desc, status: 'skip', ms: 0 }); continue; }
+      const s = steps[i]; const safeStep = redactLaunchStep(s); const desc = describeStep(s); const st = Date.now();
+      if (o.signal?.aborted) { results.push({ index: i + 1, step: safeStep, description: desc, status: 'skip', ms: 0, message: 'cancelled' }); continue; }
+      if (failed) { results.push({ index: i + 1, step: safeStep, description: desc, status: 'skip', ms: 0 }); continue; }
       let r: StepResult;
       const record = o.captureSteps && !['assert_visible', 'assert_not_visible', 'assert_text', 'sleep', 'wait_for', 'screenshot'].includes(s.kind);
       const beforeScreenshot = record ? await capture(i + 1, 'before') : undefined;
       try {
         ctx.lastShot = undefined; ctx.actionPoint = undefined;
         const note = await ctx.run(s);
-        r = { index: i + 1, step: s, description: desc, status: 'pass', ms: Date.now() - st, ...(note ? { message: note } : {}), ...(ctx.lastShot ? { screenshot: ctx.lastShot } : {}) };
+        r = { index: i + 1, step: safeStep, description: desc, status: 'pass', ms: Date.now() - st, ...(note ? { message: note } : {}), ...(ctx.lastShot ? { screenshot: ctx.lastShot } : {}) };
       } catch (e) {
         const msg = e instanceof StepFailure ? e.message : ctx.explain(s, e);
-        r = { index: i + 1, step: s, description: desc, status: s.optional ? 'warn' : 'fail', ms: Date.now() - st, message: msg };
+        r = { index: i + 1, step: safeStep, description: desc, status: s.optional ? 'warn' : 'fail', ms: Date.now() - st, message: msg };
         if (!s.optional) failed = r;
       }
       if (beforeScreenshot) r.beforeScreenshot = beforeScreenshot;
@@ -307,7 +312,8 @@ class Ctx {
       case 'launch': {
         const app = appOf(s.app);
         if (s.stop) await c.terminate(id, app).catch(() => {});
-        try { await c.launch(id, app); }
+        const launchOpts = s.arguments || s.env ? { ...(s.arguments ? { args: s.arguments } : {}), ...(s.env ? { env: s.env } : {}) } : undefined;
+        try { await c.launch(id, app, launchOpts); }
         catch (e) {
           // The usual first failure in CI: the app was never installed on this device. Say so plainly.
           const apps = c.apps ? await c.apps(id, { system: true }).catch(() => undefined) : undefined;

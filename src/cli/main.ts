@@ -11,6 +11,8 @@ import { parseArgs, str, num, bool, table, type ParsedArgs } from './args.ts';
 import { localTime } from '../backends/ios-common.ts';
 import { appNotesDir, appNotesPath } from '../core/app-notes.ts';
 import { parseEnvironmentAction } from '../core/environment.ts';
+import { launchSummarySuffix } from '../core/launch-options.ts';
+import type { LaunchArgs } from '../core/types.ts';
 
 const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | rm <appId> | path [appId]';
 
@@ -48,7 +50,8 @@ Input:      tap <id> <x> <y> | tap <id> @e12 | tap <id> --text "Sign in" [--matc
             alert <id> [accept|dismiss|button <label>|button=<label>]   (no action: show the prompt on screen)
             tap, long-press, double-tap, swipe, type, key, fill, launch, input: --expect TEXT|visible:TEXT|gone:TEXT|id:ID|changed
               [--expect-timeout MS] [--expect-match M] waits for that after the input (exit 1 when not verified)
-Apps:       apps <id> [--system] | install <id> <path|url> | launch|terminate|uninstall <id> <appId>
+Apps:       apps <id> [--system] | install <id> <path|url> | terminate|uninstall <id> <appId>
+            launch <id> <appId> [--arg VAL]... [--extra K=V]... [--args-json JSON] [--env K=V]...
             open-url <id> <url>
 System:     shell <id> -- <cmd…> | push <id> <local> <remote> | pull <id> <remote> [local]
             logs <id> [-n N] [--filter F] | location <id> <lat> <lon> | rotate <id> portrait|landscape
@@ -109,6 +112,61 @@ function expectFlag(flags: Record<string, string | boolean>): Expect | undefined
   const mm = str(flags, 'expectMatch'); if (mm) e.match = mm as Expect['match'];
   return e;
 }
+/** Collect every value of a repeatable flag (`--arg -UITesting --arg foo` or `--env A=1 --env B=2`), stopping at `--`. */
+function manyFlag(argv: string[], flag: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--') break;
+    if (argv[i] === `--${flag}`) {
+      if (i + 1 >= argv.length) usage(`--${flag} needs a value`);
+      out.push(argv[++i]);
+    } else if (argv[i].startsWith(`--${flag}=`)) {
+      out.push(argv[i].slice(flag.length + 3));
+    }
+  }
+  return out;
+}
+
+/** Parse `--arg`, `--extra`, `--args-json` and `--env` for `phonedock launch`. Exported for tests. */
+export function parseLaunchFlags(argv: string[], a: ParsedArgs): { args?: LaunchArgs; env?: Record<string, string> } {
+  const posArgs = manyFlag(argv, 'arg');
+  const extrasRaw = manyFlag(argv, 'extra');
+  const argsJsonRaw = a.flags.argsJson;
+  const envRaw = manyFlag(argv, 'env');
+  const argSources = [posArgs.length > 0, extrasRaw.length > 0, argsJsonRaw !== undefined].filter(Boolean).length;
+  if (argSources > 1) usage('launch: pass only one of --arg, --extra, or --args-json');
+
+  let args: LaunchArgs | undefined;
+  if (posArgs.length) {
+    args = posArgs;
+  } else if (extrasRaw.length) {
+    const map: Record<string, string> = {};
+    for (const kv of extrasRaw) {
+      const i = kv.indexOf('=');
+      if (i < 1) usage(`--extra takes KEY=VALUE (got "${kv}")`);
+      map[kv.slice(0, i)] = kv.slice(i + 1);
+    }
+    args = map;
+  } else if (argsJsonRaw !== undefined) {
+    if (typeof argsJsonRaw !== 'string') usage('--args-json needs a JSON array or object');
+    let parsed: unknown;
+    try { parsed = JSON.parse(argsJsonRaw); } catch (e) { usage(`--args-json is not valid JSON: ${(e as Error).message}`); }
+    if (!Array.isArray(parsed) && (!parsed || typeof parsed !== 'object')) usage('--args-json must be a JSON array or object');
+    args = parsed as LaunchArgs;
+  }
+
+  let env: Record<string, string> | undefined;
+  if (envRaw.length) {
+    env = {};
+    for (const kv of envRaw) {
+      const i = kv.indexOf('=');
+      if (i < 1) usage(`--env takes NAME=VALUE (got "${kv}")`);
+      env[kv.slice(0, i)] = kv.slice(i + 1);
+    }
+  }
+  return { ...(args !== undefined ? { args } : {}), ...(env !== undefined ? { env } : {}) };
+}
+
 /** The human line of an input with its expect result, and the exit code (1: not verified). */
 function withExpect(r: { expect?: ExpectReport }, line: string): string { return r.expect ? `${line}\n${r.expect.message}${!r.expect.ok && r.expect.summary ? `\n  screen now: ${r.expect.summary}` : ''}` : line; }
 const expectCode = (r: { expect?: ExpectReport }): number => (r.expect && !r.expect.ok ? 1 : 0);
@@ -718,9 +776,11 @@ export async function run(argv: string[]): Promise<number> {
     case 'uninstall': { const d = await dev(); need(p, 3, '<appId>'); out(await c.uninstall(d.id, p[2]), () => `Uninstalled ${p[2]}`); return 0; }
     case 'launch': {
       const d = await dev(); need(p, 3, '<appId>');
-      const r = await c.launch(d.id, p[2], { expect: expectFlag(a.flags) });
+      const { args, env } = parseLaunchFlags(argv, a);
+      const launchOpts = { ...(args !== undefined ? { args } : {}), ...(env !== undefined ? { env } : {}) };
+      const r = await c.launch(d.id, p[2], { expect: expectFlag(a.flags), ...launchOpts });
       const notes = r.appNotes ? `\nPhoneDock has notes for ${p[2]}: phonedock app-notes show ${p[2]}` : '';
-      out(r, () => withExpect(r, `Launched ${p[2]}${r.inFront === false ? ` (not in front: ${r.foreground ?? 'home screen'})` : ''}${notes}`)); return expectCode(r);
+      out(r, () => withExpect(r, `Launched ${p[2]}${launchSummarySuffix(launchOpts)}${r.inFront === false ? ` (not in front: ${r.foreground ?? 'home screen'})` : ''}${notes}`)); return expectCode(r);
     }
     case 'terminate': case 'kill': { const d = await dev(); need(p, 3, '<appId>'); out(await c.terminate(d.id, p[2]), () => `Terminated ${p[2]}`); return 0; }
     case 'open-url': case 'open': { const d = await dev(); need(p, 3, '<url>'); out(await c.openUrl(d.id, p[2]), () => `Opened ${p[2]}`); return 0; }

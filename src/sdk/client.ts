@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
-  AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
+  AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, LaunchArgs, LaunchArgValue, LaunchOptions, Lease,
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, Appearance, TapSelector,
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
@@ -22,7 +22,7 @@ import type { WebViewOptions, WebViewResult } from '../backends/android-webview.
 export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult };
 
 export type {
-  AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
+  AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, LaunchArgs, LaunchArgValue, LaunchOptions, Lease,
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, Appearance, TapSelector,
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
@@ -35,6 +35,7 @@ export interface InputDelivery { delivery?: Delivery; retrySafe?: boolean; expec
 export interface InputResult extends InputDelivery { ok: boolean; resolved?: unknown }
 /** Options of every input call: `expect` waits (after the input) for what the screen should show. */
 export interface InputOptions { expect?: Expect | string; snapshotId?: string; returnUi?: boolean; requestId?: string }
+export interface LaunchCallOptions extends InputOptions, LaunchOptions { verify?: boolean }
 
 /** Element query for find / waitFor / fill / tapText. `match` applies to text and id (default contains, case-insensitive). */
 export interface FindOptions { text?: string; id?: string; type?: string; match?: 'contains' | 'exact' | 'regex'; index?: number; ocrFallback?: boolean; limit?: number }
@@ -886,8 +887,14 @@ export class PhoneDockClient {
   uninstall(id: string, appId: string): Promise<{ ok: boolean }> { return this.request('DELETE', this.dev(id, `/apps/${enc(appId)}`)); }
   /** `inFront`: the app is in the foreground afterwards (absent when the backend can't tell); `foreground`: what is.
    *  `appNotes`: agents saved notes for this app (read them with appNotes()). */
-  launch(id: string, appId: string, opts: InputOptions = {}): Promise<{ ok: boolean; inFront?: boolean; foreground?: string | null; relaunched?: boolean; appNotes?: AppNotesHint } & InputDelivery> {
-    return this.request('POST', this.dev(id, `/apps/${enc(appId)}/launch`), { body: opts.expect !== undefined ? { expect: opts.expect } : {}, input: true });
+  launch(id: string, appId: string, opts: LaunchCallOptions = {}): Promise<{ ok: boolean; inFront?: boolean; foreground?: string | null; relaunched?: boolean; appNotes?: AppNotesHint } & InputDelivery> {
+    const body: Record<string, unknown> = {};
+    if (opts.expect !== undefined) body.expect = opts.expect;
+    if (opts.args !== undefined) body.args = opts.args;
+    if (opts.env !== undefined) body.env = opts.env;
+    if (opts.verify !== undefined) body.verify = opts.verify;
+    if (opts.returnUi) body.returnUi = true;
+    return this.request('POST', this.dev(id, `/apps/${enc(appId)}/launch`), { body, input: true, requestId: opts.requestId });
   }
   terminate(id: string, appId: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, `/apps/${enc(appId)}/terminate`), { body: {} }); }
   openUrl(id: string, url: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/open-url'), { body: { url } }); }

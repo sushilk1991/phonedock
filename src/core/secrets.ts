@@ -1,4 +1,6 @@
-/** Only values explicitly marked secret by the caller. An empty secret still masks structured field contents. */
+import { launchSecretValues } from './launch-options.ts';
+
+/** Values explicitly marked secret by the caller, plus launch args/env values. An empty secret still masks structured field contents. */
 export function inputSecretValues(body: unknown): string[] {
   const out: string[] = [];
   const visit = (v: unknown) => {
@@ -7,7 +9,12 @@ export function inputSecretValues(body: unknown): string[] {
     if (o.secret === true) for (const key of ['text', 'value']) if (typeof o[key] === 'string') out.push(o[key]);
     for (const child of Object.values(o)) if (child && typeof child === 'object') visit(child);
   };
-  visit(body); return [...new Set(out)];
+  visit(body);
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    const b = body as Record<string, unknown>;
+    if ('args' in b || 'env' in b) out.push(...launchSecretValues({ args: b.args, env: b.env }));
+  }
+  return [...new Set(out)];
 }
 /** Redact diagnostics and structured field contents without ever storing the request body. */
 export function redactInputValue<T>(value: T, secrets: readonly string[], key = ''): T {

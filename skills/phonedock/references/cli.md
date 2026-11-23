@@ -64,7 +64,7 @@ Raw input in one call (device pixels): `phonedock input <id> '[{"action":"tap","
 | Need | Command |
 |---|---|
 | Boot / shut down / delete | `boot <id>` · `shutdown <id>` · `rm <id>` (refuses devices PhoneDock didn't create unless `--force`) |
-| Apps | `apps <id>` · `install <id> <path.app\|.apk>` · `launch <id> <appId>` · `terminate <id> <appId>` · `open-url <id> <url>` |
+| Apps | `apps <id>` · `install <id> <path.app\|.apk>` · `launch <id> <appId> [--arg V]... [--extra K=V]... [--args-json JSON] [--env K=V]...` · `terminate <id> <appId>` · `open-url <id> <url>` |
 | Navigation | `back <id>` · `gesture <id> go_home` · `key <id> enter` · `hide-keyboard <id>` · `swipe <id> x1 y1 x2 y2` |
 | System prompts | `alert <id>` (shows it; exit 1 when none is up) · `alert <id> accept` · `alert <id> dismiss` · `alert <id> button "Allow Once"` |
 | Look and feel | `appearance <id> dark` · `rotate <id> landscape` · `location <id> <lat> <lon>` |

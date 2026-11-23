@@ -471,7 +471,7 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 | GET | /v1/devices/:id/apps | `?system=1` | `AppInfo[]`, without system apps unless `system=1` (all backends, iOS simulator included). Android fills `name` with the app's label (see *Android notes*); it is absent until known |
 | POST | /v1/devices/:id/apps | `{ path }` (local .apk/.app/.ipa/.zip path on the Mac) or `{ url }` (daemon downloads it first) | `{ ok, app? }` |
 | DELETE | /v1/devices/:id/apps/:appId | – | `{ ok }` |
-| POST | /v1/devices/:id/apps/:appId/launch | `{ verify?: true, expect? }` | `{ ok, inFront?, foreground?, relaunched?, appNotes?, delivery, retrySafe, expect? }` (added; `expect` is checked after the in-front check): after launching, polls the foreground app for up to 3 s. `inFront` = the app is in front, `foreground` = the app id that is (`null` = home screen). On iOS, when the home screen is still up after 1 s (a launch right after Home), it launches once more: `relaunched: true`. All three are absent when the backend can't read the foreground app or `verify: false`. `appNotes: { updatedAt, sizeBytes }` (added) when agents saved notes for this app (see *App notes*) |
+| POST | /v1/devices/:id/apps/:appId/launch | `{ verify?: true, expect?, args?, env?, returnUi? }` | `{ ok, inFront?, foreground?, relaunched?, appNotes?, delivery, retrySafe, expect?, ui? }` (added; `expect` is checked after the in-front check): after launching, polls the foreground app for up to 3 s. `inFront` = the app is in front, `foreground` = the app id that is (`null` = home screen). On iOS, when the home screen is still up after 1 s (a launch right after Home), it launches once more (forwarding `args`/`env`): `relaunched: true`. All three are absent when the backend can't read the foreground app or `verify: false`. `appNotes: { updatedAt, sizeBytes }` (added) when agents saved notes for this app (see *App notes*). See *Launch arguments & environment* below for `args` and `env` |
 | POST | /v1/devices/:id/apps/:appId/terminate | – | `{ ok }` |
 | POST | /v1/devices/:id/open-url | `{ url }` | `{ ok }` |
 | POST | /v1/devices/:id/shell | `{ command }` | `ExecResult` |
@@ -495,6 +495,12 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 
 `foreground`, `clipboard`, `crashes`, `recording/*`, `apps/:appId/data/*`, `keyboard/hide`, `rotate`, `files/*` and `push` return
 `501 not_supported` on backends that lack them (see `capabilities` in `/v1/backends`). Names are `[A-Za-z0-9._-]`.
+
+**Launch arguments & environment.** `POST /v1/devices/:id/apps/:appId/launch` accepts optional `args` (`string[]` or `{ key: string | number | boolean }`, up to 64 entries; integers must be within the safe 53-bit range) and `env` (`Record<string, string>`, up to 64 entries, keys `[A-Za-z_][A-Za-z0-9_]*`). Values may be secrets: they are never logged in `actions.jsonl` (only keys/counts), never echoed in responses, redacted from errors/reports/run records, and emitted as `${VAR}` placeholders by `flow save`.
+* **iOS simulator (`ios-simulator`):** `args` (`string[]`, or map converted to `["-<key>", "<value>", ...]`) are passed as `xcrun simctl launch` arguments; `env` is injected via `SIMCTL_CHILD_*` in the child environment. When `args` or `env` is non-empty, `--terminate-running-process` is added so a running instance does not silently ignore them.
+* **iOS device (`ios-device`):** `devicectl device process launch --device <udid> [--terminate-existing] -- <appId> <argv…>`, with `env` injected via `DEVICECTL_CHILD_*` (off argv). WDA-only setups forward `arguments`/`environment` to `/wda/apps/launch` (unit-tested only).
+* **Android (`android-emulator`, `android-device`):** Android processes fork from Zygote and have no per-app launch environment (`env` returns `501 not_supported`, `delivery: "not_sent"`), and no positional argv (`args: string[]` returns `501 not_supported`). Key-value `args` objects resolve the launcher activity and run `am start -S` (fresh process) with shell-quoted typed Intent extras: booleans `--ez`, int32 `--ei`, safe int64 `--el`, finite floats `--ef`, strings `--es`. Without `args`/`env`, the existing `monkey` launch path is unchanged.
+* **Corellium & others:** non-empty `args` or `env` returns `501 not_supported` (`delivery: "not_sent"`), never silently dropped.
 
 **Rotation.** Devices that can turn list `rotate` in their capabilities; the app hides Rotate for the rest. `rotate`
 turns the screen and returns once it has turned (or after ~1.5–2 s if the app on screen keeps its orientation).
@@ -758,7 +764,7 @@ comment above them.
 
 | Command | Argument |
 |---|---|
-| `launch` / `terminate` | app id (or nothing: the flow's `appId`) |
+| `launch` / `terminate` | app id (or nothing: the flow's `appId`); `launch` (aliases `launch_app`, `launchApp`) also accepts `{ app?, stop?: true, arguments? (alias args): string[] \| { key: string\|number\|boolean }, env?: { NAME: value } }`. Use `${VAR}` for secrets; values are redacted from logs, `result.json`, and `report.html`. Map `arguments` export directly to Maestro's `launchApp.arguments` |
 | `tap`, `long_press`, `double_tap` | selector, or `{ at: point }`; `long_press` takes `duration` |
 | `fill` | `{ field: selector \| at: point, value, submit?, clear?: true, secret? }` |
 | `type` | text, or `{ text, submit?, secret? }` |

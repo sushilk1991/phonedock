@@ -396,6 +396,16 @@ export interface TraceSummary {
 /** How mature a backend is. Clients show a "Beta" / "Experimental" badge for anything but `stable` (the default when absent). */
 export type BackendStage = 'stable' | 'beta' | 'experimental';
 
+export type LaunchArgValue = string | number | boolean;
+export type LaunchArgs = string[] | Record<string, LaunchArgValue>;
+export interface LaunchOptions {
+  /** Launch arguments: string[] (iOS positional argv; unsupported on Android) or a typed key-value map
+   *  (Android Intent extras via `am start`; iOS `-key value` arguments). Values may be secrets and are never logged. */
+  args?: LaunchArgs;
+  /** Process environment variables (iOS simulator SIMCTL_CHILD_*, iOS device DEVICECTL_CHILD_*; unsupported on Android). */
+  env?: Record<string, string>;
+}
+
 export interface BootOptions { headless?: boolean; coldBoot?: boolean; window?: boolean }
 
 /** Live frame source. The daemon starts at most one per device and fans frames out. */
@@ -488,7 +498,7 @@ export interface Backend {
   installApp?(nativeId: string, path: string): Promise<AppInfo | void>;
   uninstallApp?(nativeId: string, appId: string): Promise<void>;
   listApps?(nativeId: string): Promise<AppInfo[]>;
-  launchApp?(nativeId: string, appId: string): Promise<void>;
+  launchApp?(nativeId: string, appId: string, opts?: LaunchOptions): Promise<void>;
   terminateApp?(nativeId: string, appId: string): Promise<void>;
   openUrl?(nativeId: string, url: string): Promise<void>;
   shell?(nativeId: string, command: string): Promise<ExecResult>;

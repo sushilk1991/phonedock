@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { Backend, Device, DeviceSpec, OsImage, HardwareProfile, Snapshot, ScreenInfo, Availability, BootOptions, Capability, KeyName, AppInfo, Platform, DeviceState } from '../core/types.ts';
 import { PhoneDockError } from '../core/types.ts';
+import { hasLaunchOptions } from '../core/launch-options.ts';
 import { sleep } from '../core/exec.ts';
 import { assertInputFence } from '../core/input-fence.ts';
 
@@ -293,7 +294,17 @@ export const backend: Backend = {
     const r = await api<{ apps?: { bundleID: string; name?: string; applicationType?: string }[] }>('GET', agent(nativeId, '/app/apps'));
     return (r?.apps ?? []).map((a) => ({ id: a.bundleID, name: a.name, system: a.applicationType ? a.applicationType !== 'User' : undefined }));
   },
-  async launchApp(nativeId, appId) { await api('POST', agent(nativeId, `/app/apps/${encodeURIComponent(appId)}/run`)); },
+  async launchApp(nativeId, appId, opts) {
+    if (hasLaunchOptions(opts)) {
+      throw new PhoneDockError(
+        'Launch arguments and environment are not supported on Corellium',
+        'not_supported', 501,
+        ['Launch without args/env, or use an iOS simulator, iPhone, Android emulator or Android phone.'],
+        undefined, 'not_sent',
+      );
+    }
+    await api('POST', agent(nativeId, `/app/apps/${encodeURIComponent(appId)}/run`));
+  },
   async terminateApp(nativeId, appId) { await api('POST', agent(nativeId, `/app/apps/${encodeURIComponent(appId)}/kill`)); },
   async pushFile(nativeId, localPath, remotePath) {
     if (statSync(localPath).size > 2 * 1024 ** 3) throw new PhoneDockError('File too large for upload (>2 GB)', 'too_large', 413);

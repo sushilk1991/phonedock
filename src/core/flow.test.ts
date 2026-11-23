@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FlowError, compareVersions, flowFromLog, interpolate, parseFlow, parseStep, pickAssertText, stepOut, toMaestro, writeFlow, type LogEntry, type Observation, type Step } from './flow.ts';
+import { FlowError, compareVersions, describeStep, flowFromLog, interpolate, interpolateStep, parseFlow, parseStep, pickAssertText, stepOut, toMaestro, writeFlow, type LogEntry, type Observation, type Step } from './flow.ts';
 
 const SAMPLE = `# hand-written
 name: Greet
@@ -293,4 +293,72 @@ test('visual assertion options validate and round trip with ignored pixel region
   for (const bad of ['tolerance: -1', 'tolerance: NaN', 'tolerance: 2', 'comparison: unknown', 'pixelThreshold: 300', 'ignore: [{ x: 0, y: 0, width: -1, height: 1 }]']) {
     assert.throws(() => parseFlow(`steps:\n  - screenshot: { name: home, ${bad} }\n`));
   }
+});
+
+test('launch step: arguments (map/array), args alias, launchApp alias, env, Maestro export, and secret-safe flowFromLog', () => {
+  const f = parseFlow(`name: Launch options
+appId: com.example.app
+env: { API_TOKEN: tok-123 }
+steps:
+  - launchApp:
+      arguments:
+        isUITestRunning: true
+        retries: 3
+        token: "\${API_TOKEN}"
+      env:
+        API_TOKEN: "\${API_TOKEN}"
+  - launch:
+      app: com.other.app
+      stop: false
+      args: ["-UITesting", "-server", "staging"]
+`);
+  assert.equal(f.steps.length, 2);
+  assert.deepEqual(f.steps[0], {
+    kind: 'launch', stop: true,
+    arguments: { isUITestRunning: true, retries: 3, token: '${API_TOKEN}' },
+    env: { API_TOKEN: '${API_TOKEN}' },
+  });
+  assert.deepEqual(f.steps[1], {
+    kind: 'launch', app: 'com.other.app', stop: false,
+    arguments: ['-UITesting', '-server', 'staging'],
+  });
+  // Round-trip write -> parse
+  assert.deepEqual(parseFlow(writeFlow(f)).steps, f.steps);
+  // describeStep must never include values
+  const d0 = describeStep(f.steps[0]);
+  assert.match(d0, /args: isUITestRunning, retries, token/);
+  assert.match(d0, /env: API_TOKEN/);
+  assert.ok(!d0.includes('tok-123'));
+  assert.ok(!describeStep(f.steps[1]).includes('staging'));
+  // Interpolation resolves ${VAR} inside arguments & env
+  const interp = interpolateStep(f.steps[0], { API_TOKEN: 'tok-123' });
+  assert.equal(interp.kind, 'launch');
+  assert.deepEqual(interp.arguments, { isUITestRunning: true, retries: 3, token: 'tok-123' });
+  assert.deepEqual(interp.env, { API_TOKEN: 'tok-123' });
+  // Cannot pass both arguments and args
+  assert.throws(() => parseFlow('steps:\n  - launch: { arguments: { a: 1 }, args: ["-x"] }\n'), /not both/);
+  // Unsafe integer rejected
+  assert.throws(() => parseFlow('steps:\n  - launch: { arguments: { big: 9007199254740992 } }\n'), /safe 53-bit range/);
+
+  // Maestro export keeps map arguments compatible and comments positional args / env
+  const m = toMaestro(f);
+  assert.match(m.text, /launchApp:/);
+  assert.match(m.text, /isUITestRunning: true/);
+  assert.match(m.text, /retries: 3/);
+  assert.match(m.text, /Maestro launchApp has no per-step env/);
+  assert.match(m.text, /positional args were not exported/);
+
+  // flowFromLog turns logged argKeys/envKeys into ${VAR} placeholders + warnings (never values)
+  const saved = flowFromLog(
+    [{ at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['userRole'], envKeys: ['API_TOKEN'] } }],
+    [],
+    { autoAssert: false },
+  );
+  assert.deepEqual(saved.flow.steps[0], {
+    kind: 'launch', app: 'com.example.app', stop: true,
+    arguments: { userRole: '${LAUNCH_ARG_USERROLE}' },
+    env: { API_TOKEN: '${API_TOKEN}' },
+  });
+  assert.ok(saved.warnings.some((w) => w.includes('LAUNCH_ARG_USERROLE')));
+  assert.ok(saved.warnings.some((w) => w.includes('API_TOKEN')));
 });

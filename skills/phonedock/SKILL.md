@@ -138,7 +138,9 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
 
 - **Build, install, launch, test a flow.** Build with the project's own tooling (simulator builds for iOS:
   `xcodebuild … -sdk iphonesimulator`; Android: `./gradlew assembleDebug`). Then `install_app path="/abs/App.app"`
-  (or `.apk`), `launch_app app_id="com.example.app"`, `wait_for until="visible" …`, and walk the flow with
+  (or `.apk`), `launch_app app_id="com.example.app"` (optional `args`: `string[]` on iOS or `{key: val}` Intent extras
+  on Android / `-key val` on iOS; optional `env`: iOS only, `not_supported` on Android; values are never logged),
+  `wait_for until="visible" …`, and walk the flow with
   `tap`/`fill`/`wait_for`, checking each expected result. Report what passed and what didn't, with the screen text.
 - **PR evidence.** Reach each state, `screenshot save_to="/abs/dir/01-login.png"`; for motion,
   `record_screen action="start"` … `action="stop"` (returns the .mp4 path). List the files with device and OS.

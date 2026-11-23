@@ -279,3 +279,45 @@ test('runner: failure evidence is captured before releasing ownership', async ()
     assert.equal(r.status, 'fail'); assert.equal(captured, true); assert.equal(released, true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runner: passes interpolated launch args/env and redacts their values from logs, result.json and report.html', async () => {
+  const { c } = fakeApp(); const dir = tmp();
+  const launchedCalls: { app: string; opts?: unknown }[] = [];
+  const argSecret = 'pd-launch-arg-secret-9911';
+  const envSecret = 'pd-launch-env-secret-8822';
+  c.launch = async (_id, app, opts) => { launchedCalls.push({ app, opts }); return { ok: true, delivery: 'sent', retrySafe: false }; };
+  c.logs = async () => `app saw ${argSecret} and ${envSecret}`;
+  try {
+    const flow = parseFlow(`name: Secret launch
+appId: dev.phonedock.sample
+steps:
+  - launch:
+      arguments:
+        token: "\${ARG_SECRET}"
+        debug: true
+      env:
+        API_KEY: "\${ENV_SECRET}"
+  - assert_visible: missing
+`);
+    const logged: string[] = [];
+    const r = await runFlow(c, flow, {
+      deviceId: 'd', artifactsDir: dir, settle: false, timeoutMs: 0,
+      env: { ARG_SECRET: argSecret, ENV_SECRET: envSecret },
+      log: (l) => logged.push(l),
+    });
+    assert.equal(r.status, 'fail');
+    assert.deepEqual(launchedCalls, [{
+      app: 'dev.phonedock.sample',
+      opts: { args: { token: argSecret, debug: true }, env: { API_KEY: envSecret } },
+    }]);
+    assert.ok(!logged.join('\n').includes(argSecret));
+    assert.ok(!logged.join('\n').includes(envSecret));
+    assert.ok(!JSON.stringify(r).includes(argSecret));
+    assert.ok(!JSON.stringify(r).includes(envSecret));
+    for (const file of ['report.html', 'result.json', 'steps.txt', 'logs.txt']) {
+      const body = readFileSync(join(r.artifacts!, file), 'utf8');
+      assert.ok(!body.includes(argSecret), `${file} leaked launch arg secret`);
+      assert.ok(!body.includes(envSecret), `${file} leaked launch env secret`);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

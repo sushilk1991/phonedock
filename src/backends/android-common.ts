@@ -14,8 +14,10 @@ import { startsWithStartCode } from '../core/video.ts';
 import {
   PhoneDockError,
   type AppInfo, type Bounds, type Capability, type CrashReport, type ExecResult, type KeyName,
-  type Orientation, type ScreenInfo, type UiElement, type UiTree,
+  type LaunchOptions, type Orientation, type ScreenInfo, type UiElement, type UiTree,
 } from '../core/types.ts';
+import { androidIntentExtraFlags, hasLaunchOptions, launchSecretValues } from '../core/launch-options.ts';
+import { redactInputValue } from '../core/secrets.ts';
 
 export function sdkRoot(): string {
   const s = androidSdkRoot();
@@ -612,8 +614,59 @@ export async function listApps(serial: string, includeSystem = false): Promise<A
 }
 const PKG_RE = /^[A-Za-z0-9._]+$/;
 function checkPkg(id: string) { if (!PKG_RE.test(id)) throw new PhoneDockError('The package name is invalid', 'bad_request', 400, undefined, `Invalid package name ${JSON.stringify(id)}`); }
-export async function launchApp(serial: string, id: string) {
+const COMPONENT_RE = /^[A-Za-z0-9._$]+\/[A-Za-z0-9._$]+$/;
+/** Parse `cmd package resolve-activity --brief` output into a component (`pkg/activity`), or undefined. */
+export function parseResolvedActivity(out: string): string | undefined {
+  const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (COMPONENT_RE.test(lines[i])) return lines[i];
+  }
+  return undefined;
+}
+/** Build the `am start -S` command for launching an Android component with typed Intent extras. */
+export function buildAndroidLaunchCommand(component: string, args: Record<string, string | number | boolean>): string {
+  if (!COMPONENT_RE.test(component)) throw new PhoneDockError('The launch activity is invalid', 'bad_request', 400, undefined, `Invalid component ${JSON.stringify(component)}`, 'not_sent');
+  const extras = androidIntentExtraFlags(args, shQuote);
+  const cmd = ['am', 'start', '-S', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', '-n', component, ...extras].join(' ');
+  return `l=$(cmd window user-rotation 2>/dev/null); ${cmd}; rc=$?; case "$l" in "lock "[0-3]) cmd window user-rotation $l >/dev/null 2>&1;; esac; exit $rc`;
+}
+export async function launchApp(serial: string, id: string, opts?: LaunchOptions) {
   checkPkg(id);
+  if (opts?.env && Object.keys(opts.env).length) {
+    throw new PhoneDockError(
+      'Launch environment variables are not supported on Android',
+      'not_supported', 501,
+      ['Android apps fork from Zygote and cannot receive per-app process env; pass key-value args (Intent extras) instead.'],
+      undefined, 'not_sent',
+    );
+  }
+  if (Array.isArray(opts?.args) && opts.args.length) {
+    throw new PhoneDockError(
+      'Positional launch arguments are not supported on Android',
+      'not_supported', 501,
+      ['Pass key-value args (an object) to deliver Intent extras via am start.'],
+      undefined, 'not_sent',
+    );
+  }
+  if (hasLaunchOptions(opts) && opts?.args && !Array.isArray(opts.args)) {
+    const secrets = launchSecretValues(opts);
+    const res1 = await adb(serial, ['shell', `cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER ${id}`], { allowFail: true });
+    let component = parseResolvedActivity(res1.stdout);
+    if (!component) {
+      const res2 = await adb(serial, ['shell', `cmd package resolve-activity --brief ${id}`], { allowFail: true });
+      component = parseResolvedActivity(res2.stdout);
+    }
+    if (!component) {
+      throw new PhoneDockError("Couldn’t launch the app", 'launch_failed', 500, ['Check that the app is installed and has a launchable activity.'], `Could not resolve launcher activity for ${id}`, 'not_sent');
+    }
+    const shellCmd = buildAndroidLaunchCommand(component, opts.args);
+    const r = await adb(serial, ['shell', shellCmd], { allowFail: true });
+    const combined = redactInputValue((r.stdout + r.stderr).trim().slice(-400), secrets);
+    if (r.code !== 0 || /(?:^|\n)\s*(?:Error:|Exception|SecurityException|Activity class .* does not exist)/i.test(r.stdout + r.stderr)) {
+      throw new PhoneDockError("Couldn’t launch the app", 'launch_failed', 500, ['Check that the app is installed.'], `Could not launch ${id} with extras: ${combined}`);
+    }
+    return;
+  }
   // monkey frees the rotation lock (`cmd window user-rotation` reads "free" afterwards): put back a lock that rotate()
   // set, or a landscape request made on the portrait-only home screen is lost when the app opens.
   const r = await adb(serial, ['shell', `l=$(cmd window user-rotation 2>/dev/null); monkey -p ${id} -c android.intent.category.LAUNCHER 1; case "$l" in "lock "[0-3]) cmd window user-rotation $l >/dev/null 2>&1;; esac`], { allowFail: true });

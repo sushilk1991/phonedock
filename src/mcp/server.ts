@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { PhoneDockClient, PhoneDockApiError, jobErrorText, matchName, tapMeta } from '../sdk/client.ts';
 import type { Device, ElementMatch, ExpectReport, Job, SystemPrompt, UiElement } from '../sdk/client.ts';
 import { windowsLine } from '../backends/android-windows.ts';
+import { launchSummarySuffix } from '../core/launch-options.ts';
 import { expectLine, expectParam, normalizeArgs, toExpect } from './args.ts';
 import { promptWarning, registerExtraTools } from './tools-extra.ts';
 import { registerFlowTools } from './tools-flow.ts';
@@ -859,15 +860,22 @@ export function createMcpServer(ctx: McpContext): McpServer {
     return { content: [text(`Uninstalled ${a.app_id}.`)] };
   });
 
-  tool('launch_app', 'Launch (or bring to front) an app by package name / bundle id (see list_apps), then check that it is in front (launching once more on iOS if the home screen stayed up). The result says what is in front if it is not the app.', {
-    device: deviceParam, app_id: z.string(), return_screenshot: observeParam, settle_ms: settleParam, expect: expectParam,
+  tool('launch_app', 'Launch (or bring to front) an app by package name / bundle id (see list_apps), then check that it is in front (launching once more on iOS if the home screen stayed up). Optional `args` and `env` configure a fresh launch: iOS accepts positional `args` (string[]) or a key-value map (passed as `-key value`) plus process `env` (SIMCTL_CHILD_* on simulators, DEVICECTL_CHILD_* on paired iPhones); Android maps a key-value `args` object to typed Intent extras via `am start -S` (positional `args` and `env` return not_supported on Android; Corellium returns not_supported). Values may be secrets and are never logged or echoed. The result says what is in front if it is not the app.', {
+    device: deviceParam, app_id: z.string(),
+    args: z.union([z.array(z.string()), z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))]).optional()
+      .describe('Launch arguments: string[] (iOS argv) or {key: string|number|boolean} (Android Intent extras via am start -S; iOS -key value). Never logged.'),
+    env: z.record(z.string(), z.string()).optional()
+      .describe('Process environment variables (iOS simulator/device only; Android returns not_supported). Never logged.'),
+    return_screenshot: observeParam, settle_ms: settleParam, expect: expectParam,
   }, async (a) => {
-    const d = await target(a.device); const r = await c.launch(d.id, a.app_id, { expect: toExpect(a.expect) });
+    const d = await target(a.device);
+    const launchOpts = { ...(a.args !== undefined ? { args: a.args } : {}), ...(a.env !== undefined ? { env: a.env } : {}) };
+    const r = await c.launch(d.id, a.app_id, { expect: toExpect(a.expect), ...launchOpts });
     const front = r.inFront === false
       ? ` But it is not in front: ${r.foreground ? `${r.foreground} is` : 'the home screen is'} showing${r.relaunched ? ' even after launching it again' : ''}. It may have crashed (list_crashes) or be blocked by a prompt: check with get_ui or screenshot.`
       : r.inFront ? ` It is in front${r.relaunched ? ' (launched a second time: the home screen had stayed up)' : ''}.` : '';
     const notes = r.appNotes ? `\n${notesHint(a.app_id)}` : '';
-    return act(d, `Launched ${a.app_id}.${front}${notes}`, a.return_screenshot, a.settle_ms, 1500, { report: r.expect, what: 'launch' });
+    return act(d, `Launched ${a.app_id}${launchSummarySuffix(launchOpts)}.${front}${notes}`, a.return_screenshot, a.settle_ms, 1500, { report: r.expect, what: 'launch' });
   });
 
   tool('terminate_app', 'Force-stop an app.', { device: deviceParam, app_id: z.string() }, async (a) => {
