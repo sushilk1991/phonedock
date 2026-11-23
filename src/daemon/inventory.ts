@@ -5,7 +5,7 @@ import type { Device } from '../core/types.ts';
 export interface InventoryBackend { id: string; listDevices(): Promise<Device[]> }
 export interface InventoryOptions {
   initialWaitMs?: number; maxAgeMs?: number; timeoutMs?: number; retryDelayMs?: number;
-  now?: () => number; onUpdate?: (backend: string) => void;
+  now?: () => number; onUpdate?: (backend: string, devices?: Device[]) => void;
 }
 export interface InventoryStatus { refreshing: boolean; at?: number; error?: string; timedOut?: boolean; devices: number }
 interface Entry {
@@ -24,7 +24,7 @@ export class BackendInventory {
     }
   }
   private now(): number { return (this.opts.now ?? Date.now)(); }
-  private notify(id: string): void { if (!this.closed) { try { this.opts.onUpdate?.(id); } catch { /* consumer invalidation is best effort */ } } }
+  private notify(id: string, devices?: Device[]): void { if (!this.closed) { try { this.opts.onUpdate?.(id, devices); } catch { /* consumer invalidation is best effort */ } } }
   private start(id: string, entry: Entry): void {
     entry.lastAttempt = this.now();
     const backend = entry.backend;
@@ -44,7 +44,7 @@ export class BackendInventory {
       entry.devices = devices.map((d) => this.copy(d)); entry.signature = signature;
       entry.at = this.now(); entry.error = undefined; entry.timedOut = undefined;
       entry.pending = undefined; if (entry.timer) clearTimeout(entry.timer); entry.timer = undefined;
-      if (changed) this.notify(id);
+      if (changed) this.notify(id, entry.devices);
     }).catch((error: unknown) => {
       if (this.closed || this.entries.get(id) !== entry) return;
       if (entry.revision !== revision) {

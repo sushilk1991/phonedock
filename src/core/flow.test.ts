@@ -396,4 +396,25 @@ steps:
   assert.ok(structural.flow.steps.some((s) => s.kind === 'type' && s.text === 'pin •••'), `typed secret not redacted: ${JSON.stringify(structural.flow.steps)}`);
   assert.ok(structural.flow.steps.some((s) => s.kind === 'assert_visible' && s.sel.text === 'Dashboard'), `expected Dashboard assert: ${JSON.stringify(structural.flow.steps)}`);
   assert.ok(!structural.flow.steps.some((s) => s.kind === 'assert_visible' && (s.sel.text ?? '').includes('2026')));
+
+  // Inverted denylist redacts secrets in tap, fill, openUrl, wait, scroll_to, and alert
+  const tok = 'launch-token-7744';
+  const allSix = flowFromLog(
+    [
+      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['token'] } },
+      { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: `Open ${tok}` } } },
+      { at: '2026-11-23T10:00:02.000Z', owner: 'mcp:a:1', action: { action: 'tap' }, fill: { text: `Field ${tok}`, value: `Bearer ${tok}` } },
+      { at: '2026-11-23T10:00:03.000Z', owner: 'mcp:a:1', action: { action: 'openUrl', url: `myapp://cb?t=${tok}` } },
+      { at: '2026-11-23T10:00:06.000Z', owner: 'mcp:a:1', via: 'alert', action: { action: 'tap' }, resolved: { element: { text: `Trust ${tok}` } } },
+    ],
+    [
+      { at: '2026-11-23T10:00:04.000Z', kind: 'wait', owner: 'mcp:a:1', until: 'visible', query: { text: `Loaded ${tok}` }, ok: true },
+      { at: '2026-11-23T10:00:05.000Z', kind: 'scroll_to', owner: 'mcp:a:1', query: { text: `Row ${tok}` }, found: true },
+    ],
+    { owner: 'mcp:a:1', autoAssert: false, secrets: [tok] },
+  );
+  assert.ok(!allSix.text.includes(tok), `saved flow leaked secret across actions:\n${allSix.text}`);
+  assert.ok(!JSON.stringify(allSix.flow).includes(tok));
+  const kinds = allSix.flow.steps.map((s) => s.kind);
+  assert.deepEqual(kinds, ['launch', 'tap', 'fill', 'open_url', 'wait_for', 'scroll_to', 'alert']);
 });

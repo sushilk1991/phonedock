@@ -41,10 +41,10 @@ const fakeIos = {
 } as unknown as Backend;
 core.backends.push(fakeIos);
 
-async function call(method: string, path: string, body?: unknown): Promise<any> {
+async function call(method: string, path: string, body?: unknown, query: Record<string, string> = {}): Promise<any> {
   const m = router.match(method, path);
   assert.ok(m && m !== 'method', `${method} ${path} has a route`);
-  const c = { params: m.params, owner: 'mcp:test:1', body: async () => body ?? {}, q: () => undefined } as unknown as Ctx;
+  const c = { params: m.params, owner: 'mcp:test:1', body: async () => body ?? {}, q: (k: string) => query[k] } as unknown as Ctx;
   return m.h(c);
 }
 
@@ -215,18 +215,19 @@ test('per-device launch secrets: scrub later observations & flow save, clear on 
       core.clearLaunchSecrets(failDev);
     }
 
-    // Disappearing from inventory clears a device's launch secrets
+    // Disappearing from inventory clears a device's launch secrets even with zero SSE subscribers (GET /v1/devices?fresh=true)
+    assert.equal(core.sseClients.size, 0);
     const goneDev = 'fake-launch-ios:pdtest-gone';
     let present = true;
     fakeIos.listDevices = async () => present ? [{
       id: goneDev, backend: 'fake-launch-ios', nativeId: 'pdtest-gone', name: 'pdtest-gone',
       platform: 'ios', kind: 'virtual', state: 'running', managed: true, capabilities: ['launch'],
     }] : [];
-    await core.pollDevices(true);
+    await call('GET', '/v1/devices', undefined, { fresh: 'true' });
     core.rememberLaunchSecrets(goneDev, ['disappeared-secret']);
     assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['disappeared-secret']);
     present = false;
-    await core.pollDevices(true);
+    await call('GET', '/v1/devices', undefined, { fresh: 'true' });
     assert.deepEqual(core.deviceLaunchSecrets(goneDev), []);
 
     // Tracked device count is capped (LRU eviction)
