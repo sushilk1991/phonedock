@@ -320,3 +320,23 @@ test('two-tier ramdisk pipeline: cold patch -> warm hit -> distinct identity reu
     );
   });
 });
+
+test('disguiseCatalog lists every profile with its Play Store image and every carrier, defaults first-class', async () => {
+  const { disguiseCatalog } = await import('./android-disguise.ts');
+  const c = disguiseCatalog();
+  assert.equal(c.backend, 'android-emulator');
+  assert.equal(c.defaultProfile, 'pixel_8');
+  assert.equal(c.defaultCarrier, 'tmobile_us');
+  assert.ok(c.profiles.length >= 6 && c.profiles.some((p) => p.id === c.defaultProfile));
+  assert.ok(c.carriers.some((x) => x.id === c.defaultCarrier));
+  for (const p of c.profiles) {
+    assert.equal(p.image, `system-images;android-${p.sdk};google_apis_playstore;arm64-v8a`);
+    assert.ok(p.name && p.model && p.screen.width > 0, `profile ${p.id} has a name, model and screen`);
+  }
+  const pixel = c.profiles.find((p) => p.id === 'pixel_8')!;
+  assert.equal(pixel.name, 'Google Pixel 8');
+  assert.equal(c.carriers.find((x) => x.id === 'ee_uk')?.country, 'GB');
+  // Ids round-trip through the create path's resolver, so a picker's choice is always accepted.
+  for (const p of c.profiles) assert.ok(deviceProfileById(p.id));
+  for (const x of c.carriers) assert.ok(carrierById(x.id));
+});

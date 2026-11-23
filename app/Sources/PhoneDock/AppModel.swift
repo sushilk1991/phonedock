@@ -113,7 +113,8 @@ final class AppModel {
         started = true
         switch ProcessInfo.processInfo.environment["PHONEDOCK_APP_SHEET"] {   // debug/screenshot hook
         case "add": addDevice = .choose
-        case "create": Task { try? await Task.sleep(for: .seconds(3)); addDevice = .virtual }
+        case "create": Task { try? await Task.sleep(for: .seconds(3)); addDevice = .simulator }
+        case "phone": addDevice = .virtualPhone
         case "connect": addDevice = .physical
         case "agent": showAgentSetup = true
         default: break
@@ -692,9 +693,10 @@ final class AppModel {
     }
 
     /// Makes a device and closes nothing: the sheet is gone, the sidebar shows the work, the alert reports a failure.
-    func createDevice(spec: [String: Any], name: String, platform: String) {
+    /// `virtualPhone`: the creating row waits under Virtual Phones rather than Simulators & Emulators.
+    func createDevice(spec: [String: Any], name: String, platform: String, virtualPhone: Bool = false) {
         guard let c = client else { return }
-        let p = PendingDevice(id: UUID(), name: name, platform: platform, stage: "Creating…")
+        let p = PendingDevice(id: UUID(), name: name, platform: platform, stage: "Creating…", virtualPhone: virtualPhone)
         creating.append(p)
         func update(_ f: (inout PendingDevice) -> Void) { if let i = creating.firstIndex(where: { $0.id == p.id }) { f(&creating[i]) } }
         Task {
@@ -804,6 +806,7 @@ struct PendingDevice: Identifiable, Equatable {
     var name: String
     var platform: String
     var stage: String
+    var virtualPhone = false
     var deviceId: String?
 }
 

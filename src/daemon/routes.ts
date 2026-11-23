@@ -20,6 +20,7 @@ import { metrics } from './metrics.ts';
 import { stopTraceFor } from './trace.ts';
 import { IME_PROBE, imeFrameFrom } from '../backends/android-common.ts';
 import { screenSourceStats } from '../backends/android-video.ts';
+import { disguiseCatalog } from '../backends/android-disguise.ts';
 import { cleanTree, coarseWhere, labelAt, jpegSize, mergeOcr, partialRegions, pngSize, transformPng, uiText } from './media.ts';
 import { readUiTree } from './find.ts';
 import { recheckRef, resolveRef } from './refcheck.ts';
@@ -82,6 +83,8 @@ r.post('/v1/backends/:backend/images/install', async (c) => {
   const inst = need(b, 'installImage', 'image install');
   return new Raw(202, JSON.stringify(startJob('install-image', (p) => inst(String(body.image), p))), { 'Content-Type': 'application/json' });
 });
+// Virtual phones (android-emulator `options.disguise`): the phones they can present as and the carriers, for pickers.
+r.get('/v1/disguise', () => disguiseCatalog());
 r.get('/v1/backends/:backend/profiles', async (c) => {
   const b = getBackend(c.params.backend);
   return b.listProfiles ? await b.listProfiles() : [];

@@ -294,7 +294,7 @@ struct AndroidWirelessView: View {
                 if let d = r?.device {
                     try? await Task.sleep(for: .seconds(1))
                     model.selection = d.id
-                    // Only if Add Device still shows this step: after Back it may be making a virtual device.
+                    // Only if Add Device still shows this step: after Back it may be making another kind of device.
                     if model.addDevice == .physical { dismiss() }
                 }
             } catch {

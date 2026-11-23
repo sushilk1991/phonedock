@@ -464,7 +464,8 @@ enum SelfTest {
             guard let m = model else { fail("#\(i) sheet FAIL no model"); return }
             switch name {
             case "add": m.addDevice = .choose          // Add Device's first step (virtual or physical)
-            case "create": m.addDevice = .virtual      // its second steps, as File › New Virtual Device… opens them
+            case "create": m.addDevice = .simulator    // its second steps, as the File menu opens them
+            case "phone": m.addDevice = .virtualPhone
             case "connect": m.addDevice = .physical
             case "agent": m.showAgentSetup = true
             case "none": m.addDevice = nil; m.showAgentSetup = false

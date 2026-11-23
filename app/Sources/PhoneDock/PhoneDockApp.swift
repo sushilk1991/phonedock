@@ -157,10 +157,13 @@ struct PhoneDockCommands: Commands {
                 .disabled(model.devices.isEmpty)
         }
         CommandGroup(replacing: .newItem) {
-            // The two kinds of device, straight to Add Device's second step (＋ Add Device asks first). The shortcuts
-            // are the ones New Device… and Connect a Phone… had.
-            Button(DeviceWords.newVirtualDevice + "…") { model.addDevice = .virtual }
+            // Each kind of device, straight to Add Device's second step (＋ Add Device asks first). ⌘N and ⇧⌘K are the
+            // ones New Device… and Connect a Phone… had.
+            Button(DeviceWords.newSimulator + "…") { model.addDevice = .simulator }
                 .keyboardShortcut("n")
+                .disabled(!model.connection.isConnected)
+            Button(DeviceWords.newVirtualPhone + "…") { model.addDevice = .virtualPhone }
+                .keyboardShortcut("n", modifiers: [.command, .option])
                 .disabled(!model.connection.isConnected)
             Button(DeviceWords.connectPhysicalDevice + "…") { model.addDevice = .physical }
                 .keyboardShortcut("k", modifiers: [.command, .shift])
@@ -551,7 +554,7 @@ struct ContentView: View {
                     Image(systemName: "iphone.gen3")
                 }
             } description: {
-                Text("Create a virtual device or connect your own phone. Your AI agents can use it right away.")
+                Text("Add a device, and your AI agents can use it right away.")
                     .foregroundStyle(Theme.Ink.secondary)
             } actions: {
                 // First run, in order: what this Mac can run → a device → an agent (AgentSetup.swift).
@@ -720,15 +723,26 @@ struct SidebarView: View {
         let all = model.devices
         let phones = all.filter { $0.kind == "physical" }.sorted(by: Self.byName)
         let cloud = all.filter { $0.kind == "cloud" }.sorted(by: Self.byName)
-        let managed = all.filter { $0.managed == true && $0.kind != "physical" && $0.kind != "cloud" }.sorted(by: Self.byName)
-        let other = all.filter { $0.managed != true && $0.kind != "physical" && $0.kind != "cloud" }.sorted(by: Self.byName)
+        // A virtual phone is an emulator too; it's classed by its disguise first, wherever it was made.
+        let vphones = all.filter { $0.isVirtualPhone && $0.kind != "physical" && $0.kind != "cloud" }.sorted(by: Self.byName)
+        let rest = all.filter { !$0.isVirtualPhone && $0.kind != "physical" && $0.kind != "cloud" }
+        let managed = rest.filter { $0.managed == true }.sorted(by: Self.byName)
+        let other = rest.filter { $0.managed != true }.sorted(by: Self.byName)
+        let creatingPhones = model.creating.filter(\.virtualPhone)
+        let creatingOthers = model.creating.filter { !$0.virtualPhone }
         // Sections are named as Add Device names the choices (DeviceWords), so what you add is where it lands. ＋ Add
         // Device in the band above is the only way in from here: no add row in the list, no button at the foot.
         List(selection: $model.selection) {
-            if !managed.isEmpty || !model.creating.isEmpty {
-                Section(DeviceWords.virtualDevices) {
-                    ForEach(model.creating) { CreatingRow(pending: $0) }
+            if !managed.isEmpty || !creatingOthers.isEmpty {
+                Section(DeviceWords.simulators) {
+                    ForEach(creatingOthers) { CreatingRow(pending: $0) }
                     rows(managed)
+                }
+            }
+            if !vphones.isEmpty || !creatingPhones.isEmpty {
+                Section(DeviceWords.virtualPhones) {
+                    ForEach(creatingPhones) { CreatingRow(pending: $0) }
+                    rows(vphones)
                 }
             }
             if !phones.isEmpty { Section(DeviceWords.physicalDevices) { rows(phones) } }

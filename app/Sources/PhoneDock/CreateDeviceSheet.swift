@@ -23,7 +23,8 @@ enum PlatformChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// New Virtual Device (§8.6), Add Device's second step for a virtual device: width 520, height fits the content.
+/// New Simulator or Emulator (§8.6), Add Device's second step for a simulator or emulator: width 520, height fits the
+/// content.
 /// Hardware fields live under Advanced, which is absent for backends that pick hardware themselves (iOS Simulator,
 /// cloud). Unavailable backends never appear.
 struct CreateDeviceSheet: View {
@@ -94,7 +95,7 @@ struct CreateDeviceSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Back waits for a download: its progress lives in this form's state, and the install would go on unseen.
-            SheetTitle(title: DeviceWords.newVirtualDevice, onBack: onBack, backDisabled: downloading)
+            SheetTitle(title: DeviceWords.newSimulator, onBack: onBack, backDisabled: downloading)
                 .padding(.bottom, Theme.Space.xl)
             Form {
                 Picker(selection: platformBinding) {
@@ -584,7 +585,7 @@ private extension String {
 
 /// A form row whose control has an exact width. (`.frame` on a Picker in a `.columns` form sizes label and control
 /// together, so a longer label made a narrower control.)
-private struct FormField: ViewModifier {
+struct FormField: ViewModifier {
     let label: String
     let width: CGFloat
     func body(content: Content) -> some View {

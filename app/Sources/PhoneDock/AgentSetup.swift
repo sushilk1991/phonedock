@@ -570,7 +570,7 @@ private struct TryItCard: View {
 // MARK: - First run: this Mac → a device → your agent
 
 /// The "No Devices Yet" guide: what this Mac can run (with the exact fix for what it can't), a device (Add Device's
-/// two choices, virtual or physical), then Connect an Agent. Each step shows a check once it's done.
+/// choices: simulator or emulator, virtual phone, physical device), then Connect an Agent. Each step shows a check once it's done.
 struct FirstRunGuide: View {
     @Environment(AppModel.self) private var model
     @State private var setup = AgentSetupModel.shared
@@ -583,7 +583,7 @@ struct FirstRunGuide: View {
                 PlatformReadiness()
             }
             GuideStep(number: 2, title: "A device", done: false) {
-                // The same two choices as ＋ Add Device's first step; each opens that sheet at its second step.
+                // The same choices as ＋ Add Device's first step; each opens that sheet at its second step.
                 AddDeviceOptions(compact: true)
             }
             let agentStepLocked = model.devices.isEmpty && setup.connected.isEmpty

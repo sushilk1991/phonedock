@@ -200,34 +200,46 @@ is the last item of the main toolbar. When the detail column is narrower than 34
 context menu), so nothing falls into ».
 
 **Adding a device (`AddDeviceSheet.swift`)** One way in: **＋ Add Device** opens one sheet (520 pt wide, `xxl`
-margins). Its first step, **Add Device**, asks the one question people can answer, as two choice cards
-(`AddDeviceOptions`: `Surface.card`, `Line.card` outline turning `Accent.fill` on hover, radius 10, an accent glyph,
-headline title, callout description, a chevron):
+margins). Its first step, **Add Device**, asks the one question people can answer, what kind of device, as three
+choice cards (`AddDeviceOptions`: `Surface.card`, `Line.card` outline turning `Accent.fill` on hover, radius 10, an
+accent glyph, headline title, callout description, a chevron):
 
 | Choice | Glyph | Description | Second step |
 |---|---|---|---|
-| **Virtual Device** | `macbook.and.iphone` | An iPhone simulator or Android emulator that runs on this Mac. | **New Virtual Device**: platform, model, version, name |
-| **Physical Device** | `iphone.radiowaves.left.and.right` | Your own iPhone or Android phone, connected with a cable or over Wi-Fi. | **Connect a Physical Device**: the steps for an iPhone or an Android phone |
+| **Simulator or Emulator** | `macbook.and.iphone` | An iPhone simulator or Android emulator for building and testing your apps. | **New Simulator or Emulator** (`CreateDeviceSheet`): platform, model, version, name |
+| **Virtual Phone** | `smartphone` | An Android phone with Google Play that apps see as a real Pixel, Galaxy or OnePlus. | **New Virtual Phone** (`VirtualPhoneSheet`): phone, system, name; Advanced › Carrier |
+| **Physical Device** | `iphone.radiowaves.left.and.right` | Your own iPhone or Android phone, connected with a cable or over Wi-Fi. | **Connect a Physical Device** (`ConnectPhoneSheet`): the steps for an iPhone or an Android phone |
 
-Under the cards, a callout note with `info.circle`: simulators and emulators made in Xcode or Android Studio show up in
-the sidebar on their own, so nobody goes looking for a way to add them. The second step has a Back chevron before
-its title (⌘[) and stays in the same sheet; the sheet never closes and reopens between steps. File › New Virtual
-Device… (⌘N) and File › Connect a Physical Device… (⇧⌘K) open the second step directly; Connect an Agent… stays in
-the File menu, the empty state's guide and Settings › Agents. When this Mac can run some platform, New Virtual Device
-opens on one (a local backend, never a cloud one) instead of on "isn’t installed"; when it can run none, it opens on
-the remembered platform with how to install it. A cloud backend's form says so ("Runs on Corellium, not on this
-Mac."). Back waits while a system image downloads, and a phone that connects after Back doesn't close the sheet.
-Virtual Device is disabled while PhoneDock isn't connected. The words live in
+In the empty state's narrower guide the cards use one-line descriptions ("For building and testing your apps.",
+"Android with Google Play, seen by apps as a real phone.", "Your own iPhone or Android phone."); the full ones stay as
+accessibility hints. Under the chooser's cards, a callout note with `info.circle`: simulators and emulators made in
+Xcode or Android Studio show up in the sidebar on their own, so nobody goes looking for a way to add them.
+
+The second step has a Back chevron before its title (⌘[) and stays in the same sheet; the sheet never closes and
+reopens between steps. File › New Simulator or Emulator… (⌘N), New Virtual Phone… (⌥⌘N) and Connect a Physical
+Device… (⇧⌘K) open the second step directly; Connect an Agent… stays in the File menu, the empty state's guide and
+Settings › Agents. Simulator or Emulator and Virtual Phone are disabled while PhoneDock isn't connected. Back waits
+while a system image downloads, and a phone that connects after Back doesn't close the sheet. The words live in
 `DeviceWords`, so the cards, titles, menus and sidebar sections never drift apart.
 
-**Sidebar sections** Named as the choices are, so what you add lands where you'd look: **Virtual Devices** (made in
-PhoneDock, and the ones being made), **Physical Devices**, **Cloud**, then **From Xcode & Android Studio** with its
-count. Xcode alone makes a dozen simulators per iOS version, so that last section lists only the ones in use
-(running, starting, held by an agent or you, asking for help, recording, busy or selected) and then one quieter row,
-"Show 4 More" ("Show All 6" when none are in use), laid out like a device row with a chevron in the glyph column and
-`Ink.secondary` words (system `.secondary` is about 3.2:1 on the sidebar, and this row is the only way to the rest). It
-toggles to "Show Fewer" and is remembered (`sidebar.discoveredShowAll`). Empty sections aren't shown, and there is
-no add row in the list: ＋ is above it.
+- **New Simulator or Emulator** opens on a platform this Mac can run (a local backend, never a cloud one) instead of
+  on "isn’t installed"; when it can run none, it opens on the remembered platform with how to install it. A cloud
+  backend's form says so ("Runs on Corellium, not on this Mac.").
+- **New Virtual Phone** lists the phones and carriers the service offers (`GET /v1/disguise`), never a list in the
+  app. Its System row is the Google Play image the phone runs on: a green tick when it's installed, else Download in
+  place, so Create never fails with "no system image". Without the Android emulator it shows how to install it; with a
+  service older than the app, it offers Restart Service…. Its note stays as honest as docs/VIRTUAL-PHONES.md: Wi-Fi
+  only, the first one takes a few minutes, and apps that check hardware-backed security can still tell. Never write
+  that apps "can't tell".
+
+**Sidebar sections** Named as the choices are, so what you add lands where you'd look: **Simulators & Emulators**
+(made in PhoneDock, and the ones being made), **Virtual Phones** (any device with a disguise, `Device.isVirtualPhone`),
+**Physical Devices**, **Cloud**, then **From Xcode & Android Studio** with its count. Xcode alone makes a dozen
+simulators per iOS version, so that last section lists only the ones in use (running, starting, held by an agent or
+you, asking for help, recording, busy or selected) and then one quieter row, "Show 4 More" ("Show All 6" when none are
+in use), laid out like a device row with a chevron in the glyph column and `Ink.secondary` words (system `.secondary`
+is about 3.2:1 on the sidebar, and this row is the only way to the rest). It toggles to "Show Fewer" and is remembered
+(`sidebar.discoveredShowAll`). Empty sections aren't shown, and there is no add row in the list: ＋ is above it.
 
 **Deleting a device** Device › Delete… (⌘⌫), plain ⌫ in the focused sidebar, or the row's context menu all open the
 one confirmation (Cancel is the default). ⌘⌫ still deletes to the start of the line while a text field is being
@@ -313,9 +325,10 @@ read as one product:
 2. Never show commands, flags, paths, PIDs, ports, HTTP statuses, error codes or config keys in primary copy.
    They go under Details or Copy Details.
 3. Name things the way people do: Simulator, Emulator, iPhone, Android phone, PhoneDock. "Daemon" appears only in
-   Settings › Advanced and the docs. The two kinds of device are **Virtual Device** (a simulator or emulator on this
-   Mac) and **Physical Device** (your own phone), as in Android Studio. Use them for choices, titles and sections, and
-   use the everyday words in descriptions. Never "New Device" or "Connect a Phone".
+   Settings › Advanced and the docs. The three kinds of device are **Simulator or Emulator** (for building and
+   testing apps), **Virtual Phone** (an Android emulator that presents as a real handset, the 0.3.0 name) and
+   **Physical Device** (your own phone). Use them for choices, titles and sections, and the everyday words in
+   descriptions. Never "New Device", "Connect a Phone" or "Virtual Device".
 4. Buttons are verbs: Start, Shut Down, Take Over, Hand Back, Connect, Create. Add an ellipsis only when more input
    follows.
 5. One sentence per description, at most two hints. No "Something went wrong", "Error:", "Please" or
@@ -341,8 +354,8 @@ Where it appears:
 `FriendlyError.from(_:title:device:)` builds the body from the service's error code (lease conflict, not
 supported, timeout, boot failure, missing image, needs a person), falling back to the first hint.
 
-Empty states say what's true: "Select a Device", "No Devices Yet" (a guide: this Mac, then a device with Add
-Device's two choice cards, then Connect an Agent…), "No apps found", "No snapshots yet", "Refresh to inspect the screen", "No logs yet",
+Empty states say what's true: "Select a Device", "No Devices Yet" ("Add a device, and your AI agents can use it right
+away.", then a guide: this Mac, a device with Add Device's three choice cards, then Connect an Agent…), "No apps found", "No snapshots yet", "Refresh to inspect the screen", "No logs yet",
 "No activity yet", "No crashes". When a feature can't work on a device, say so: "Crash reports aren’t available
 for this device". Confirm before Restore (it replaces the current state) and before Delete.
 

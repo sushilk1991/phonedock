@@ -188,10 +188,14 @@ enum DaemonLocator {
     static var isBundled: Bool { Bundle.main.bundlePath.hasSuffix(".app") }
 
     /// docs/IPHONE-WIFI.md: bundled copy inside the app, else the repo checkout.
-    static var iphoneWifiDoc: URL? {
+    static var iphoneWifiDoc: URL? { doc("IPHONE-WIFI.md") }
+    static var virtualPhonesDoc: URL? { doc("VIRTUAL-PHONES.md") }
+
+    /// A guide from docs/: the copy in the app bundle (build-app.sh copies it), else the repo's when run from source.
+    private static func doc(_ file: String) -> URL? {
         var cands: [URL] = []
-        if isBundled, let r = Bundle.main.resourceURL { cands.append(r.appendingPathComponent("docs/IPHONE-WIFI.md")) }
-        cands.append(URL(fileURLWithPath: repo + "/docs/IPHONE-WIFI.md"))
+        if isBundled, let r = Bundle.main.resourceURL { cands.append(r.appendingPathComponent("docs/" + file)) }
+        cands.append(URL(fileURLWithPath: repo + "/docs/" + file))
         return cands.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 

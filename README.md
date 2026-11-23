@@ -116,6 +116,7 @@ It never replaces settings it didn't write: it reports them instead, and it back
 | Android phone | ✅ | USB, or Wi-Fi with wireless debugging |
 | iOS simulator | ✅ | Simulator-built apps only |
 | Android emulator | ✅ | Android SDK emulator, Google APIs and Play Store images |
+| Virtual phone (Android) | **Beta** | An emulator with Google Play that presents as a real Pixel, Galaxy or OnePlus: **＋ Add Device › Virtual Phone**. Wi-Fi only. [Details and limits](docs/VIRTUAL-PHONES.md) |
 | iPhone on iOS 26 or earlier | **Beta** | Needs WebDriverAgent on the phone. [Setup](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent) |
 
 Generic OS images (QEMU) and Corellium cloud devices are experimental; see

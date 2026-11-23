@@ -1,27 +1,36 @@
 import SwiftUI
 
 // Adding a device (design/DESIGN.md › Adding a device): one way in, ＋ Add Device at the top of the sidebar, which
-// opens one sheet. Its first step asks the one question people can answer, virtual or physical; the second step is
-// the form that makes a virtual device or the steps that connect a physical one. The empty state shows the same two
-// choices. File › New Virtual Device… (⌘N) and Connect a Physical Device… (⇧⌘K) open the second step directly.
+// opens one sheet. Its first step asks the one question people can answer, what kind of device; the second step is
+// the form that makes a simulator or emulator, the form that makes a virtual phone, or the steps that connect a
+// physical one. The empty state shows the same choices. File › New Simulator or Emulator… (⌘N), New Virtual Phone…
+// (⌥⌘N) and Connect a Physical Device… (⇧⌘K) open the second step directly.
 
 /// What the Add Device sheet shows. `AppModel.addDevice` is nil while the sheet is closed.
 enum AddDeviceStep: Hashable {
-    case choose, virtual, physical
+    case choose, simulator, virtualPhone, physical
 }
 
 /// The words for kinds of device, in one place so the chooser, sheet titles, sidebar sections, empty state and menus
-/// never drift apart. Android Studio uses the same pair ("Virtual", "Physical"); the descriptions name what people
-/// know (Simulator, Emulator, iPhone, Android phone).
+/// never drift apart. Simulators and emulators are for building and testing apps; a Virtual Phone (the 0.3.0 name,
+/// docs/VIRTUAL-PHONES.md) is an Android emulator that presents as a real handset; a Physical Device is your own phone.
 enum DeviceWords {
     static let addDevice = "Add Device"
-    static let virtualDevice = "Virtual Device"
-    static let virtualDetail = "An iPhone simulator or Android emulator that runs on this Mac."
+    static let simulator = "Simulator or Emulator"
+    static let simulatorDetail = "An iPhone simulator or Android emulator for building and testing your apps."
+    static let virtualPhone = "Virtual Phone"
+    static let virtualPhoneDetail = "An Android phone with Google Play that apps see as a real Pixel, Galaxy or OnePlus."
     static let physicalDevice = "Physical Device"
     static let physicalDetail = "Your own iPhone or Android phone, connected with a cable or over Wi-Fi."
-    static let newVirtualDevice = "New Virtual Device"
+    /// One line each, for the empty state's narrower guide (the full descriptions stay as accessibility hints).
+    static let simulatorShort = "For building and testing your apps."
+    static let virtualPhoneShort = "Android with Google Play, seen by apps as a real phone."
+    static let physicalShort = "Your own iPhone or Android phone."
+    static let newSimulator = "New Simulator or Emulator"
+    static let newVirtualPhone = "New Virtual Phone"
     static let connectPhysicalDevice = "Connect a Physical Device"
-    static let virtualDevices = "Virtual Devices"
+    static let simulators = "Simulators & Emulators"
+    static let virtualPhones = "Virtual Phones"
     static let physicalDevices = "Physical Devices"
     static let discovered = "From Xcode & Android Studio"
     static let discoveredHelp = "Simulators and emulators made in Xcode or Android Studio. The ones in use are listed; the rest are a click away."
@@ -39,7 +48,8 @@ struct AddDeviceSheet: View {
         Group {
             switch shown ?? model.addDevice ?? .choose {
             case .choose: AddDeviceChooser()
-            case .virtual: CreateDeviceSheet(onBack: back)
+            case .simulator: CreateDeviceSheet(onBack: back)
+            case .virtualPhone: VirtualPhoneSheet(onBack: back)
             case .physical: ConnectPhoneSheet(onBack: back)
             }
         }
@@ -49,7 +59,7 @@ struct AddDeviceSheet: View {
     private func back() { model.addDevice = .choose }
 }
 
-/// Step one: virtual or physical.
+/// Step one: what kind of device.
 struct AddDeviceChooser: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -87,23 +97,26 @@ struct AddDeviceChooser: View {
     }
 }
 
-/// The two choices, as large buttons: in the chooser and in the empty state's guide (`compact`).
+/// The three choices, as large buttons: in the chooser and in the empty state's guide (`compact`).
 struct AddDeviceOptions: View {
     @Environment(AppModel.self) private var model
     var compact = false
 
     var body: some View {
         VStack(spacing: compact ? Theme.Space.s : Theme.Space.m) {
-            option(.virtual, symbol: "macbook.and.iphone",
-                   title: DeviceWords.virtualDevice, detail: DeviceWords.virtualDetail)
-                // Making a device needs the service; connecting a phone starts with steps on the phone.
+            // Making a device needs the service; connecting a phone starts with steps on the phone.
+            option(.simulator, symbol: "macbook.and.iphone", title: DeviceWords.simulator,
+                   detail: DeviceWords.simulatorDetail, short: DeviceWords.simulatorShort)
                 .disabled(!model.connection.isConnected)
-            option(.physical, symbol: "iphone.radiowaves.left.and.right",
-                   title: DeviceWords.physicalDevice, detail: DeviceWords.physicalDetail)
+            option(.virtualPhone, symbol: "smartphone", title: DeviceWords.virtualPhone,
+                   detail: DeviceWords.virtualPhoneDetail, short: DeviceWords.virtualPhoneShort)
+                .disabled(!model.connection.isConnected)
+            option(.physical, symbol: "iphone.radiowaves.left.and.right", title: DeviceWords.physicalDevice,
+                   detail: DeviceWords.physicalDetail, short: DeviceWords.physicalShort)
         }
     }
 
-    private func option(_ step: AddDeviceStep, symbol: String, title: String, detail: String) -> some View {
+    private func option(_ step: AddDeviceStep, symbol: String, title: String, detail: String, short: String) -> some View {
         Button { model.addDevice = step } label: {
             HStack(spacing: compact ? Theme.Space.m : Theme.Space.l) {
                 Image(systemName: symbol)
@@ -113,7 +126,7 @@ struct AddDeviceOptions: View {
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: Theme.Space.xxs) {
                     Text(title).font(Theme.Fonts.headline).foregroundStyle(Theme.Ink.primary)
-                    Text(detail)
+                    Text(compact ? short : detail)
                         .font(Theme.Fonts.callout)
                         .foregroundStyle(Theme.Ink.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -203,7 +216,7 @@ struct AddDeviceButton: View {
 
     var body: some View {
         Button { model.addDevice = .choose } label: { Label(DeviceWords.addDevice, systemImage: "plus") }
-            .help("Add a virtual or physical device")
+            .help("Add a simulator, emulator, virtual phone or your own phone")
             .testAnchor(DeviceWords.addDevice)
     }
 }
