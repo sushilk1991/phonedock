@@ -444,3 +444,17 @@ steps:
   // Output YAML still parses cleanly
   assert.doesNotThrow(() => parseFlow(allSix.text));
 });
+
+test('redactFlowStep: keeps whole ${VAR} placeholders and key/gesture tokens when a secret matches them', () => {
+  const secrets = ['SECRET', 'enter', 'go_home', 'launch-token-7744'];
+  // a secret-marked type/fill becomes ${SECRET_1}: still a reference that interpolates
+  assert.deepEqual(redactFlowStep({ kind: 'type', text: '${SECRET_1}' } as Step, secrets), { kind: 'type', text: '${SECRET_1}' });
+  assert.deepEqual(redactFlowStep({ kind: 'fill', field: { text: 'Password' }, value: '${SECRET_1}' } as Step, secrets),
+    { kind: 'fill', field: { text: 'Password' }, value: '${SECRET_1}' });
+  // fixed tokens survive
+  assert.deepEqual(redactFlowStep({ kind: 'key', key: 'enter' } as Step, secrets), { kind: 'key', key: 'enter' });
+  assert.deepEqual(redactFlowStep({ kind: 'gesture', gesture: 'go_home' } as Step, secrets), { kind: 'gesture', gesture: 'go_home' });
+  // real content around them is still scrubbed
+  const typed = redactFlowStep({ kind: 'type', text: 'code launch-token-7744 SECRET' } as Step, secrets) as { text: string };
+  assert.ok(!typed.text.includes('launch-token-7744') && !typed.text.includes('SECRET'), typed.text);
+});

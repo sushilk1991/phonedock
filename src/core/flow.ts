@@ -619,8 +619,10 @@ const PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
  *  and launch arguments/env values that are already `${VAR}` placeholders. */
 export function redactFlowStep(step: Step, secrets: readonly string[]): Step {
   if (!secrets.length) return step;
-  const scrub = (s: string) => redactSecretStrings(s, secrets);
-  const scrubPlaceholderSafe = (s: string) => (PLACEHOLDER_RE.test(s) ? s : scrub(s));
+  // A whole `${VAR}` placeholder (a launch value, or the `${SECRET_1}` a secret-marked fill or type becomes) is a
+  // reference, not a value: scrubbing it would leave `${•••_1}`, which never interpolates.
+  const scrub = (s: string) => (PLACEHOLDER_RE.test(s) ? s : redactSecretStrings(s, secrets));
+  const scrubPlaceholderSafe = scrub;
   const scrubSel = (sel: Selector): Selector => ({
     ...sel,
     ...(sel.text !== undefined ? { text: scrub(sel.text) } : {}),
@@ -646,8 +648,8 @@ export function redactFlowStep(step: Step, secrets: readonly string[]): Step {
       return { ...step, ...baseLabel, ...(step.field ? { field: scrubSel(step.field) } : {}), value: scrub(step.value) };
     case 'type':
       return { ...step, ...baseLabel, text: scrub(step.text) };
-    case 'key':
-      return { ...step, ...baseLabel, key: scrub(step.key) };
+    case 'key': // key and gesture names are fixed tokens (enter, go_home), not values: a secret "enter" must not break them
+      return { ...step, ...baseLabel };
     case 'scroll_to':
       return { ...step, ...baseLabel, sel: scrubSel(step.sel) };
     case 'wait_for':
@@ -655,7 +657,7 @@ export function redactFlowStep(step: Step, secrets: readonly string[]): Step {
     case 'open_url':
       return { ...step, ...baseLabel, url: scrub(step.url) };
     case 'gesture':
-      return { ...step, ...baseLabel, gesture: scrub(step.gesture) };
+      return { ...step, ...baseLabel };
     case 'alert':
       return { ...step, ...baseLabel, ...(step.button !== undefined ? { button: scrub(step.button) } : {}) };
     case 'assert_visible': case 'assert_not_visible':
