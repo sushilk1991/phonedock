@@ -1,11 +1,11 @@
 ---
 name: phonedock
-description: Drive Android emulators, iOS simulators and real phones through PhoneDock's MCP tools (or its CLI) to build, install, launch and test mobile apps; read the screen, tap, type and swipe; check login and other flows; take screenshots for PR evidence or the App Store; debug crashes with logs; switch light/dark mode and rotation; hand Face ID, sign-ins and payments to a person. Use for any phone, simulator, emulator, device or mobile-app task.
+description: Drive Android emulators, iOS simulators, virtual phones (Android emulators that present as a real Pixel, Galaxy or OnePlus) and real phones through PhoneDock's MCP tools (or its CLI) to build, install, launch and test mobile apps; read the screen, tap, type and swipe; check login and other flows; take screenshots for PR evidence or the App Store; debug crashes with logs; switch light/dark mode and rotation; hand Face ID, sign-ins and payments to a person. Use for any phone, simulator, emulator, device or mobile-app task.
 ---
 
 # PhoneDock
 
-PhoneDock gives you Android emulators, iOS simulators and real phones on this Mac. The person can watch every
+PhoneDock gives you Android emulators, iOS simulators, virtual phones and real phones on this Mac. The person can watch every
 device live in the PhoneDock app and take over at any time. Tool names below are PhoneDock's MCP tools (your client
 may show them as `mcp__phonedock__get_ui` or similar). No MCP tools? Use the CLI: see
 [references/cli.md](references/cli.md). Fuller flows: [references/recipes.md](references/recipes.md).
@@ -182,6 +182,18 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   Known secret text is redacted in reports; screenshot pixels remain original, so review before sharing.
 - **Reset between runs.** `snapshot_device action="save" name="clean"` once, `action="restore"` later; for one app,
   `app_data action="save"|"restore" app_id=… name="logged-in"`.
+- **Virtual phone (an app that won't run on an emulator).** Create one only when the user asks for it:
+  presenting as a real handset to get past an app's checks can break that app's terms.
+  `create_device backend="android-emulator" name="pdtest-vphone" disguise="pixel_8" carrier="tmobile_us" boot=true
+  wait_seconds=600`. Phones: `pixel_8` (default), `pixel_8a`, `pixel_7a`, `galaxy_s23`, `galaxy_s24`, `oneplus_12`.
+  Carriers: `tmobile_us` (default), `att_us`, `verizon_us`, `ee_uk`, `vodafone_uk`, `jio_in`, `airtel_in`,
+  `telekom_de`. It needs the phone's Google Play image: on `no_image`, `install_os_image
+  image="system-images;android-34;google_apis_playstore;arm64-v8a"` (a long job), then create again. The first one on
+  an image takes a few minutes (PhoneDock patches the image once); later ones boot in under a minute. In
+  `list_devices` it shows the model it presents as, and `meta.disguise` names the profile. Drive it like any Android
+  device. Limits to tell the user rather than work around: Wi-Fi only (apps usually see no SIM), and apps that check
+  hardware-backed security (Play Integrity's device verdict, key attestation, Widevine L1) can still tell it's
+  virtual; passkeys are untested. Google and app sign-ins are the person's: `request_human`.
 - **Make a slow flow faster.** `start_trace app_id=…` → drive the flow (one `batch` or `run_flow`) → `stop_trace`.
   It returns hangs and main-thread hot spots (iOS) or janky frames and frame times (Android). Change the code,
   rebuild, reinstall, and trace the same flow again: `stop_trace` shows each metric before → after.
