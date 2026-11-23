@@ -1,0 +1,77 @@
+{
+  "focusedTests": {
+    "command": "npm exec --yes --package=node@24 -- node --test src/daemon/discovery-poll.test.ts src/daemon/core.test.ts src/daemon/inventory.test.ts src/cli/main.test.ts src/cli/startup.test.ts",
+    "host": "Instabox fe-hero via Boxrun/Baton",
+    "node": "24.22.3",
+    "passed": 18,
+    "failed": 0,
+    "exit": 0,
+    "reviewFollowups": "Late-provider SSE publication, compile-cache activation and legacy failing exit all passed; a ProcessEnv type annotation then passed the separate final typecheck."
+  },
+  "typeScript": {
+    "command": "npx tsc --noEmit -p .",
+    "host": "Instabox fe-hero",
+    "exit": 0
+  },
+  "releaseApp": {
+    "command": "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build --package-path app -c release",
+    "host": "local Mac via Herdr/Baton",
+    "seconds": 29.2,
+    "exit": 0
+  },
+  "bundle": {
+    "command": "node scripts/bundle.mjs (same script as npm run bundle)",
+    "host": "local Mac via Herdr/Baton",
+    "exit": 0
+  },
+  "cliHelp": {
+    "cases": [
+      "original source",
+      "new bootstrap",
+      "bundled CLI"
+    ],
+    "byteIdentical": true,
+    "characters": 6367,
+    "exit": 0
+  },
+  "discoveryRedGreen": {
+    "before": {
+      "reads": 2,
+      "expected": 1,
+      "testExit": 1
+    },
+    "after": {
+      "reads": 1,
+      "explicitRenameDiscovered": true,
+      "testExit": 0
+    }
+  },
+  "fullSuite": "Not run locally; PR CI owns the full suite.",
+  "bundleSmoke": {
+    "health": true,
+    "filteredList": true,
+    "screenshot": {
+      "bytes": 587903,
+      "width": 1206,
+      "height": 2622
+    },
+    "bundledMcpList": true
+  },
+  "independentReview": {
+    "agent": "Muse via YoYo",
+    "run": "20261123T095013-64736df8",
+    "exit": 0,
+    "blockingFindings": 0,
+    "followups": "Added late-provider SSE, actual cache-activation and legacy failing-exit checks; documented outer-body counter scope and require all expected snapshots in the external harness."
+  },
+  "cleanup": {
+    "privatePortFree": true,
+    "ownedSimulatorDeleted": true,
+    "temporaryBundleDeleted": true,
+    "temporaryBaselineBinaryDeleted": true,
+    "scratchHomeAndCachesDeleted": true,
+    "preferencesMatchOriginal": true,
+    "terminatedOwnedAxePids": [],
+    "remainingAvailableSimulators": 37
+  }
+}

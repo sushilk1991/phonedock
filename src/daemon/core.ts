@@ -314,7 +314,8 @@ export function dropLeaseOnStop(id: string) {
 
 // ── devices (aggregated, 2s cache) ──────────────────────────────────────────
 let devCache: { at: number; list: Device[] } | undefined;
-const inventory = new BackendInventory({ onUpdate() { devCache = undefined; if (sseClients.size) setTimeout(() => void pollDevices(), 50).unref(); } });
+// Publish the completed scan; forcing a refresh here would immediately scan every backend again.
+const inventory = new BackendInventory({ onUpdate() { devCache = undefined; if (sseClients.size) setTimeout(() => void pollDevices(false), 50).unref(); } });
 export const inventoryStatus = () => inventory.status();
 export function invalidateDevices() { devCache = undefined; inventory.invalidate(); if (sseClients.size) setTimeout(() => void pollDevices(), 50).unref(); }
 /** A fresh read of the screen (UI tree, screenshot) has this size: when the cached list says otherwise (the screen
@@ -439,10 +440,10 @@ export function emit(event: string, data: unknown) {
 let lastSeen = new Map<string, string>();
 let lastDevices = new Map<string, Device>();
 let polling = false;
-export async function pollDevices() {
+export async function pollDevices(fresh = true) {
   if (polling) return; polling = true;
   try {
-    const list = await listDevices(true);
+    const list = await listDevices(fresh);
     const seen = new Map<string, string>();
     for (const d of list) {
       const was = lastDevices.get(d.id);

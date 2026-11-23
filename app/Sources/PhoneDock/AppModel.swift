@@ -277,7 +277,9 @@ final class AppModel {
         var list = Self.selfTestHidden.isEmpty ? list : list.filter { !Self.selfTestHides($0) }
         if !Self.selfTestRename.isEmpty { list = list.map(Self.relabel) }
         let sorted = list.sorted { ($0.kind, $0.name.lowercased()) < ($1.kind, $1.name.lowercased()) }
-        if sorted != devices { devices = sorted }
+        let changed = sorted != devices
+        SelfTest.devicesApplied(changed: changed, nonempty: !sorted.isEmpty)
+        if changed { devices = sorted }
         // Restore the last selection (or PHONEDOCK_SELECT=<name|id>) once; never auto-pick a device, so the app
         // doesn't start streaming someone's phone just because it launched.
         if !restoredSelection, !devices.isEmpty {
