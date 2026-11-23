@@ -103,6 +103,9 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     var isRunning: Bool { state == "running" }
     var leasedByAgent: Bool { if let l = lease { return l.owner != AppIdentity.owner }; return false }
     var leasedByHuman: Bool { lease?.owner == AppIdentity.owner }
+    /// A virtual phone: an Android emulator made with `options.disguise`, which presents as a real handset
+    /// (docs/VIRTUAL-PHONES.md). Its `meta.disguise` names the phone it presents as.
+    var isVirtualPhone: Bool { if case .object = meta?["disguise"] { return true }; return false }
 
     var platformName: String {
         switch platform { case "ios": return "iOS"; case "android": return "Android"; case "linux": return "Linux"; default: return platform.capitalized }
@@ -227,6 +230,30 @@ struct OsImage: Codable, Hashable, Identifiable, Sendable {
     var notes: String?
 
     var isUsable: Bool { usable != false }
+}
+
+/// `GET /v1/disguise`: what a virtual phone can present as, and which carriers its SIM can claim.
+struct DisguiseCatalog: Codable, Hashable, Sendable {
+    struct Profile: Codable, Hashable, Identifiable, Sendable {
+        var id: String
+        var name: String            // "Google Pixel 8"
+        var manufacturer: String
+        var model: String           // "Pixel 8"
+        var androidRelease: String  // "14"
+        var sdk: Int
+        /// The Google Play system image it runs on.
+        var image: String
+    }
+    struct Carrier: Codable, Hashable, Identifiable, Sendable {
+        var id: String
+        var name: String
+        var country: String         // "US"
+    }
+    var backend: String
+    var defaultProfile: String
+    var defaultCarrier: String
+    var profiles: [Profile]
+    var carriers: [Carrier]
 }
 
 struct HardwareProfile: Codable, Hashable, Identifiable, Sendable {

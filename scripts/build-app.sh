@@ -194,6 +194,7 @@ fi
 # Docs the app links to (Connect sheet › iPhone over Wi-Fi).
 mkdir -p "$APP/Contents/Resources/docs"
 cp "$ROOT/docs/IPHONE-WIFI.md" "$APP/Contents/Resources/docs/IPHONE-WIFI.md"
+cp "$ROOT/docs/VIRTUAL-PHONES.md" "$APP/Contents/Resources/docs/VIRTUAL-PHONES.md"
 # The agent skill that `phonedock setup` installs for Claude Code, Codex, Cursor and Pi.
 rm -rf "$APP/Contents/Resources/skills" && mkdir -p "$APP/Contents/Resources/skills"
 cp -R "$ROOT/skills/phonedock" "$APP/Contents/Resources/skills/phonedock"

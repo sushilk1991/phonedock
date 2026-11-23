@@ -8,6 +8,13 @@ This capability is an **opt-in disguise layer** inside the `android-emulator` ba
 
 ## Quick start
 
+### Mac app
+
+Choose **＋ Add Device › Virtual Phone** (or File › New Virtual Phone…, ⌥⌘N). Pick the phone it should present as;
+Advanced › Carrier sets its SIM identity. If the Google Play system image it runs on isn't installed, the form downloads
+it in place. The phone appears under **Virtual Phones** in the sidebar. The first one on a system image takes a few
+minutes while PhoneDock patches that image once; later ones reuse it.
+
 ### CLI
 
 ```sh

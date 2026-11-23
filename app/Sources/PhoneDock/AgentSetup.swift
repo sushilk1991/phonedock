@@ -569,8 +569,8 @@ private struct TryItCard: View {
 
 // MARK: - First run: this Mac → a device → your agent
 
-/// The "No Devices Yet" guide: what this Mac can run (with the exact fix for what it can't), New Device…, then
-/// Connect an Agent. Each step shows a check once it's done.
+/// The "No Devices Yet" guide: what this Mac can run (with the exact fix for what it can't), a device (Add Device's
+/// choices: simulator or emulator, virtual phone, physical device), then Connect an Agent. Each step shows a check once it's done.
 struct FirstRunGuide: View {
     @Environment(AppModel.self) private var model
     @State private var setup = AgentSetupModel.shared
@@ -583,12 +583,8 @@ struct FirstRunGuide: View {
                 PlatformReadiness()
             }
             GuideStep(number: 2, title: "A device", done: false) {
-                HStack(spacing: Theme.Space.m) {
-                    Button("New Device…") { model.showCreate = true }
-                        .buttonStyle(.borderedProminent)
-                    Button("Connect a Phone…") { model.showConnect = true }
-                }
-                .fixedSize()   // each button its own width: the empty state's actions stretch the last one
+                // The same choices as ＋ Add Device's first step; each opens that sheet at its second step.
+                AddDeviceOptions(compact: true)
             }
             let agentStepLocked = model.devices.isEmpty && setup.connected.isEmpty
             GuideStep(number: 3, title: "Your agent", done: !setup.connected.isEmpty, locked: agentStepLocked) {

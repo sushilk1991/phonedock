@@ -371,7 +371,7 @@ struct InfoTab: View {
             await loadSnapshots()
         }
         .onChange(of: device.spec?.autoStart) { autoStart = device.spec?.autoStart ?? false }
-        // Name prompts are sheets like New Device (not alerts): the same buttons, and room for the name.
+        // Name prompts are sheets like Add Device (not alerts): the same buttons, and room for the name.
         .sheet(isPresented: Binding(get: { savingName != nil }, set: { if !$0 { savingName = nil } })) {
             NamePromptSheet(title: "Save Snapshot",
                             message: "Saves the current state of \(DisplayText.unbroken(device.name))." + (restartsForSnapshot ? restartNote : ""),
@@ -1422,10 +1422,10 @@ struct LogsTab: View {
             else if scope != .all { InspectorMessage(title: "No logs from \(scopeTitle) yet") }
             else { InspectorMessage(title: "No logs yet") }
         } else {
-            // Time, level, tag, then the message, wrapped under the tag; the newest line at the bottom.
+            // Time, level, tag, then the message, wrapped under the tag; the newest line at the bottom. On the
+            // inspector's own surface, as Apps, Elements and Activity are (DESIGN.md › Window chrome): a full-width
+            // white well with a hairline over it boxed the inspector in, on this tab only.
             LogTextView(text: text, dimmed: state == .loading)
-                .background(Theme.Surface.content)
-            .overlay(alignment: .top) { Divider() }   // the log well starts at a hairline, as in Xcode's console
         }
     }
 

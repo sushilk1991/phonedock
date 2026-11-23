@@ -239,6 +239,30 @@ export function clonePersistedDisguise(src: PersistedDisguise, now?: Date): Pers
   };
 }
 
+/** What `GET /v1/disguise` lists: the phones a virtual phone can present as, and the carriers its SIM can claim. */
+export interface DisguiseCatalog {
+  backend: 'android-emulator';
+  defaultProfile: string;
+  defaultCarrier: string;
+  /** `image` is the Google Play system image the profile runs on (its Android API level); create installs nothing. */
+  profiles: { id: string; name: string; manufacturer: string; model: string; androidRelease: string; sdk: number; image: string; screen: { width: number; height: number; dpi: number } }[];
+  carriers: { id: string; name: string; country: string }[];
+}
+
+export function disguiseCatalog(): DisguiseCatalog {
+  return {
+    backend: 'android-emulator',
+    defaultProfile: defaultDeviceProfile().id,
+    defaultCarrier: DEFAULT_CARRIER_ID,
+    profiles: DEVICE_PROFILES.map((p) => ({
+      id: p.id, name: p.name, manufacturer: p.manufacturer, model: p.model, androidRelease: p.androidRelease, sdk: p.sdk,
+      image: `system-images;android-${p.sdk};google_apis_playstore;arm64-v8a`,
+      screen: { ...p.screen },
+    })),
+    carriers: CARRIERS.map((c) => ({ id: c.id, name: c.name, country: c.countryIso.toUpperCase() })),
+  };
+}
+
 /** Public summary placed on `Device.meta.disguise`. */
 export function disguiseDeviceMeta(d: PersistedDisguise): DisguiseDeviceMeta {
   return {

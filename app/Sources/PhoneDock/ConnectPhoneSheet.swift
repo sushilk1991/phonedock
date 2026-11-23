@@ -66,8 +66,10 @@ struct LocalNetworkWarning: View {
 
 /// Settings › Advanced › Wi-Fi phones › Check: opens a TCP connection from a process this app started, to tell a
 /// missing Local Network permission apart from a wrong address.
-// MARK: - Connect a Phone
+// MARK: - Connect a Physical Device
 
+/// Connect a Physical Device: Add Device's second step for your own phone, with the steps for an iPhone or an Android
+/// phone.
 struct ConnectPhoneSheet: View {
     enum Kind: String, CaseIterable, Identifiable {
         case iphone = "iPhone", android = "Android"
@@ -77,6 +79,10 @@ struct ConnectPhoneSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @AppStorage("connect.kind") private var kindRaw = Kind.iphone.rawValue
+    /// Back to Add Device's chooser (‹ before the title); nil hides it.
+    var onBack: (() -> Void)?
+
+    init(onBack: (() -> Void)? = nil) { self.onBack = onBack }
 
     // iPhone: nearby list (native, iOS 27+)
     @State private var discovered: [DiscoveredPhone]?
@@ -128,7 +134,7 @@ struct ConnectPhoneSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Connect a Phone").font(Theme.Fonts.title).foregroundStyle(Theme.Ink.primary)
+                SheetTitle(title: DeviceWords.connectPhysicalDevice, onBack: onBack)
                 Spacer()
                 Picker("Phone", selection: kindBinding) {
                     ForEach(Kind.allCases) { k in Text(k.rawValue).tag(k) }
@@ -357,7 +363,8 @@ struct ConnectPhoneSheet: View {
                 if let d = r?.device {
                     try? await Task.sleep(for: .seconds(1))
                     model.selection = d.id
-                    dismiss()
+                    // Only if Add Device still shows this step: after Back it may be making another kind of device.
+                    if model.addDevice == .physical { dismiss() }
                 }
             } catch {
                 wdaStatus = .failed(Self.problem(error, title: "Couldn’t connect to \(host)", host: host))

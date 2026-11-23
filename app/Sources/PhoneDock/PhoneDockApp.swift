@@ -107,7 +107,9 @@ enum MenuTidy {
 
 /// UserDefaults keys owned by the window chrome.
 enum Prefs {
-    static let discoveredCollapsed = "sidebar.discoveredCollapsed"
+    /// From Xcode & Android Studio lists every device there instead of only the ones in use (default off). A new key:
+    /// the old "sidebar.discoveredCollapsed" hid even the ones in use, so nobody starts from it.
+    static let discoveredShowAll = "sidebar.discoveredShowAll"
     /// Read by HandoffNotifier: post a notification when an agent asks for help (default on).
     static let notifyOnHandoff = "notifyOnHandoff"
     static let settingsTab = "settings.tab"
@@ -155,11 +157,17 @@ struct PhoneDockCommands: Commands {
                 .disabled(model.devices.isEmpty)
         }
         CommandGroup(replacing: .newItem) {
-            Button("New Device…") { model.showCreate = true }
+            // Each kind of device, straight to Add Device's second step (＋ Add Device asks first). ⌘N and ⇧⌘K are the
+            // ones New Device… and Connect a Phone… had.
+            Button(DeviceWords.newSimulator + "…") { model.addDevice = .simulator }
                 .keyboardShortcut("n")
-            Button("Connect a Phone…") { model.showConnect = true }
+                .disabled(!model.connection.isConnected)
+            Button(DeviceWords.newVirtualPhone + "…") { model.addDevice = .virtualPhone }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+                .disabled(!model.connection.isConnected)
+            Button(DeviceWords.connectPhysicalDevice + "…") { model.addDevice = .physical }
                 .keyboardShortcut("k", modifiers: [.command, .shift])
-            // The same three as the toolbar's ＋ menu.
+            Divider()
             Button("Connect an Agent…") { model.showAgentSetup = true }
         }
         CommandMenu("Device") { DeviceMenuItems(model: model) }
@@ -369,7 +377,7 @@ struct ContentView: View {
     /// Where the stage wants toasts (above its hardware bar); nil: no bar on screen.
     @State private var toastLift: CGFloat?
     /// Below this detail width, Open in Separate Window (also in the Device menu and the sidebar's context menu)
-    /// leaves the toolbar first, so ＋ never falls into the » overflow menu. At the 960 pt minimum window with default
+    /// leaves the toolbar first, so nothing falls into the » overflow menu. At the 960 pt minimum window with default
     /// sidebar (250 pt) and inspector (320 pt) the detail column is 390 pt, which fits all four actions cleanly.
     static let narrowToolbarBelow: CGFloat = 340
 
@@ -377,13 +385,16 @@ struct ContentView: View {
         @Bindable var model = model
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView()
-                // The sidebar toggle sits at the trailing end of the sidebar's toolbar band (top right of the
-                // sidebar, as in Mail and Notes), mirroring the inspector toggle at the top right of the inspector.
-                // The system one would sit next to the traffic lights. With the sidebar hidden the system puts its
-                // own toggle back at the leading end of the main toolbar, which is where it belongs then.
+                // The sidebar's toolbar band: ＋ Add Device, the one way to add a device, at the top of the list it
+                // adds to, then the sidebar toggle at the trailing end (top right of the sidebar, as in Mail and
+                // Notes), mirroring the inspector toggle at the top right of the inspector. The system toggle would
+                // sit next to the traffic lights. With the sidebar hidden the system moves this band's items, ＋ and
+                // the toggle, to the leading end of the main toolbar, so neither needs a second copy there.
                 .toolbar(removing: .sidebarToggle)
                 .toolbar {
                     if #available(macOS 26.0, *) { ToolbarSpacer(.flexible) }
+                    ToolbarItem(placement: .automatic) { AddDeviceButton() }
+                    if #available(macOS 26.0, *) { ToolbarSpacer(.fixed) }
                     ToolbarItem(placement: .automatic) { sidebarToggle }
                 }
                 .navigationSplitViewColumnWidth(min: 225, ideal: 250, max: 360)
@@ -402,6 +413,10 @@ struct ContentView: View {
                 .onPreferenceChange(ToastLiftKey.self) { toastLift = $0 }
                 .navigationTitle(model.selectedDevice?.name ?? "PhoneDock")
                 .navigationSubtitle(model.selectedDevice?.pdWindowSubtitle ?? "")
+                // One surface per column (DESIGN.md › Window chrome): the stage runs up under the toolbar, as the
+                // sidebar and inspector run under theirs. A visible toolbar background painted a separate band here
+                // (white in light, #242424 in dark) with its own hairline, the only one in the window.
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
                 .onGeometryChange(for: Bool.self) { $0.size.width < Self.narrowToolbarBelow } action: { narrowDetail = $0 }
         }
         // Nothing to inspect without devices: the empty state gets the whole window (the toggle comes back with them).
@@ -432,8 +447,10 @@ struct ContentView: View {
             .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
-        .sheet(isPresented: $model.showCreate) { CreateDeviceSheet().environment(model) }
-        .sheet(isPresented: $model.showConnect) { ConnectPhoneSheet().environment(model) }
+        // One sheet for every way into Add Device; its step changes while it stays open (AddDeviceSheet.swift).
+        .sheet(isPresented: Binding(get: { model.addDevice != nil }, set: { if !$0 { model.addDevice = nil } })) {
+            AddDeviceSheet().environment(model)
+        }
         .sheet(isPresented: $model.showAgentSetup) { AgentSetupSheet() }
         .pdProblemAlert(model)
         .onChange(of: model.selection) { highlight = nil }
@@ -473,7 +490,9 @@ struct ContentView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         let hasDeviceActions = model.selectedDevice != nil && model.connection.isConnected
-        let hasTrailingChrome = !model.sidebarVisible || (!model.inspectorVisible && !model.devices.isEmpty)
+        // ＋ Add Device needs no item here: with the sidebar hidden, the system moves the sidebar band's items (＋ and the
+        // sidebar toggle) to the leading end of this toolbar, the same corner of the window.
+        let hasTrailingChrome = !model.inspectorVisible && !model.devices.isEmpty
         if let health = connectionHealth {
             ToolbarItem(placement: .status) { ConnectionPill(health: health) }
         }
@@ -482,14 +501,6 @@ struct ContentView: View {
         }
         if #available(macOS 26.0, *), hasDeviceActions, hasTrailingChrome {
             ToolbarSpacer(.fixed, placement: .primaryAction)
-        }
-        // Add lives at the foot of the sidebar (SidebarAddButton); with the sidebar hidden it's ＋ here.
-        if !model.sidebarVisible {
-            ToolbarItem(placement: .primaryAction) {
-                Menu { AddMenuItems() } label: { Label("Add", systemImage: "plus") }
-                    .help("New Device, Connect a Phone or Connect an Agent")
-                    .testAnchor("Add menu")
-            }
         }
         if !model.inspectorVisible, !model.devices.isEmpty {
             ToolbarItem(placement: .primaryAction) { inspectorToggle }
@@ -543,7 +554,7 @@ struct ContentView: View {
                     Image(systemName: "iphone.gen3")
                 }
             } description: {
-                Text("Create a virtual phone or connect your own. Your AI agents can use it right away.")
+                Text("Add a device, and your AI agents can use it right away.")
                     .foregroundStyle(Theme.Ink.secondary)
             } actions: {
                 // First run, in order: what this Mac can run → a device → an agent (AgentSetup.swift).
@@ -696,7 +707,7 @@ struct WindowReader: NSViewRepresentable {
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @AppStorage(Prefs.discoveredCollapsed) private var discoveredCollapsed = true
+    @AppStorage(Prefs.discoveredShowAll) private var discoveredShowAll = false
 
     /// Name order only, so rows never move when a device changes state.
     private static func byName(_ a: Device, _ b: Device) -> Bool {
@@ -712,44 +723,31 @@ struct SidebarView: View {
         let all = model.devices
         let phones = all.filter { $0.kind == "physical" }.sorted(by: Self.byName)
         let cloud = all.filter { $0.kind == "cloud" }.sorted(by: Self.byName)
-        let managed = all.filter { $0.managed == true && $0.kind != "physical" && $0.kind != "cloud" }.sorted(by: Self.byName)
-        let other = all.filter { $0.managed != true && $0.kind != "physical" && $0.kind != "cloud" }.sorted(by: Self.byName)
+        // A virtual phone is an emulator too; it's classed by its disguise first, wherever it was made.
+        let vphones = all.filter { $0.isVirtualPhone && $0.kind != "physical" && $0.kind != "cloud" }.sorted(by: Self.byName)
+        let rest = all.filter { !$0.isVirtualPhone && $0.kind != "physical" && $0.kind != "cloud" }
+        let managed = rest.filter { $0.managed == true }.sorted(by: Self.byName)
+        let other = rest.filter { $0.managed != true }.sorted(by: Self.byName)
+        let creatingPhones = model.creating.filter(\.virtualPhone)
+        let creatingOthers = model.creating.filter { !$0.virtualPhone }
+        // Sections are named as Add Device names the choices (DeviceWords), so what you add is where it lands. ＋ Add
+        // Device in the band above is the only way in from here: no add row in the list, no button at the foot.
         List(selection: $model.selection) {
-            Section("Devices") {
-                ForEach(model.creating) { CreatingRow(pending: $0) }
-                rows(managed)
-                // Only show an inline "New Device…" placeholder when other sections have devices (so the stage isn't
-                // showing FirstRunGuide). In the true empty state, FirstRunGuide is the single primary creation path.
-                if managed.isEmpty, model.creating.isEmpty, !all.isEmpty {
-                    Button { model.showCreate = true } label: {
-                        HStack(spacing: Theme.Space.m) {
-                            Image(systemName: "plus.circle").frame(width: 20)
-                            Text("New Device…")
-                        }
-                        .font(Theme.Fonts.body)
-                        .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!model.connection.isConnected)
+            if !managed.isEmpty || !creatingOthers.isEmpty {
+                Section(DeviceWords.simulators) {
+                    ForEach(creatingOthers) { CreatingRow(pending: $0) }
+                    rows(managed)
                 }
             }
-            if !phones.isEmpty { Section("Phones") { rows(phones) } }
+            if !vphones.isEmpty || !creatingPhones.isEmpty {
+                Section(DeviceWords.virtualPhones) {
+                    ForEach(creatingPhones) { CreatingRow(pending: $0) }
+                    rows(vphones)
+                }
+            }
+            if !phones.isEmpty { Section(DeviceWords.physicalDevices) { rows(phones) } }
             if !cloud.isEmpty { Section("Cloud") { rows(cloud) } }
-            if !other.isEmpty {
-                Section(isExpanded: Binding(get: { !discoveredCollapsed }, set: { discoveredCollapsed = !$0 })) {
-                    rows(other)
-                } header: {
-                    HStack(spacing: Theme.Space.s) {
-                        Text("Xcode & Android Studio")
-                        Spacer(minLength: Theme.Space.xs)
-                        Text(other.count, format: .number)
-                            .monospacedDigit()
-                            .foregroundStyle(Theme.Ink.secondary)
-                            .padding(.trailing, Theme.Space.l)   // line up with the rows' status dots
-                    }
-                    .help("Simulators and emulators created in Xcode or Android Studio")
-                }
-            }
+            if !other.isEmpty { discoveredSection(other) }
         }
         .listStyle(.sidebar)
         .transaction { $0.animation = nil }
@@ -760,7 +758,51 @@ struct SidebarView: View {
             DeviceActions.confirmDelete(d, model)
         }
         .sidebarUpdateItem()   // "PhoneDock 0.2.0 · Update" at the bottom, only when there is one: UpdateSidebarItem.swift
-        .sidebarAddButton()    // Add Device, under everything, so it never moves when the update card comes and goes
+    }
+
+    /// Simulators and emulators made in Xcode or Android Studio. Xcode alone makes a dozen per iOS version, so listing
+    /// them all buries the few in use. The section lists the ones in use (running, starting, held by an agent or you,
+    /// asking for help, recording, busy, or selected), in name order like every section, and one row shows the rest.
+    @ViewBuilder private func discoveredSection(_ other: [Device]) -> some View {
+        let inUse = other.filter(isInUse)
+        let rest = other.count - inUse.count
+        Section {
+            rows(discoveredShowAll ? other : inUse)
+            if rest > 0 {
+                Button { discoveredShowAll.toggle() } label: {
+                    // Laid out as a device row is (20 pt glyph column, then the words), quieter than one.
+                    HStack(spacing: Theme.Space.m) {
+                        Image(systemName: discoveredShowAll ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 20)
+                        Text(discoveredShowAll ? "Show Fewer" : (inUse.isEmpty ? "Show All \(other.count)" : "Show \(rest) More"))
+                    }
+                    .font(Theme.Fonts.body)
+                    // Ink.secondary, not the rows' system .secondary (about 3.2:1 here): it's the only way to the rest.
+                    .foregroundStyle(Theme.Ink.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(DeviceWords.discoveredHelp)
+                .testAnchor("Show Discovered")
+            }
+        } header: {
+            HStack(spacing: Theme.Space.s) {
+                Text(DeviceWords.discovered)
+                Spacer(minLength: Theme.Space.xs)
+                Text(other.count, format: .number)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.Ink.secondary)
+                    .padding(.trailing, Theme.Space.l)   // line up with the rows' status dots
+            }
+            .help(DeviceWords.discoveredHelp)
+        }
+    }
+
+    private func isInUse(_ d: Device) -> Bool {
+        d.isRunning || d.state == "booting" || d.state == "stopping" || d.leasedByAgent || d.leasedByHuman
+            || model.pendingHandoff(for: d.id) != nil || model.recordings[d.id] != nil || model.busy[d.id] != nil
+            || model.selection == d.id
     }
 
     @ViewBuilder private func rows(_ items: [Device]) -> some View {
@@ -807,59 +849,6 @@ struct SidebarView: View {
             Button("Delete…", role: .destructive) { DeviceActions.confirmDelete(d, model) }
                 .disabled(!online || DeviceActions.isBusy(d, model))
         }
-    }
-}
-
-extension View {
-    /// Pins Add Device to the foot of the sidebar (a safe-area bar on macOS 26, as the update card is).
-    @ViewBuilder func sidebarAddButton() -> some View {
-        if #available(macOS 26.0, *) {
-            safeAreaBar(edge: .bottom, spacing: 0) { SidebarAddButton() }
-        } else {
-            safeAreaInset(edge: .bottom, spacing: 0) { SidebarAddButton() }
-        }
-    }
-}
-
-/// Add Device at the foot of the sidebar, as Reminders has Add List: devices are listed there, so adding one is too.
-/// It opens the menu that ＋ in the main toolbar opened; with the sidebar hidden, ＋ is back in the toolbar.
-struct SidebarAddButton: View {
-    var body: some View {
-        Menu {
-            AddMenuItems()
-        } label: {
-            // Laid out as a device row is (20 pt glyph column, then the name), so glyph and words line up with theirs.
-            HStack(spacing: Theme.Space.m) {
-                Image(systemName: "plus.circle").frame(width: 20)
-                Text("Add Device")
-            }
-            .font(Theme.Fonts.body)
-            .foregroundStyle(.secondary)
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .combine)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .help("New Device, Connect a Phone or Connect an Agent")
-        .testAnchor("Add menu")
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10 + Theme.Space.s)   // rows sit 10 pt in, their glyph column 6 pt further
-        .padding(.vertical, Theme.Space.m)
-    }
-}
-
-/// The Add menu's items: in the sidebar's Add Device and in the toolbar's ＋ (sidebar hidden).
-struct AddMenuItems: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        Button { model.showCreate = true } label: { Label("New Device…", systemImage: "plus") }
-            .disabled(!model.connection.isConnected)
-        Button { model.showConnect = true } label: { Label("Connect a Phone…", systemImage: "iphone.radiowaves.left.and.right") }
-        Divider()
-        Button { model.showAgentSetup = true } label: { Label("Connect an Agent…", systemImage: "sparkles") }
     }
 }
 

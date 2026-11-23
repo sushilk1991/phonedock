@@ -116,6 +116,7 @@ It never replaces settings it didn't write: it reports them instead, and it back
 | Android phone | ✅ | USB, or Wi-Fi with wireless debugging |
 | iOS simulator | ✅ | Simulator-built apps only |
 | Android emulator | ✅ | Android SDK emulator, Google APIs and Play Store images |
+| Virtual phone (Android) | **Beta** | An emulator with Google Play that presents as a real Pixel, Galaxy or OnePlus: **＋ Add Device › Virtual Phone**. Wi-Fi only. [Details and limits](docs/VIRTUAL-PHONES.md) |
 | iPhone on iOS 26 or earlier | **Beta** | Needs WebDriverAgent on the phone. [Setup](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent) |
 
 Generic OS images (QEMU) and Corellium cloud devices are experimental; see
@@ -127,7 +128,7 @@ Generic OS images (QEMU) and Corellium cloud devices are experimental; see
 
 1. On the phone, turn on Settings › Developer options › Wireless debugging, then tap **Pair device with pairing code**
    and keep that screen open.
-2. In PhoneDock choose **Connect a Phone › Android**. Your phone appears in the list (or run
+2. In PhoneDock choose **＋ Add Device › Physical Device › Android** (or File › Connect a Physical Device…). Your phone appears in the list (or run
    `phonedock discover --android`). If it doesn't, **Use a QR code instead** shows a code to scan from the phone's
    Pair device with QR code, and **Enter an address** takes the IP address and port the phone shows.
 3. Type the six-digit code next to the phone and click **Pair**, or run `phonedock pair 123456`.

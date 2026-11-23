@@ -96,6 +96,33 @@ struct DaemonClient: Sendable {
         return try JSONDecoder().decode(Job.self, from: data)
     }
 
+    /// Polls a job each second until it finishes, handing each state to `update`. Throws `CancellationError` when the
+    /// calling task is cancelled (its sheet closed), and an `APIError` when the service forgets the job (jobs live in
+    /// its memory, so a restart loses them) or stops answering for 30 s, so no form waits on a job forever.
+    /// `update` is never called once the task is cancelled: its form may already show another download, or none.
+    func follow(_ job: Job, update: @escaping @MainActor (Job) -> Void) async throws -> Job {
+        var cur = job
+        var lastAnswer = ContinuousClock.now   // a deadline in time: a hung service costs each poll its full timeout
+        while !cur.isFinished {
+            try await Task.sleep(for: .seconds(1))
+            do {
+                cur = try await get(Job.self, "/v1/jobs/\(Self.enc(job.id))", timeout: 10)
+                lastAnswer = .now
+                let seen = cur
+                // Checked on the main actor, where cancellation happens, so a cancel can't slip in between.
+                await MainActor.run { if !Task.isCancelled { update(seen) } }
+                try Task.checkCancellation()
+            } catch let e as APIError where e.status == 404 {
+                throw APIError(status: 410, code: "job_lost", message: "PhoneDock’s service lost track of job \(job.id).",
+                               hints: ["PhoneDock’s service restarted. Try again."], detail: e.message)
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                if ContinuousClock.now - lastAnswer > .seconds(30) { throw error }
+            }
+        }
+        return cur
+    }
+
     func text(_ path: String, query: [String: String] = [:]) async throws -> String {
         let (data, _) = try await raw("GET", path, query: query)
         return String(decoding: data, as: UTF8.self)
@@ -188,10 +215,14 @@ enum DaemonLocator {
     static var isBundled: Bool { Bundle.main.bundlePath.hasSuffix(".app") }
 
     /// docs/IPHONE-WIFI.md: bundled copy inside the app, else the repo checkout.
-    static var iphoneWifiDoc: URL? {
+    static var iphoneWifiDoc: URL? { doc("IPHONE-WIFI.md") }
+    static var virtualPhonesDoc: URL? { doc("VIRTUAL-PHONES.md") }
+
+    /// A guide from docs/: the copy in the app bundle (build-app.sh copies it), else the repo's when run from source.
+    private static func doc(_ file: String) -> URL? {
         var cands: [URL] = []
-        if isBundled, let r = Bundle.main.resourceURL { cands.append(r.appendingPathComponent("docs/IPHONE-WIFI.md")) }
-        cands.append(URL(fileURLWithPath: repo + "/docs/IPHONE-WIFI.md"))
+        if isBundled, let r = Bundle.main.resourceURL { cands.append(r.appendingPathComponent("docs/" + file)) }
+        cands.append(URL(fileURLWithPath: repo + "/docs/" + file))
         return cands.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
