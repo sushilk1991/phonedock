@@ -595,3 +595,116 @@ test('hidden batch observations never update snapshot/ref binding, suppression h
     assert.doesNotMatch(g.text, /\(unchanged\)/);
   } finally { await s2.close(); }
 });
+
+test('empty UI reads clear stale refs, and batch rollback never wipes concurrent observations on other devices', async () => {
+  const devA = {
+    id: 'android-emulator:pdtest-a', nativeId: 'pdtest-a', name: 'pdtest-a', backend: 'android-emulator', platform: 'android',
+    kind: 'virtual', state: 'running', managed: true, capabilities: [], screen: { width: 1080, height: 2400, scale: 1 },
+  } as unknown as Device;
+  const devB = {
+    id: 'android-emulator:pdtest-b', nativeId: 'pdtest-b', name: 'pdtest-b', backend: 'android-emulator', platform: 'android',
+    kind: 'virtual', state: 'running', managed: true, capabilities: [], screen: { width: 1080, height: 2400, scale: 1 },
+  } as unknown as Device;
+
+  const treeA0: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:00.000Z', snapshotId: 'snap-a0',
+    root: [el('e8', 'Button', 100, 200, 200, 80, { text: 'Save', clickable: true })],
+  };
+  const treeA1: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:01.000Z', snapshotId: 'snap-a1',
+    root: [el('e8', 'Button', 600, 900, 200, 80, { text: 'Delete', clickable: true })],
+  };
+  const treeEmpty: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:02.000Z', snapshotId: 'snap-empty',
+    root: [],
+  };
+  const treeB: UiTree = {
+    source: 'accessibility', screen: { width: 1080, height: 2400 }, capturedAt: '2026-11-23T10:00:03.000Z', snapshotId: 'snap-b1',
+    root: [el('e3', 'Button', 100, 200, 200, 80, { text: 'Confirm', clickable: true })],
+  };
+
+  const trees = new Map<string, UiTree>([[devA.id, treeA0], [devB.id, treeB]]);
+  const tapRefCalls: { device: string; ref: string; snapshotId?: string }[] = [];
+  let pauseNextTapOnA = false;
+  let step1Paused!: () => void;
+  let resumeStep1!: () => void;
+  const step1Gate = new Promise<void>((r) => { step1Paused = r; });
+  const resumeGate = new Promise<void>((r) => { resumeStep1 = r; });
+
+  const fake: Fake = {
+    calls: [], owner: 'test',
+    devices: async () => [devA, devB],
+    resolveDevice: async (q: string) => (q === 'pdtest-b' || q === devB.id ? devB : devA),
+    screen: async () => ({ width: 1080, height: 2400, scale: 1 }),
+    ui: async (id: string) => trees.get(id)!,
+    tap: async (id: string, _x: number, _y: number, _label?: string, meta?: Record<string, unknown>) => {
+      if (id === devA.id && pauseNextTapOnA) {
+        pauseNextTapOnA = false;
+        step1Paused();
+        await resumeGate;
+      }
+      return { ok: true, delivery: 'sent', retrySafe: false, ...(meta?.returnUi ? { ui: trees.get(id) } : {}) };
+    },
+    tapRef: async (id: string, ref: string, opts?: Record<string, unknown>) => {
+      tapRefCalls.push({ device: id, ref, snapshotId: opts?.snapshotId as string | undefined });
+      return { ok: true, delivery: 'sent', retrySafe: false, resolved: { ref, x: 200, y: 240 } };
+    },
+  };
+
+  const s = await connect(fake);
+  try {
+    // Item 1a: get_ui(Save) -> get_ui(empty) -> tap(ref="e8") MUST be rejected (never resolves to old Save snapshot)
+    const gSave = await s.call('get_ui', { device: 'pdtest-a' });
+    assert.match(gSave.text, /e8 Button "Save"/);
+    trees.set(devA.id, treeEmpty);
+    const gEmpty = await s.call('get_ui', { device: 'pdtest-a' });
+    assert.match(gEmpty.text, /No UI elements found/);
+    const afterEmptyGetUi = await s.call('tap', { device: 'pdtest-a', ref: 'e8' });
+    assert.equal(afterEmptyGetUi.isError, true);
+    assert.equal(tapRefCalls.length, 0, 'empty get_ui must clear prior snapshot binding');
+
+    // Item 1b: get_ui(Save) -> tap(observe="ui") returning empty -> tap(ref="e8") MUST be rejected
+    trees.set(devA.id, treeA0);
+    await s.call('get_ui', { device: 'pdtest-a' });
+    trees.set(devA.id, treeEmpty);
+    const obsEmpty = await s.call('tap', { device: 'pdtest-a', x: 10, y: 10, observe: 'ui', settle_ms: 0 });
+    assert.equal(obsEmpty.isError, false, obsEmpty.text);
+    const afterEmptyObs = await s.call('tap', { device: 'pdtest-a', ref: 'e8' });
+    assert.equal(afterEmptyObs.isError, true);
+    assert.equal(tapRefCalls.length, 0, 'empty observe="ui" must clear prior snapshot binding');
+
+    // Item 2: two-device interleaving — batch on A rolls back A's hidden step 1 without wiping B's delivered get_ui
+    trees.set(devA.id, treeA0);
+    await s.call('get_ui', { device: 'pdtest-a' }); // A's delivered baseline is snap-a0
+
+    trees.set(devA.id, treeA1);
+    pauseNextTapOnA = true;
+    const batchOnA = s.call('batch', {
+      device: 'pdtest-a',
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+    });
+    await step1Gate;
+    // While A's batch is paused in step 1 (before step 2's rollback runs), deliver get_ui on device B
+    const gB = await s.call('get_ui', { device: 'pdtest-b' });
+    assert.match(gB.text, /e3 Button "Confirm"/);
+    // Resume A's step 1 -> step 1 observes treeA1 -> step 2 triggers rollback on A
+    resumeStep1();
+    const resA = await batchOnA;
+    assert.equal(resA.isError, false, resA.text);
+
+    // Device B's binding and diff baseline MUST survive A's batch rollback
+    const tapB = await s.call('tap', { device: 'pdtest-b', ref: 'e3' });
+    assert.equal(tapB.isError, false, tapB.text);
+    assert.deepEqual(tapRefCalls.at(-1), { device: devB.id, ref: 'e3', snapshotId: 'snap-b1' });
+    const diffB = await s.call('get_ui', { device: 'pdtest-b', diff: true });
+    assert.match(diffB.text, /\(unchanged\)/);
+
+    // Device A's hidden step 1 WAS rolled back to snap-a0 (never snap-a1)
+    const tapA = await s.call('tap', { device: 'pdtest-a', ref: 'e8' });
+    assert.equal(tapA.isError, false, tapA.text);
+    assert.deepEqual(tapRefCalls.at(-1), { device: devA.id, ref: 'e8', snapshotId: 'snap-a0' });
+  } finally { await s.close(); }
+});

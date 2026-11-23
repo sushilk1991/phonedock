@@ -1,6 +1,7 @@
 // Shared compact UI formatter for MCP `get_ui` and action `observe: "ui" | "both"`.
 // Handles session observation counters, unchanged-screen suppression (hashing exact printed output),
 // snapshot binding, and strict element/character size caps.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { windowsLine } from '../backends/android-windows.ts';
 import { outlineHash } from '../core/ui-hash.ts';
 import type { Device, UiElement, UiTree } from '../core/types.ts';
@@ -11,6 +12,60 @@ export type ObserveMode = 'none' | 'image' | 'ui' | 'both';
 export const OBSERVE_MAX_ELEMENTS = 120;
 export const OBSERVE_MAX_CHARS = 8000;
 const HASH_PLACEHOLDER = '0'.repeat(16);
+
+export interface DeviceObsSnapshot {
+  snapshot?: string;
+  outline?: { lines: string[] };
+  hash?: string;
+  offSpace?: { width: number; height: number; factor: number };
+  delivered: boolean;
+}
+
+const batchSavedStore = new AsyncLocalStorage<Map<string, DeviceObsSnapshot>>();
+
+/** Run a batch step in an async scope that records pre-step state only for devices this batch touches. */
+export function runInBatchScope<T>(saved: Map<string, DeviceObsSnapshot>, fn: () => Promise<T>): Promise<T> {
+  return batchSavedStore.run(saved, fn);
+}
+
+/** Snapshot a device's prior delivered observation state the first time a batch step touches it. */
+export function noteBatchDeviceWrite(ctx: McpContext, deviceId: string): void {
+  const saved = batchSavedStore.getStore();
+  if (!saved || saved.has(deviceId)) return;
+  saved.set(deviceId, {
+    snapshot: ctx.snapshots?.get(deviceId),
+    outline: ctx.outlines?.get(deviceId),
+    hash: ctx.uiObs?.get(deviceId)?.hash,
+    offSpace: ctx.offSpace?.get(deviceId),
+    delivered: Boolean(ctx.deliveredTree?.has(deviceId)),
+  });
+}
+
+/** Roll back session observation state only for the specific device(s) this batch touched, never clearing other devices. */
+export function restoreBatchDevices(ctx: McpContext, saved: Map<string, DeviceObsSnapshot>): void {
+  for (const [devId, prev] of saved) {
+    if (ctx.snapshots) {
+      if (prev.snapshot !== undefined) ctx.snapshots.set(devId, prev.snapshot);
+      else ctx.snapshots.delete(devId);
+    }
+    if (ctx.outlines) {
+      if (prev.outline !== undefined) ctx.outlines.set(devId, prev.outline);
+      else ctx.outlines.delete(devId);
+    }
+    if (ctx.uiObs) {
+      const cur = ctx.uiObs.get(devId);
+      if (cur) ctx.uiObs.set(devId, { ...cur, hash: prev.hash ?? '' });
+    }
+    if (ctx.offSpace) {
+      if (prev.offSpace !== undefined) ctx.offSpace.set(devId, prev.offSpace);
+      else ctx.offSpace.delete(devId);
+    }
+    if (ctx.deliveredTree) {
+      if (prev.delivered) ctx.deliveredTree.add(devId);
+      else ctx.deliveredTree.delete(devId);
+    }
+  }
+}
 
 /** Resolve `observe` + legacy `return_screenshot`, rejecting conflicting combinations before sending input. */
 export function resolveObserve(observe?: ObserveMode, returnScreenshot?: boolean): ObserveMode {
@@ -88,6 +143,7 @@ export interface FormatUiResult {
  *  prompt/human warnings, OCR notes, and overlay window lines), so equal hashes guarantee identical output. */
 export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
   const { ctx, device: d, tree, mode } = opts;
+  noteBatchDeviceWrite(ctx, d.id);
   ctx.snapshots ??= new Map();
   if (opts.coordinateSpace !== 'device') ctx.offSpace?.delete(d.id);
 
@@ -190,6 +246,9 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
         : `${stablePrefix}${tail}\nNo UI elements found — take a screenshot to see the screen.`;
       const hash = outlineHash(stableOut);
       ctx.uiObs.set(d.id, { hash, count: obsCount });
+      // An empty screen has no refs: clear any prior snapshot binding so stale refs can never resolve.
+      ctx.snapshots.delete(d.id);
+      ctx.deliveredTree?.delete(d.id);
 
       if (prevObs && prevObs.hash && prevObs.hash === hash) {
         const rawUnchanged = [
@@ -252,6 +311,9 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
       if (!cappedHead.capped && kept.length > 0) {
         if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
         (ctx.deliveredTree ??= new Set()).add(d.id);
+      } else {
+        ctx.snapshots.delete(d.id);
+        ctx.deliveredTree?.delete(d.id);
       }
       const rawUnchanged = [
         `Screen unchanged (obs=#${obsCount}, hash=${hash}${tree.snapshotId ? `, snapshot=${tree.snapshotId}` : ''}).`,
@@ -266,6 +328,9 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
     if (deliveredLines.length > 0) {
       if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
       (ctx.deliveredTree ??= new Set()).add(d.id);
+    } else {
+      ctx.snapshots.delete(d.id);
+      ctx.deliveredTree?.delete(d.id);
     }
     ctx.outlines ??= new Map();
     ctx.outlines.set(d.id, { lines: deliveredLines });
@@ -289,6 +354,9 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
   if (!lines.length) {
     const hash = outlineHash(`${stablePrefix}${tail}\nNo UI elements found — take a screenshot to see the screen.`);
     ctx.uiObs.set(d.id, { hash, count: obsCount });
+    // An empty screen has no refs: clear any prior snapshot binding so stale refs can never resolve.
+    ctx.snapshots.delete(d.id);
+    ctx.deliveredTree?.delete(d.id);
     ctx.outlines ??= new Map();
     ctx.outlines.set(d.id, { lines: [] });
     const head = `UI of ${d.name} via ${tree.source}; obs=#${obsCount} hash=${hash}; ${tail}`;

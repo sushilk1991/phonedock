@@ -23,7 +23,7 @@ import { promptWarning, registerExtraTools } from './tools-extra.ts';
 import { registerFlowTools } from './tools-flow.ts';
 import { notesHint, registerNotesTools } from './tools-notes.ts';
 import { registerTraceTools } from './tools-trace.ts';
-import { formatUiObservation, humanNeeded, resolveObserve, type FormatUiResult, type ObserveMode } from './ui-format.ts';
+import { formatUiObservation, humanNeeded, noteBatchDeviceWrite, resolveObserve, type FormatUiResult, type ObserveMode } from './ui-format.ts';
 export { humanNeeded };
 
 const VERSION = '0.4.0';
@@ -282,6 +282,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const ms = maxSize ?? DEFAULT_MAX_SIZE;
     const r = await c.screenshot(d.id, { format, maxSize: ms, quality: quality ?? (format === 'jpeg' ? 70 : undefined) });
     const std = spaceOf(d, { width: r.deviceWidth, height: r.deviceHeight }) ?? standardSpace(r.deviceWidth, r.deviceHeight);
+    noteBatchDeviceWrite(ctx, d.id);
     ctx.offSpace ??= new Map();
     const same = Math.abs(r.imageWidth - std.imageWidth) <= 1 && Math.abs(r.imageHeight - std.imageHeight) <= 1;
     let line: string;

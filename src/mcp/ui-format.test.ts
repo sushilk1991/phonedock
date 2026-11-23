@@ -214,3 +214,18 @@ test('formatUiObservation: diff baseline only records lines actually delivered t
   const rDiff = formatUiObservation({ ctx, device: dev, tree, scale, mode: 'full', diff: true });
   assert.match(rDiff.text, /\+ e110 StaticText "Item 110/);
 });
+
+test('formatUiObservation: empty read clears prior snapshot binding in both full and action modes', () => {
+  const scale = standardSpace(1200, 2400);
+  const el: UiElement = { ref: 'e8', type: 'Button', text: 'Save', clickable: true, bounds: { x: 20, y: 100, width: 200, height: 60 } };
+
+  for (const mode of ['full', 'action'] as const) {
+    const ctx = makeCtx();
+    formatUiObservation({ ctx, device: dev, tree: makeTree([el], { snapshotId: 'snap-save' }), scale, mode: 'full' });
+    assert.equal(ctx.snapshots?.get(dev.id), 'snap-save');
+
+    formatUiObservation({ ctx, device: dev, tree: makeTree([], { snapshotId: 'snap-empty' }), scale, mode });
+    assert.equal(ctx.snapshots?.get(dev.id), undefined, `empty ${mode} read must clear stale snapshot`);
+    assert.equal(ctx.deliveredTree?.has(dev.id), false, `empty ${mode} read must clear deliveredTree`);
+  }
+});

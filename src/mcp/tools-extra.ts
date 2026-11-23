@@ -9,6 +9,7 @@ import { PhoneDockApiError, type AlertActionInput, type Handoff, type SystemGest
 import { describePrompt } from '../core/prompts.ts';
 import type { Content, ToolKit, ToolResult } from './server.ts';
 import { toExpect } from './args.ts';
+import { noteBatchDeviceWrite, restoreBatchDevices, runInBatchScope, type DeviceObsSnapshot } from './ui-format.ts';
 
 /** The one-line warning get_ui / screenshot add when a system prompt is on screen. */
 export function promptWarning(p: SystemPrompt): string {
@@ -121,6 +122,7 @@ export function registerExtraTools(k: ToolKit): void {
     if (a.until !== 'idle' && !a.text && !a.element_id && !a.element_type) throw new Error(`until="${a.until}" needs text, element_id or element_type`);
     const r = await c.waitFor(d.id, { until: a.until, text: a.text, id: a.element_id, type: a.element_type, match: a.match, timeoutMs: a.timeout_ms ?? 10_000, intervalMs: a.interval_ms, stableMs: a.stable_ms });
     if (a.until === 'visible') {
+      noteBatchDeviceWrite(k.ctx, d.id);
       k.ctx.snapshots ??= new Map();
       if (r.snapshotId) k.ctx.snapshots.set(d.id, r.snapshotId); else k.ctx.snapshots.delete(d.id);
       (k.ctx.deliveredTree ??= new Set()).add(d.id);
@@ -149,45 +151,16 @@ export function registerExtraTools(k: ToolKit): void {
   }, async (a, extra) => {
     const endMode = resolveObserve(a.observe_at_end, a.screenshot_at_end);
     const stop = a.stop_on_error !== false;
-    // Snapshot all session observation state actually delivered to the agent before this batch: earlier steps are
-    // shortened to one line (and their images dropped), so hidden observations must never update ref/snapshot binding,
-    // suppression hashes, get_ui(diff=true) baselines, or off-space warnings.
-    const preSnapshots = new Map(k.ctx.snapshots);
-    const preOutlines = new Map(k.ctx.outlines);
-    const preHashes = new Map<string, string>();
-    for (const [devId, obs] of k.ctx.uiObs ?? []) preHashes.set(devId, obs.hash);
-    const preOffSpace = new Map(k.ctx.offSpace);
-    const preDelivered = new Set(k.ctx.deliveredTree);
-    const restoreDeliveredState = () => {
-      if (k.ctx.snapshots) {
-        k.ctx.snapshots.clear();
-        for (const [devId, snap] of preSnapshots) k.ctx.snapshots.set(devId, snap);
-      }
-      if (k.ctx.outlines) {
-        k.ctx.outlines.clear();
-        for (const [devId, outline] of preOutlines) k.ctx.outlines.set(devId, outline);
-      }
-      if (k.ctx.uiObs) {
-        for (const [devId, obs] of k.ctx.uiObs) {
-          k.ctx.uiObs.set(devId, { ...obs, hash: preHashes.get(devId) ?? '' });
-        }
-      }
-      if (k.ctx.offSpace) {
-        k.ctx.offSpace.clear();
-        for (const [devId, off] of preOffSpace) k.ctx.offSpace.set(devId, off);
-      }
-      if (k.ctx.deliveredTree) {
-        k.ctx.deliveredTree.clear();
-        for (const devId of preDelivered) k.ctx.deliveredTree.add(devId);
-      }
-    };
+    // Track pre-batch state ONLY for devices this batch actually touches, so rolling back hidden observations
+    // never disturbs concurrent observations on other devices.
+    const touchedDevices = new Map<string, DeviceObsSnapshot>();
     const lines: string[] = []; let failed = 0; let ran = 0;
     let last: ToolResult | undefined;
     let lastStep: { tool: string; args?: Record<string, unknown> } | undefined;
     const t0 = Date.now();
     for (const [i, s] of a.steps.entries()) {
-      // Every prior step is no longer the last step, so its observation was not delivered; roll back its session state.
-      if (i > 0) restoreDeliveredState();
+      // Every prior step is no longer the last step, so its observation was not delivered; roll back only devices it touched.
+      if (i > 0) restoreBatchDevices(k.ctx, touchedDevices);
       const n = i + 1;
       let r: ToolResult;
       const h = handlers.get(s.tool);
@@ -197,7 +170,7 @@ export function registerExtraTools(k: ToolKit): void {
       else {
         const args: Record<string, unknown> = { ...(s.args ?? {}) };
         if (a.device && args.device === undefined) args.device = a.device;
-        try { r = await h(args, extra); } catch (e) { r = errorResult(e); }
+        try { r = await runInBatchScope(touchedDevices, () => h(args, extra)); } catch (e) { r = errorResult(e); }
         ran++;
       }
       last = r;
