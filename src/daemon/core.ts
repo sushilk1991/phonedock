@@ -305,13 +305,15 @@ export async function withTransition<T>(id: string, kind: Transition, fn: () => 
   finally { transitions.delete(id); if (kind !== 'restoring') recentlyStopped.set(id, Date.now()); invalidateDevices(); }
 }
 // ── per-device launch secrets (in-memory only, bounded) ─────────────────────
-// Kept until the device shuts down, is deleted, or the daemon restarts, so observations and `flow save`
-// never record or emit launch secret values shown on screen after the launch request returns.
-export const MAX_DEVICE_LAUNCH_SECRETS = 128;
+// Kept until the device shuts down, disappears from inventory, is deleted, or the daemon restarts, so observations
+// and `flow save` never record or emit launch secret values shown on screen after the launch request returns.
+export const MAX_DEVICE_LAUNCH_SECRETS = 1024;
+export const MAX_LAUNCH_SECRET_DEVICES = 128;
 const launchSecrets = new Map<string, string[]>();
 export function rememberLaunchSecrets(id: string, secrets: readonly string[]) {
   if (!secrets.length) return;
   const list = launchSecrets.get(id) ?? [];
+  launchSecrets.delete(id);
   for (const s of secrets) {
     if (!s) continue;
     const idx = list.indexOf(s);
@@ -320,6 +322,11 @@ export function rememberLaunchSecrets(id: string, secrets: readonly string[]) {
   }
   if (list.length > MAX_DEVICE_LAUNCH_SECRETS) list.splice(0, list.length - MAX_DEVICE_LAUNCH_SECRETS);
   launchSecrets.set(id, list);
+  while (launchSecrets.size > MAX_LAUNCH_SECRET_DEVICES) {
+    const oldest = launchSecrets.keys().next().value;
+    if (oldest === undefined) break;
+    launchSecrets.delete(oldest);
+  }
 }
 export function deviceLaunchSecrets(id: string): string[] { return [...(launchSecrets.get(id) ?? [])]; }
 export function clearLaunchSecrets(id: string) { launchSecrets.delete(id); }
@@ -477,7 +484,7 @@ export async function pollDevices(fresh = true) {
       seen.set(d.id, key);
       if (lastSeen.get(d.id) !== key) emit('device', d);
     }
-    for (const [id] of lastSeen) if (!seen.has(id)) emit('device', { ...(lastDevices.get(id) ?? { id }), state: 'unknown', removed: true });
+    for (const [id] of lastSeen) if (!seen.has(id)) { clearLaunchSecrets(id); emit('device', { ...(lastDevices.get(id) ?? { id }), state: 'unknown', removed: true }); }
     lastSeen = seen; lastDevices = new Map(list.map((d) => [d.id, d]));
   } catch { /* ignore */ } finally { polling = false; }
 }

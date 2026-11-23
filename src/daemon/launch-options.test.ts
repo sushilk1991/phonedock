@@ -182,8 +182,9 @@ test('per-device launch secrets: scrub later observations & flow save, clear on 
     core.dropLeaseOnStop(dev);
     assert.deepEqual(core.deviceLaunchSecrets(dev), []);
 
-    // Bounded cap: FIFO eviction keeps newest MAX_DEVICE_LAUNCH_SECRETS entries
+    // Bounded cap: FIFO eviction keeps newest MAX_DEVICE_LAUNCH_SECRETS (1024) entries
     const cap = core.MAX_DEVICE_LAUNCH_SECRETS;
+    assert.equal(cap, 1024);
     for (let i = 0; i < cap + 5; i++) core.rememberLaunchSecrets(dev, [`sec-${String(i).padStart(4, '0')}`]);
     const kept = core.deviceLaunchSecrets(dev);
     assert.equal(kept.length, cap);
@@ -192,6 +193,50 @@ test('per-device launch secrets: scrub later observations & flow save, clear on 
     assert.ok(kept.includes('sec-0005'));
     assert.ok(kept.includes(`sec-${String(cap + 4).padStart(4, '0')}`));
     core.clearLaunchSecrets(dev);
+
+    // Secrets are registered BEFORE backend launch so a post-delivery failure still protects later observations
+    const failDev = 'fake-launch-ios:pdtest-fail-after-send';
+    const failSecret = 'post-delivery-secret-7744';
+    failWith = new PhoneDockError('Timed out after starting app', 'launch_failed', 500);
+    try {
+      await fails(call('POST', `/v1/devices/${encodeURIComponent(failDev)}/apps/com.example.app/launch`, {
+        args: { token: failSecret },
+      }));
+      assert.ok(core.deviceLaunchSecrets(failDev).includes(failSecret));
+      noteScreen(failDev, {
+        source: 'accessibility',
+        capturedAt: new Date().toISOString(),
+        screen: { width: 390, height: 844 },
+        root: [{ ref: 'e1', type: 'StaticText', text: `Shown: ${failSecret}`, bounds: { x: 10, y: 120, width: 200, height: 30 } }],
+      });
+      assert.ok(!JSON.stringify(readObservations(failDev)).includes(failSecret), 'failed launch secret leaked into observations');
+    } finally {
+      failWith = undefined;
+      core.clearLaunchSecrets(failDev);
+    }
+
+    // Disappearing from inventory clears a device's launch secrets
+    const goneDev = 'fake-launch-ios:pdtest-gone';
+    let present = true;
+    fakeIos.listDevices = async () => present ? [{
+      id: goneDev, backend: 'fake-launch-ios', nativeId: 'pdtest-gone', name: 'pdtest-gone',
+      platform: 'ios', kind: 'virtual', state: 'running', managed: true, capabilities: ['launch'],
+    }] : [];
+    await core.pollDevices(true);
+    core.rememberLaunchSecrets(goneDev, ['disappeared-secret']);
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['disappeared-secret']);
+    present = false;
+    await core.pollDevices(true);
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), []);
+
+    // Tracked device count is capped (LRU eviction)
+    const devCap = core.MAX_LAUNCH_SECRET_DEVICES;
+    for (let i = 0; i < devCap + 5; i++) core.rememberLaunchSecrets(`fake-launch-ios:cap-${i}`, [`dsec-${i}`]);
+    assert.deepEqual(core.deviceLaunchSecrets('fake-launch-ios:cap-0'), []);
+    assert.deepEqual(core.deviceLaunchSecrets('fake-launch-ios:cap-4'), []);
+    assert.deepEqual(core.deviceLaunchSecrets('fake-launch-ios:cap-5'), ['dsec-5']);
+    assert.deepEqual(core.deviceLaunchSecrets(`fake-launch-ios:cap-${devCap + 4}`), [`dsec-${devCap + 4}`]);
+    for (let i = 0; i < devCap + 5; i++) core.clearLaunchSecrets(`fake-launch-ios:cap-${i}`);
   } finally {
     fakeIos.listDevices = origList;
   }

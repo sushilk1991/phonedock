@@ -379,4 +379,21 @@ steps:
   );
   assert.ok(!onlySecret.text.includes('alpha-secret'));
   assert.ok(!onlySecret.text.includes('assert_visible'));
+
+  // Structural fields (timestamps, action names, owners, ids) must never be corrupted by secret redaction
+  const structural = flowFromLog(
+    [
+      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['year'] } },
+      { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: 'Continue', id: 'btn_tap' } } },
+      { at: '2026-11-23T10:00:02.000Z', owner: 'mcp:a:1', action: { action: 'type', text: 'pin 2026' } },
+    ],
+    [
+      { at: '2026-11-23T10:00:03.000Z', kind: 'screen', sig: 's3', texts: ['Code 2026', 'Dashboard'] },
+    ],
+    { owner: 'mcp:a:1', since: '2026-11-23T09:59:00.000Z', secrets: ['2026', 'tap', 'mcp'] },
+  );
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'tap' && s.sel?.id === 'btn_tap' && s.sel?.text === 'Continue'), `tap step corrupted: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'type' && s.text === 'pin •••'), `typed secret not redacted: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'assert_visible' && s.sel.text === 'Dashboard'), `expected Dashboard assert: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(!structural.flow.steps.some((s) => s.kind === 'assert_visible' && (s.sel.text ?? '').includes('2026')));
 });

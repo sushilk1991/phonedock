@@ -613,18 +613,50 @@ function pct(x: number, y: number, screen?: { width: number; height: number }): 
   return { x: +(x / screen.width * 100).toFixed(1), y: +(y / screen.height * 100).toFixed(1), unit: '%' };
 }
 
+/** Redact secret substrings only in user/content fields of a Step — never structural fields (kind, app, ids, types). */
+function redactStepContent(step: Step, secrets: readonly string[]): Step {
+  if (!secrets.length) return step;
+  const scrub = (s: string) => redactSecretStrings(s, secrets);
+  switch (step.kind) {
+    case 'fill': return { ...step, value: scrub(step.value) };
+    case 'type': return { ...step, text: scrub(step.text) };
+    case 'assert_visible': case 'assert_not_visible':
+      return step.sel.text !== undefined ? { ...step, sel: { ...step.sel, text: scrub(step.sel.text) } } : step;
+    case 'assert_text':
+      return {
+        ...step,
+        ...(step.equals !== undefined ? { equals: scrub(step.equals) } : {}),
+        ...(step.contains !== undefined ? { contains: scrub(step.contains) } : {}),
+        ...(step.matches !== undefined ? { matches: scrub(step.matches) } : {}),
+      };
+    case 'launch': {
+      let args = step.arguments;
+      if (Array.isArray(args)) args = args.map(scrub);
+      else if (args && typeof args === 'object') {
+        args = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? scrub(v) : v]));
+      }
+      const env = step.env ? Object.fromEntries(Object.entries(step.env).map(([k, v]) => [k, scrub(v)])) : undefined;
+      return { ...step, ...(args !== undefined ? { arguments: args } : {}), ...(env !== undefined ? { env } : {}) };
+    }
+    default: return step;
+  }
+}
+
 /** Turn an action log (+ screen observations) into a clean flow. Pure: the daemon reads the files and calls this. */
 export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: FromLogOptions = {}): FromLogResult {
-  const safeEntriesIn = o.secrets?.length ? redactSecretStrings(entriesIn, o.secrets) : entriesIn;
-  const safeObsIn = o.secrets?.length ? redactSecretStrings(obsIn, o.secrets) : obsIn;
+  const secrets = o.secrets?.length ? o.secrets : [];
   const t = (s: string) => Date.parse(s);
   const inRange = (at: string) => (!o.since || t(at) >= t(o.since)) && (!o.until || t(at) <= t(o.until));
-  const entries = safeEntriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
+  const entries = entriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
   // Only one owner's actions: screens after someone else took over the device are not this session's.
   const lastOwn = entries.length ? t(entries[entries.length - 1].at) : -Infinity;
-  const takeover = o.owner ? safeEntriesIn.find((e) => e && e.at && t(e.at) > lastOwn && e.owner !== 'daemon' && !ownerOk(e.owner, o.owner) && !/^lease\./.test(String(e.action?.action ?? ''))) : undefined;
+  const takeover = o.owner ? entriesIn.find((e) => e && e.at && t(e.at) > lastOwn && e.owner !== 'daemon' && !ownerOk(e.owner, o.owner) && !/^lease\./.test(String(e.action?.action ?? ''))) : undefined;
   const cutoff = takeover ? t(takeover.at) : Infinity;
-  const obs = safeObsIn.filter((x) => x && x.at && inRange(x.at) && t(x.at) < cutoff && (x.kind === 'screen' || ownerOk(x.owner, o.owner)));
+  const obsRaw = obsIn.filter((x) => x && x.at && inRange(x.at) && t(x.at) < cutoff && (x.kind === 'screen' || ownerOk(x.owner, o.owner)));
+  // Redact only content fields (screen texts) after filtering, never timestamps, owners, action names, or ids.
+  const obs = secrets.length
+    ? obsRaw.map((x) => (x.kind === 'screen' ? { ...x, texts: x.texts.map((s) => redactSecretStrings(s, secrets)) } : x))
+    : obsRaw;
   const warnings: string[] = []; const dropped: string[] = [];
   const counts = new Map<string, number>(); const bump = (one: string, many: string) => { const k = `${one}\u0000${many}`; counts.set(k, (counts.get(k) ?? 0) + 1); };
 
@@ -865,7 +897,7 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
   steps = final;
   const lastAct = [...steps].reverse().find((r) => r.src >= 0);
   if (o.assertions?.length) {
-    for (const s of o.assertions) { steps.push({ step: s, at: o.now ?? new Date().toISOString(), src: -1, note: 'explicit' }); nAssert++; }
+    for (const s of o.assertions) { steps.push({ step: redactStepContent(s, secrets), at: o.now ?? new Date().toISOString(), src: -1, note: 'explicit' }); nAssert++; }
   } else if (auto && lastAct && !isCheck(steps[steps.length - 1]?.step)) {
     const after = finalScreen && t(finalScreen.at) >= t(lastAct.at) && finalScreen !== lastAct.before ? finalScreen : undefined;
     const already = steps.filter((r) => r.step.kind === 'assert_visible').map((r) => (r.step as { sel: Selector }).sel.text ?? '');
@@ -873,6 +905,9 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
     if (txt) { steps.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: after!.at, src: -1, note: 'auto' }); nAssert++; }
     else warnings.push(after ? 'nothing distinctive on the final screen to assert: add an assert_visible yourself' : 'the screen was not read after the last step, so there is no final assertion: add one (or read the screen and save again)');
   }
+
+  // Redact content fields on built steps after parsing/cleanup so structural fields are never corrupted.
+  if (secrets.length) steps = steps.map((r) => ({ ...r, step: redactStepContent(r.step, secrets) }));
 
   // ── header ─────────────────────────────────────────────────────────────
   const launched = steps.map((r) => r.step).filter((s): s is Extract<Step, { kind: 'launch' }> => s.kind === 'launch').map((s) => s.app!).filter(Boolean);

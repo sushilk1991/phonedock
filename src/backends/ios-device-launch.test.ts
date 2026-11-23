@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { backend, buildDevicectlArgs, buildDevicectlLaunchArgs } from './ios-device.ts';
+import { PhoneDockError } from '../core/types.ts';
 
 test('ios-device devicectl launch: --json-output and --quiet always precede `--` separator', () => {
   const withArgs = buildDevicectlArgs(
@@ -92,6 +93,57 @@ test('ios-device WDA launch: terminates running app before launching when args o
     assert.deepEqual(appCalls3, [
       { method: 'POST', url: '/session/sess-1/wda/apps/launch', body: { bundleId: 'com.example.app' } },
     ]);
+  } finally {
+    if (prevWda === undefined) delete process.env.PHONEDOCK_WDA_URL;
+    else process.env.PHONEDOCK_WDA_URL = prevWda;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('ios-device WDA launch: failed terminate aborts with launch_failed (not_sent); "not running" proceeds', async () => {
+  let terminateMode: 'error' | 'not_running' = 'error';
+  const requests: { method: string; url: string; body: unknown }[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const body = raw ? JSON.parse(raw) : undefined;
+      requests.push({ method: req.method ?? '', url: req.url ?? '', body });
+      if (req.url === '/session') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ value: { sessionId: 'sess-err' } }));
+        return;
+      }
+      if (req.url?.endsWith('/wda/apps/terminate')) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        const msg = terminateMode === 'error' ? 'Failed to terminate application' : 'Application is not running';
+        res.end(JSON.stringify({ value: { error: 'unknown error', message: msg } }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ value: null }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  const prevWda = process.env.PHONEDOCK_WDA_URL;
+  process.env.PHONEDOCK_WDA_URL = `http://127.0.0.1:${port}`;
+  try {
+    // Non-"not running" terminate failure must abort launch with launch_failed + not_sent
+    terminateMode = 'error';
+    await assert.rejects(
+      () => backend.launchApp!('udid-wda-err', 'com.example.app', { args: ['-UITesting'] }),
+      (e: unknown) => e instanceof PhoneDockError && e.code === 'launch_failed' && e.delivery === 'not_sent',
+    );
+    assert.equal(requests.filter((r) => r.url.endsWith('/wda/apps/launch')).length, 0, 'must not call launch after failed terminate');
+
+    // "not running" terminate response proceeds cleanly to launch with options
+    requests.length = 0;
+    terminateMode = 'not_running';
+    await backend.launchApp!('udid-wda-err', 'com.example.app', { args: ['-UITesting'] });
+    assert.equal(requests.filter((r) => r.url.endsWith('/wda/apps/launch')).length, 1);
   } finally {
     if (prevWda === undefined) delete process.env.PHONEDOCK_WDA_URL;
     else process.env.PHONEDOCK_WDA_URL = prevWda;

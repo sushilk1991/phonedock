@@ -993,7 +993,23 @@ export const backend: Backend & {
     const argv = iosLaunchArgv(opts?.args);
     if (wdaUrl(udid)) {
       // WDA only applies arguments/environment when starting a new process; terminate first when options are given.
-      if (withOpts) await wdaSession(udid, 'POST', '/wda/apps/terminate', { bundleId: appId }).catch(() => undefined);
+      if (withOpts) {
+        try {
+          await wdaSession(udid, 'POST', '/wda/apps/terminate', { bundleId: appId });
+        } catch (e) {
+          const msg = `${(e as Error)?.message ?? ''} ${(e as PhoneDockError)?.detail ?? ''}`;
+          if (!/not running|isn['’]t running|no such process/i.test(msg)) {
+            throw new PhoneDockError(
+              'Couldn’t restart the app with new launch options',
+              'launch_failed',
+              502,
+              ['Check that WebDriverAgent is reachable and retry launching the app.'],
+              `Failed to terminate existing ${appId} before launching with options: ${(e as PhoneDockError)?.detail ?? (e as Error)?.message ?? String(e)}`,
+              'not_sent',
+            );
+          }
+        }
+      }
       const payload: Record<string, unknown> = { bundleId: appId };
       if (argv.length) payload.arguments = argv;
       if (opts?.env && Object.keys(opts.env).length) payload.environment = opts.env;

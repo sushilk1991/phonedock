@@ -152,6 +152,8 @@ export function parseLaunchFlags(argv: string[], _a?: ParsedArgs): { args?: Laun
   const argSources = [posArgs.length > 0, extrasRaw.length > 0, argsJsonRaw !== undefined].filter(Boolean).length;
   if (argSources > 1) usage('launch: pass only one of --arg, --extra, or --args-json');
 
+  const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
+
   let args: LaunchArgs | undefined;
   if (posArgs.length) {
     args = posArgs;
@@ -160,13 +162,20 @@ export function parseLaunchFlags(argv: string[], _a?: ParsedArgs): { args?: Laun
     for (const kv of extrasRaw) {
       const i = kv.indexOf('=');
       if (i < 1) usage(`--extra takes KEY=VALUE (got "${kv}")`);
-      map[kv.slice(0, i)] = kv.slice(i + 1);
+      const k = kv.slice(0, i);
+      if (forbiddenKeys.has(k)) usage(`Invalid launch argument key ${JSON.stringify(k)}`);
+      map[k] = kv.slice(i + 1);
     }
     args = map;
   } else if (argsJsonRaw !== undefined) {
     let parsed: unknown;
     try { parsed = JSON.parse(argsJsonRaw); } catch (e) { usage(`--args-json is not valid JSON: ${(e as Error).message}`); }
     if (!Array.isArray(parsed) && (!parsed || typeof parsed !== 'object')) usage('--args-json must be a JSON array or object');
+    if (!Array.isArray(parsed)) {
+      for (const k of Object.keys(parsed as Record<string, unknown>)) {
+        if (forbiddenKeys.has(k)) usage(`Invalid launch argument key ${JSON.stringify(k)}`);
+      }
+    }
     args = parsed as LaunchArgs;
   }
 
@@ -176,7 +185,9 @@ export function parseLaunchFlags(argv: string[], _a?: ParsedArgs): { args?: Laun
     for (const kv of envRaw) {
       const i = kv.indexOf('=');
       if (i < 1) usage(`--env takes NAME=VALUE (got "${kv}")`);
-      env[kv.slice(0, i)] = kv.slice(i + 1);
+      const k = kv.slice(0, i);
+      if (forbiddenKeys.has(k)) usage(`Invalid environment variable name ${JSON.stringify(k)} (expected [A-Za-z_][A-Za-z0-9_]*)`);
+      env[k] = kv.slice(i + 1);
     }
   }
   return { ...(args !== undefined ? { args } : {}), ...(env !== undefined ? { env } : {}) };

@@ -19,17 +19,31 @@ export function runBuffer(cmd: string, args: string[], opts: RunOptions = {}): P
     assertInputFence();
     const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], ...spawnOpts });
     const out: Buffer[] = []; let outLen = 0; let err = '';
+    let stdinErr: NodeJS.ErrnoException | undefined;
+    let settled = false;
     let timer: NodeJS.Timeout | undefined;
     if (timeoutMs > 0) timer = setTimeout(() => { child.kill('SIGKILL'); }, timeoutMs);
+    child.stdin!.on('error', (e: NodeJS.ErrnoException) => { stdinErr = e; });
     child.stdout!.on('data', (d: Buffer) => { outLen += d.length; if (outLen <= maxBuffer) out.push(d); });
     child.stderr!.on('data', (d: Buffer) => { if (err.length < 1_000_000) err += d.toString(); });
-    child.on('error', (e) => { if (timer) clearTimeout(timer); reject(new PhoneDockError(failureMessage, 'exec_failed', 500, undefined, `${cmd} ${args.join(' ')}: ${e.message}`)); });
-    child.on('close', (code, signal) => {
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
-      const c = code ?? (signal ? 137 : 1);
-      const res = { stdout: Buffer.concat(out), stderr: err, code: c };
+      reject(new PhoneDockError(failureMessage, 'exec_failed', 500, undefined, `${cmd} ${args.join(' ')}: ${e.message}`));
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      let stderr = err;
+      if (stdinErr && input !== undefined) {
+        stderr = stderr ? `${stderr}\nstdin write error: ${stdinErr.message}` : `stdin write error: ${stdinErr.message}`;
+      }
+      const c = code !== null && code !== 0 ? code : (signal ? 137 : stdinErr && input !== undefined ? 1 : (code ?? 1));
+      const res = { stdout: Buffer.concat(out), stderr, code: c };
       if (c !== 0 && !allowFail) {
-        reject(new PhoneDockError(failureMessage, 'exec_failed', 500, undefined, `${cmd} ${args.join(' ')} exited ${c}${signal ? ` (${signal})` : ''}: ${Buffer.from(err.trim()).subarray(0, 2048).toString('utf8')}`));
+        reject(new PhoneDockError(failureMessage, 'exec_failed', 500, undefined, `${cmd} ${args.join(' ')} exited ${c}${signal ? ` (${signal})` : ''}: ${Buffer.from(stderr.trim()).subarray(0, 2048).toString('utf8')}`));
       } else resolve(res);
     });
     if (input !== undefined) child.stdin!.end(input); else child.stdin!.end();

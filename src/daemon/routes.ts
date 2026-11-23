@@ -651,8 +651,8 @@ r.post('/v1/devices/:id/apps/:appId/launch', inputRoute(async (c) => {
   const body = await c.body().catch(() => ({} as Record<string, unknown>));
   const launchOpts = validateLaunchOptions(body.args, body.env);
   const exp = await prepareExpect({ id, b, nid }, body.expect);
-  await need(b, 'launchApp', 'launch')(nid, appId, launchOpts);
   rememberLaunchSecrets(id, launchSecretValues(launchOpts));
+  await need(b, 'launchApp', 'launch')(nid, appId, launchOpts);
   logAction(id, c.owner, { action: 'launch', appId, ...launchLogMeta(launchOpts) });
   const front = body.verify === false || !b.foregroundApp ? {} : await confirmInFront(b, nid, appId, 3000, launchOpts);
   const expect = exp ? await finishExpect({ id, b, nid }, exp) : undefined;

@@ -106,4 +106,20 @@ test('parseLaunchFlags: --arg (including leading dash), --extra, --args-json, --
     args: ['--extra', '--args-json'],
     env: { K: '--arg' },
   });
+
+  // __proto__, constructor, and prototype keys must be rejected by the CLI (never silently dropped)
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    assert.throws(
+      () => parseLaunchFlags(['launch', 'sim', 'com.example', '--extra', `${key}=value`]),
+      /Invalid launch argument key/,
+    );
+    assert.throws(
+      () => parseLaunchFlags(['launch', 'sim', 'com.example', '--args-json', `{"${key}":"value"}`]),
+      /Invalid launch argument key/,
+    );
+    assert.throws(
+      () => parseLaunchFlags(['launch', 'sim', 'com.example', '--env', `${key}=value`]),
+      /Invalid environment variable name/,
+    );
+  }
 });
