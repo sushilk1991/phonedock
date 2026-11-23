@@ -10,13 +10,15 @@ import type { Device, Job, DeviceSpec, Expect, ExpectReport, InputAction, OsImag
 import { parseArgs, str, num, bool, table, type ParsedArgs } from './args.ts';
 import { localTime } from '../backends/ios-common.ts';
 import { appNotesDir, appNotesPath } from '../core/app-notes.ts';
-import { FLOW_HELP, flowCmd, testCmd } from './flow-cmds.ts';
-import { TRACE_USAGE, traceCmd } from './trace-cmds.ts';
 import { parseEnvironmentAction } from '../core/environment.ts';
 
 const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | rm <appId> | path [appId]';
 
-const HELP = `phonedock – device runtime for AI agents
+// Keep flow parsing, visual comparison and report generation out of ordinary CLI startup.
+// Help still uses the commands' own text, so it cannot drift from their usage output.
+async function helpText(): Promise<string> {
+  const [{ FLOW_HELP }, { TRACE_USAGE }] = await Promise.all([import('./flow-cmds.ts'), import('./trace-cmds.ts')]);
+  return `phonedock – device runtime for AI agents
 
 Usage: phonedock <command> [args] [--json] [--owner NAME]
 
@@ -79,6 +81,7 @@ Misc:       jobs [jobId] | watch | mcp [--http PORT] [--profile all|runtime | --
 
 <id> accepts the full device id, the native id, or a unique name / prefix.
 Coordinates are device screenshot pixels. Env: PHONEDOCK_PORT, PHONEDOCK_HOME, PHONEDOCK_OWNER.`;
+}
 
 class UsageError extends Error {}
 
@@ -298,8 +301,8 @@ export async function run(argv: string[]): Promise<number> {
   const a = parseArgs(argv);
   JSON_OUT = !!a.flags.json;
   const cmd = a.positionals[0]; CMD = cmd;
-  if (!cmd || cmd === 'help' || (a.flags.help && !cmd)) { process.stdout.write(HELP + '\n'); return 0; }
-  if (a.flags.help) { process.stdout.write(HELP + '\n'); return 0; }
+  if (!cmd || cmd === 'help' || (a.flags.help && !cmd)) { process.stdout.write(await helpText() + '\n'); return 0; }
+  if (a.flags.help) { process.stdout.write(await helpText() + '\n'); return 0; }
 
   const owner = str(a.flags, 'owner') ?? process.env.PHONEDOCK_OWNER ?? `cli:${userInfo().username}`;
   const c = new PhoneDockClient({ owner, baseUrl: str(a.flags, 'url'), token: str(a.flags, 'token'), autoStart: a.flags.autoStartDaemon !== false });
@@ -890,9 +893,15 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     case 'home': out({ home: phonedockHome() }, () => phonedockHome()); return 0;
-    case 'flow': case 'flows': return flowCmd(c, a, argv, JSON_OUT);
-    case 'test': return testCmd(c, a, argv, JSON_OUT);
-    case 'trace': case 'perf': return traceCmd(c, a, JSON_OUT);
+    case 'flow': case 'flows': {
+      const { flowCmd } = await import('./flow-cmds.ts'); return flowCmd(c, a, argv, JSON_OUT);
+    }
+    case 'test': {
+      const { testCmd } = await import('./flow-cmds.ts'); return testCmd(c, a, argv, JSON_OUT);
+    }
+    case 'trace': case 'perf': {
+      const { traceCmd } = await import('./trace-cmds.ts'); return traceCmd(c, a, JSON_OUT);
+    }
     default: usage(`Unknown command "${cmd}". Run \`phonedock help\`.`);
   }
 }
@@ -917,7 +926,7 @@ export function cliDetail(detail?: string): string | undefined {
   return kept || undefined;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   try {
     const code = await run(process.argv.slice(2));
     if (code >= 0) process.exitCode = code;

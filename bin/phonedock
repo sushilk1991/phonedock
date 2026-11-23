@@ -17,4 +17,4 @@ fi
 if [ -f "$root/dist/cli/phonedock.mjs" ] && [ ! -f "$root/src/cli/main.ts" ]; then
   exec "$node_bin" "$root/dist/cli/phonedock.mjs" "$@"
 fi
-exec "$node_bin" --no-warnings=ExperimentalWarning "$root/src/cli/main.ts" "$@"
+exec "$node_bin" --no-warnings=ExperimentalWarning "$root/bin/phonedock.mjs" "$@"
