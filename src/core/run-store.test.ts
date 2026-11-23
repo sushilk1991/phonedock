@@ -207,6 +207,31 @@ test('formatRunMarkdown: replaces non-standard absolute roots and ~/ paths with 
   assert.match(md, /`login\.yaml`/);
   assert.match(md, /https:\/\/example\.com\/docs\/flows/);
   assert.match(md, /flows\/settings\.yaml/);
+
+  const mdExtra = formatRunMarkdown(sampleRun({
+    status: 'fail',
+    message: 'Check file://localhost/srv/private/baseline.png, file:///single.png, and \\\\fileserver\\share\\project\\diff.png',
+    flow: {
+      name: 'URI and UNC check',
+      file: '\\\\fileserver\\share\\flows\\unc.yaml',
+      fileDisplay: 'file://localhost/srv/flows/uri.yaml',
+      sha256: 'e'.repeat(64),
+    },
+    steps: [
+      { index: 1, description: 'compare \\\\corp-nas\\qa\\expected.png', status: 'fail', ms: 50, message: 'URI: file:///srv/private/actual.png' },
+    ],
+  }));
+  assert.doesNotMatch(mdExtra, /file:\/\//i);
+  assert.doesNotMatch(mdExtra, /localhost/);
+  assert.doesNotMatch(mdExtra, /fileserver/);
+  assert.doesNotMatch(mdExtra, /corp-nas/);
+  assert.doesNotMatch(mdExtra, /\\\\/);
+  assert.match(mdExtra, /baseline\.png/);
+  assert.match(mdExtra, /single\.png/);
+  assert.match(mdExtra, /diff\.png/);
+  assert.match(mdExtra, /expected\.png/);
+  assert.match(mdExtra, /actual\.png/);
+  assert.match(mdExtra, /`uri\.yaml`/);
 });
 
 test('listRunSummaries & pruneRuns: sort by Date.parse(startedAt) with id tiebreak and skip corrupt manifests', () => {

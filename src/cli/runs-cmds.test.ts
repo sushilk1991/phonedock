@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PhoneDockClient } from '../sdk/client.ts';
+import { PhoneDockApiError, PhoneDockClient } from '../sdk/client.ts';
 import { parseArgs } from './args.ts';
 import { runsCmd } from './runs-cmds.ts';
 
@@ -57,5 +57,25 @@ test('PhoneDockClient.exportRun(id, "json") and `runs export --format json` retu
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('PhoneDockClient.exportRun wraps post-header stream failures as PhoneDockApiError (daemon_unreachable)', async () => {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': '500' });
+    res.write('{"partial":');
+    res.socket?.destroy();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  assert.ok(addr && typeof addr !== 'string');
+  const client = new PhoneDockClient({ baseUrl: `http://127.0.0.1:${addr.port}`, token: 'test-token', autoStart: false });
+  try {
+    await assert.rejects(
+      client.exportRun('2026-11-23T12-00-00-000Z-a1b2', 'json'),
+      (e: unknown) => e instanceof PhoneDockApiError && e.code === 'daemon_unreachable' && e.status === 0,
+    );
+  } finally {
+    server.close();
   }
 });

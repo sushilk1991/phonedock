@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { parseFlow } from './flow.ts';
 import { junitXml, runFlow, runFlowFiles, screenNow, type FlowClient } from './flow-runner.ts';
-import { sha256Hex, toRunSummary, validateRunRecord } from './run-store.ts';
+import { formatRunMarkdown, sha256Hex, toRunSummary, validateRunRecord } from './run-store.ts';
 import type { ElementMatch, RunRecord } from './types.ts';
 
 // A fake PhoneDock client playing the sample app: a name field, Greet, a greeting, a Notifications switch.
@@ -582,5 +582,54 @@ steps:
       'appInfo:com.example.interpolated',
       'releaseLease',
     ]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('runner: redacts secrets appearing in flow, device, and app display names across record, md export, and suite report', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: RunRecord[] = [];
+  const secret = 'SecretDisplay99';
+  const origDevice = c.device;
+  c.device = async (id) => ({ ...(await origDevice(id)), name: `Phone ${secret}` });
+  c.appInfo = async (_id, appId) => ({ id: appId, name: `App ${secret}`, version: '1.2.3', build: '45', system: false });
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.type = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.saveRun = async (rec) => {
+    const valid = validateRunRecord(rec);
+    saved.push(valid);
+    return toRunSummary(valid);
+  };
+  try {
+    const flowPath = join(dir, 'names.yaml');
+    writeFileSync(flowPath, `name: "Flow ${secret}"
+appId: com.example.names
+steps:
+  - launch
+  - type:
+      text: "${secret}"
+      secret: true
+`);
+    const suite = await runFlowFiles(c, [flowPath], {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      settle: false,
+    });
+    assert.equal(suite.passed, 1);
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.flow.name, 'Flow •••');
+    assert.equal(rec.device.name, 'Phone •••');
+    assert.equal(rec.app.name, 'App •••');
+    // Structural fields stay intact
+    assert.equal(rec.device.platform, 'android');
+    assert.equal(rec.app.id, 'com.example.names');
+    assert.equal(rec.app.version, '1.2.3');
+    assert.equal(rec.app.build, '45');
+    // Neither record, Markdown export, FlowResult, nor suite HTML report leaks the secret
+    assert.ok(!JSON.stringify(rec).includes(secret), 'RunRecord leaked secret in display name');
+    assert.ok(!formatRunMarkdown(rec).includes(secret), 'Markdown export leaked secret in display name');
+    assert.ok(!JSON.stringify(suite.flows[0]).includes(secret), 'FlowResult leaked secret in display name');
+    assert.ok(suite.report && !readFileSync(suite.report, 'utf8').includes(secret), 'Suite HTML report leaked secret in display name');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -261,7 +261,7 @@ struct RunDetailSheet: View {
     private func detailBody(_ r: RunRecord) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.l) {
-                if let msg = r.message, !msg.isEmpty {
+                if let msg = bannerMessage(for: r) {
                     HStack(alignment: .top, spacing: Theme.Space.m) {
                         Image(systemName: r.status == "fail" ? "exclamationmark.triangle.fill" : "info.circle.fill")
                             .foregroundStyle(RunFormat.tint(r.status))
@@ -359,6 +359,17 @@ struct RunDetailSheet: View {
             .padding(Theme.Space.xxl)
         }
         .background(Theme.Surface.window)
+    }
+
+    private func bannerMessage(for r: RunRecord) -> String? {
+        guard let msg = r.message, !msg.isEmpty else { return nil }
+        if r.status == "fail",
+           let failedStep = r.steps.first(where: { $0.status == "fail" && !($0.message ?? "").isEmpty }),
+           let stepMsg = failedStep.message,
+           msg.contains(stepMsg) {
+            return "Failed at step \(failedStep.index): \(failedStep.description)"
+        }
+        return msg
     }
 
     private func provenanceRow(_ label: String, _ value: String, mono: Bool = false) -> some View {

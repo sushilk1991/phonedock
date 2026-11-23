@@ -180,11 +180,13 @@ export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promi
   return safeRes;
 }
 
-/** Redact free-text fields in FlowResult without corrupting status enums, timestamps, or file paths. */
+/** Redact free-text fields (including display names) in FlowResult without corrupting status enums, timestamps, or file paths. */
 function redactFlowResult(res: FlowResult, secrets: readonly string[]): FlowResult {
   if (!secrets.length) return res;
   return {
     ...res,
+    name: redactText(res.name, secrets),
+    ...(res.device !== undefined ? { device: redactText(res.device, secrets) } : {}),
     ...(res.message !== undefined ? { message: redactText(res.message, secrets) } : {}),
     steps: res.steps.map((s) => {
       const { kind, ...rest } = s.step;
@@ -198,13 +200,25 @@ function redactFlowResult(res: FlowResult, secrets: readonly string[]): FlowResu
   };
 }
 
-/** Redact only free-text content (messages, step descriptions and notes) in RunRecord.
+/** Redact free-text content (display names, messages, step descriptions and notes) in RunRecord.
  *  Never redacts ids, enums, platform, backend, version, build, timestamps, or hashes. */
 function redactRunRecord(record: RunRecord, secrets: readonly string[]): RunRecord {
   if (!secrets.length) return record;
   return {
     ...record,
     ...(record.message !== undefined ? { message: redactText(record.message, secrets) } : {}),
+    flow: {
+      ...record.flow,
+      name: redactText(record.flow.name, secrets),
+    },
+    device: {
+      ...record.device,
+      name: redactText(record.device.name, secrets),
+    },
+    app: {
+      ...record.app,
+      name: redactText(record.app.name, secrets),
+    },
     steps: record.steps.map((s) => ({
       ...s,
       description: redactText(s.description, secrets),

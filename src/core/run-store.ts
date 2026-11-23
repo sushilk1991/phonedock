@@ -452,17 +452,25 @@ export function sha256Hex(content: Buffer | string): string {
 function sanitizePublicPath(p: string): string {
   const trimmed = p.trim();
   if (!trimmed || trimmed === 'unknown') return 'unknown';
-  if (trimmed.startsWith('/') || trimmed.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('file://')) {
-    return basename(trimmed.replace(/^file:\/\//, '').replace(/\\/g, '/')) || 'unknown';
+  if (
+    trimmed.startsWith('/')
+    || trimmed.startsWith('~/')
+    || trimmed.startsWith('\\\\')
+    || /^[A-Za-z]:[\\/]/.test(trimmed)
+    || /^file:\/\//i.test(trimmed)
+  ) {
+    return basename(trimmed.replace(/^file:\/\/[^/]*/i, '').replace(/\\/g, '/')) || 'unknown';
   }
   return trimmed.replace(/\\/g, '/');
 }
 
 function sanitizePublicText(s: string): string {
-  // Replace every absolute local path (file:///..., ~/..., any /-rooted path of 2+ segments, and Windows drive paths) with its basename.
+  // Replace every absolute local path (file://..., UNC \\server\share\..., ~/..., any /-rooted path of 2+ segments,
+  // and Windows drive paths) with its basename.
   // URLs like https://example.com/a/b are left intact because // has an empty first segment and path slashes follow alphanumeric chars.
   return s
-    .replace(/file:\/\/\/[^\s)'"`,;:]+/g, (m) => basename(m.slice(7)) || '[local-file]')
+    .replace(/file:\/\/[^\s)'"`,;:]+/gi, (m) => basename(m.replace(/^file:\/\/[^/]*/i, '').replace(/\\/g, '/')) || '[local-file]')
+    .replace(/(?<![A-Za-z0-9._\\/-])\\\\[^\\\s)'"`,;:]+(?:\\[^\\\s)'"`,;:]+)+\\?/g, (m) => basename(m.replace(/\\/g, '/')) || '[local-path]')
     .replace(/(?<![A-Za-z0-9._/-])~\/[^\s)'"`,;:]+/g, (m) => basename(m) || '[local-path]')
     .replace(/(?<![A-Za-z0-9._/-])\/[^/\s)'"`,;:]+(?:\/[^/\s)'"`,;:]+)+\/?/g, (m) => basename(m) || '[local-path]')
     .replace(/(?<![A-Za-z0-9._/-])[A-Za-z]:[\\/][^\s)'"`,;:]+/g, (m) => basename(m.replace(/\\/g, '/')) || '[local-path]');

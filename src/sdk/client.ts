@@ -917,7 +917,11 @@ export class PhoneDockClient {
   }
   async exportRun(runId: string, format: 'md' | 'json' = 'md'): Promise<string> {
     const res = await this.request<Response>('GET', `/v1/runs/${enc(runId)}/export`, { query: { format }, raw: true });
-    return await res.text();
+    try {
+      return await res.text();
+    } catch (e) {
+      throw this.unreachable(e);
+    }
   }
   saveRun(record: RunRecord): Promise<RunSummary> {
     return this.request('POST', '/v1/runs', { body: record });
