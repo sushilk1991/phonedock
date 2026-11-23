@@ -8,7 +8,7 @@ export interface Ctx {
   url: URL;
   params: Record<string, string>;
   owner: string;
-  body: () => Promise<any>;
+  body: (limit?: number) => Promise<any>;
   q: (k: string) => string | undefined;
 }
 export type Handler = (c: Ctx) => Promise<unknown> | unknown;

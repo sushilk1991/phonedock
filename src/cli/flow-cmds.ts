@@ -145,8 +145,11 @@ export async function testCmd(c: PhoneDockClient, a: ParsedArgs, argv: string[],
   if (json) process.stdout.write(JSON.stringify({ ok, ...suite, ...(junit ? { junit: resolve(junit) } : {}) }, null, 2) + '\n');
   else {
     const failedWith = suite.flows.filter((f) => f.artifacts);
+    const runIds = suite.flows.map((f) => f.runId).filter((id): id is string => !!id);
     process.stdout.write(`${ok ? 'PASSED' : 'FAILED'}: ${suite.passed} passed, ${suite.failed} failed, ${suite.skipped} skipped (${suite.flows.length} flow${suite.flows.length === 1 ? '' : 's'}, ${(suite.ms / 1000).toFixed(1)}s) on ${device.name}\n`);
     if (!ran) process.stdout.write('No flow ran (all skipped): check --platform and the flows\' platform / minOS.\n');
+    if (runIds.length === 1) process.stdout.write(`Run ID: ${runIds[0]}\n`);
+    else if (runIds.length > 1) process.stdout.write(`Run IDs: ${runIds.join(', ')}\n`);
     if (junit) process.stdout.write(`JUnit: ${rel(resolve(junit))}\n`);
     if (suite.report) process.stdout.write(`Report: ${rel(suite.report)}\n`);
     if (failedWith.length) process.stdout.write(`Artifacts: ${failedWith.map((f) => f.artifacts).join(', ')}\n`);

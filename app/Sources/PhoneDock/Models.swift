@@ -269,7 +269,133 @@ struct AppInfo: Codable, Hashable, Identifiable, Sendable {
     var id: String
     var name: String?
     var version: String?
+    var build: String?
     var system: Bool?
+}
+
+/// Git dirty flag in a flow run record: true, false, or "unknown".
+enum RunDirtyState: Hashable, Sendable, Codable {
+    case clean
+    case dirty
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) {
+            self = b ? .dirty : .clean
+        } else {
+            self = .unknown
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .clean: try c.encode(false)
+        case .dirty: try c.encode(true)
+        case .unknown: try c.encode("unknown")
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .clean: return "clean"
+        case .dirty: return "dirty"
+        case .unknown: return "unknown"
+        }
+    }
+}
+
+struct RunSummary: Codable, Hashable, Identifiable, Sendable {
+    var schemaVersion: Int
+    var id: String
+    var status: String
+    var startedAt: String
+    var durationMs: Double
+    var attempts: Int
+    var owner: String
+    var message: String?
+    var flowName: String
+    var flowFile: String
+    var deviceId: String
+    var deviceName: String
+    var platform: String
+    var osVersion: String
+    var appId: String
+    var appVersion: String
+    var appBuild: String
+    var commit: String
+    var dirty: RunDirtyState
+    var stepCount: Int
+    var passedSteps: Int
+    var failedSteps: Int
+    var report: String?
+}
+
+struct RunFlowProvenance: Codable, Hashable, Sendable {
+    var name: String
+    var file: String?
+    var fileDisplay: String
+    var sha256: String
+    var platform: String?
+}
+
+struct RunSourceProvenance: Codable, Hashable, Sendable {
+    var commit: String
+    var branch: String
+    var dirty: RunDirtyState
+}
+
+struct RunDeviceProvenance: Codable, Hashable, Sendable {
+    var id: String
+    var name: String
+    var platform: String
+    var backend: String
+    var kind: String
+    var osVersion: String
+    var model: String
+}
+
+struct RunAppProvenance: Codable, Hashable, Sendable {
+    var id: String
+    var name: String
+    var version: String
+    var build: String
+}
+
+struct RunStepRecord: Codable, Hashable, Identifiable, Sendable {
+    var index: Int
+    var description: String
+    var status: String
+    var ms: Double
+    var message: String?
+    var screenshot: String?
+    var beforeScreenshot: String?
+    var id: Int { index }
+}
+
+struct RunArtifacts: Codable, Hashable, Sendable {
+    var dir: String?
+    var report: String?
+    var files: [String]?
+}
+
+struct RunRecord: Codable, Hashable, Identifiable, Sendable {
+    var schemaVersion: Int
+    var id: String
+    var status: String
+    var startedAt: String
+    var endedAt: String
+    var durationMs: Double
+    var attempts: Int
+    var owner: String
+    var message: String?
+    var flow: RunFlowProvenance
+    var source: RunSourceProvenance
+    var device: RunDeviceProvenance
+    var app: RunAppProvenance
+    var steps: [RunStepRecord]
+    var artifacts: RunArtifacts?
 }
 
 struct Snapshot: Codable, Hashable, Identifiable, Sendable {

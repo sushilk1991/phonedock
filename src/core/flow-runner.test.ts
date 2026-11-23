@@ -322,6 +322,57 @@ steps:
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('runner: persists schemaVersion=1 RunRecord with app provenance and redacted secrets via saveRun', async () => {
+  const { c } = fakeApp();
+  const dir = tmp();
+  const saved: import('./types.ts').RunRecord[] = [];
+  const argSecret = 'run-record-arg-secret-7733';
+  const envSecret = 'run-record-env-secret-6644';
+  const typedSecret = 'run-record-typed-secret-5522';
+  c.appInfo = async (_id, appId) => ({ id: appId, name: 'Demo App', version: '3.4.5', build: '345', system: false });
+  c.saveRun = async (rec) => { saved.push(rec); return { schemaVersion: 1, id: rec.id, status: rec.status, startedAt: rec.startedAt, durationMs: rec.durationMs, attempts: rec.attempts, owner: rec.owner, flowName: rec.flow.name, flowFile: rec.flow.fileDisplay, deviceId: rec.device.id, deviceName: rec.device.name, platform: rec.device.platform, osVersion: rec.device.osVersion, appId: rec.app.id, appVersion: rec.app.version, appBuild: rec.app.build, commit: rec.source.commit, dirty: rec.source.dirty, stepCount: rec.steps.length, passedSteps: 0, failedSteps: 0 }; };
+  c.launch = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  c.type = async () => ({ ok: true, delivery: 'sent', retrySafe: false });
+  try {
+    const flowPath = join(dir, 'provenance.yaml');
+    const yaml = `name: Provenance check
+appId: com.example.demo
+steps:
+  - launch:
+      arguments:
+        apiKey: "\${ARG_S}"
+      env:
+        TOKEN: "\${ENV_S}"
+  - type:
+      text: "\${TYPE_S}"
+      secret: true
+`;
+    writeFileSync(flowPath, yaml);
+    const r = await runFlow(c, parseFlow(yaml, flowPath), {
+      deviceId: 'd',
+      artifactsDir: join(dir, 'artifacts'),
+      settle: false,
+      env: { ARG_S: argSecret, ENV_S: envSecret, TYPE_S: typedSecret },
+    });
+    assert.equal(r.status, 'pass');
+    assert.ok(r.runId, 'FlowResult must carry runId');
+    assert.equal(saved.length, 1);
+    const rec = saved[0];
+    assert.equal(rec.schemaVersion, 1);
+    assert.equal(rec.id, r.runId);
+    assert.equal(rec.app.id, 'com.example.demo');
+    assert.equal(rec.app.name, 'Demo App');
+    assert.equal(rec.app.version, '3.4.5');
+    assert.equal(rec.app.build, '345');
+    assert.equal(rec.flow.fileDisplay, 'provenance.yaml');
+    assert.match(rec.flow.sha256, /^[0-9a-f]{64}$/);
+    const serialized = JSON.stringify(rec);
+    assert.ok(!serialized.includes(argSecret), 'RunRecord leaked launch arg secret');
+    assert.ok(!serialized.includes(envSecret), 'RunRecord leaked launch env secret');
+    assert.ok(!serialized.includes(typedSecret), 'RunRecord leaked typed secret');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('runner: redacts numeric (>= 3 chars) and quote-containing (JSON-escaped) launch arguments from logs, results, and reports', async () => {
   const { c } = fakeApp(); const dir = tmp();
   const numToken = 123456;

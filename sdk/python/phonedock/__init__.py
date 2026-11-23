@@ -778,6 +778,34 @@ class PhoneDock:
     def apps(self, device_id: str, system: bool = False) -> List[Dict[str, Any]]:
         return self._request("GET", self._dev(device_id, "/apps"), query={"system": 1 if system else None})
 
+    def app_info(self, device_id: str, app_id: str) -> Optional[Dict[str, Any]]:
+        """Single-app metadata (version + build), or None when the app is not installed."""
+        try:
+            return self._request("GET", self._dev(device_id, f"/apps/{_q(app_id)}"))
+        except PhoneDockApiError as e:
+            if e.status == 404 and e.code == "not_found":
+                return None
+            raise
+
+    # ── flow run records (schemaVersion: 1) ───────────────────────────────
+    def list_runs(self, device: Optional[str] = None, status: Optional[str] = None, flow: Optional[str] = None,
+                  app_id: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """List recorded flow runs (newest first)."""
+        return self._request("GET", "/v1/runs", query={"device": device, "status": status, "flow": flow, "appId": app_id, "limit": limit})
+
+    def get_run(self, run_id: str) -> Dict[str, Any]:
+        """Fetch a single RunRecord by ID."""
+        return self._request("GET", f"/v1/runs/{_q(run_id)}")
+
+    def export_run(self, run_id: str, format: str = "md") -> str:
+        """Export a run record as public-safe Markdown ('md') or JSON ('json')."""
+        resp = self._request("GET", f"/v1/runs/{_q(run_id)}/export", query={"format": format}, raw=True)
+        return resp.read().decode("utf-8", "replace")
+
+    def save_run(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist a schemaVersion=1 RunRecord to the daemon store (409 conflict if ID already exists)."""
+        return self._request("POST", "/v1/runs", record)
+
     def install(self, device_id: str, path_or_url: str) -> Dict[str, Any]:
         if path_or_url.startswith(("http://", "https://")):
             body = {"url": path_or_url}

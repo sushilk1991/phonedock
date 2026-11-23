@@ -313,6 +313,40 @@ class TransportTests(unittest.TestCase):
         self.assertNotIn("settleMs", captured[2][2])
         self.assertEqual(captured[2][2], {"args": ["-A"], "env": {"K": "V"}, "verify": True, "returnUi": True})
 
+    def test_runs_and_app_info_endpoints_without_run_flow(self):
+        seen = []
+
+        def reply(handler, body):
+            seen.append((handler.command, handler.path, body.decode()))
+            if handler.path.endswith("/apps/com.missing"):
+                json_reply(handler, {"error": {"code": "not_found", "message": "not installed"}}, 404)
+            elif handler.path.endswith("/export?format=md"):
+                payload = b"### PhoneDock Run: Demo\n"
+                handler.send_response(200)
+                handler.send_header("Content-Type", "text/markdown; charset=utf-8")
+                handler.send_header("Content-Length", str(len(payload)))
+                handler.end_headers()
+                handler.wfile.write(payload)
+            else:
+                json_reply(handler, {"id": "com.example.app", "version": "1.0", "build": "10"})
+
+        with serve(reply) as url:
+            c = self.client(url, auto_start=False)
+            self.assertFalse(hasattr(c, "run_flow"), "run_flow was dropped per design review")
+            self.assertEqual(c.app_info("android-emulator:pdtest-1", "com.example.app")["build"], "10")
+            self.assertIsNone(c.app_info("android-emulator:pdtest-1", "com.missing"))
+            c.list_runs(device="pdtest-1", status="pass", limit=10)
+            c.get_run("2026-11-23T12-00-00-000Z-abcd")
+            md = c.export_run("2026-11-23T12-00-00-000Z-abcd", format="md")
+            self.assertIn("PhoneDock Run", md)
+            c.save_run({"schemaVersion": 1, "id": "run-1"})
+
+        self.assertTrue(seen[0][1].endswith("/apps/com.example.app"))
+        self.assertTrue(seen[2][1].startswith("/v1/runs?"))
+        self.assertEqual(seen[3][1], "/v1/runs/2026-11-23T12-00-00-000Z-abcd")
+        self.assertEqual(seen[4][1], "/v1/runs/2026-11-23T12-00-00-000Z-abcd/export?format=md")
+        self.assertEqual((seen[5][0], seen[5][1]), ("POST", "/v1/runs"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -197,6 +197,8 @@ export interface AppInfo {
   id: string;                    // package name / bundle id
   name?: string;
   version?: string;
+  /** Build / version code (Android versionCode, iOS CFBundleVersion). */
+  build?: string;
   system?: boolean;
 }
 
@@ -410,6 +412,107 @@ export interface LaunchOptions {
 
 export interface BootOptions { headless?: boolean; coldBoot?: boolean; window?: boolean }
 
+// ── retrievable flow run records (schemaVersion: 1; stateDir('runs')) ─────────
+export type RunStatus = 'pass' | 'fail' | 'skip';
+export type RunStepStatus = 'pass' | 'fail' | 'warn' | 'skip';
+
+export interface RunFlowProvenance {
+  name: string;
+  /** Local path when known (kept for local inspection; omitted in public Markdown exports). */
+  file?: string;
+  /** Repo-relative path when inside a git repo, bare basename otherwise, or 'unknown'. */
+  fileDisplay: string;
+  /** 64-hex-char SHA-256 of the flow source, or 'unknown'. */
+  sha256: string;
+  platform?: Platform;
+}
+
+export interface RunSourceProvenance {
+  /** Full git commit SHA, or 'unknown'. */
+  commit: string;
+  /** Git branch name, or 'unknown'. */
+  branch: string;
+  /** Working tree dirty flag, or 'unknown'. */
+  dirty: boolean | 'unknown';
+}
+
+export interface RunDeviceProvenance {
+  id: string;
+  name: string;
+  platform: Platform | 'unknown';
+  backend: string;
+  kind: DeviceKind | 'unknown';
+  osVersion: string;
+  model: string;
+}
+
+export interface RunAppProvenance {
+  id: string;
+  name: string;
+  version: string;
+  build: string;
+}
+
+export interface RunStepRecord {
+  index: number;
+  description: string;
+  status: RunStepStatus;
+  ms: number;
+  message?: string;
+  screenshot?: string;
+  beforeScreenshot?: string;
+}
+
+export interface RunArtifacts {
+  dir?: string;
+  report?: string;
+  files?: string[];
+}
+
+export interface RunRecord {
+  schemaVersion: 1;
+  id: string;
+  status: RunStatus;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  attempts: number;
+  owner: string;
+  message?: string;
+  flow: RunFlowProvenance;
+  source: RunSourceProvenance;
+  device: RunDeviceProvenance;
+  app: RunAppProvenance;
+  steps: RunStepRecord[];
+  artifacts?: RunArtifacts;
+}
+
+export interface RunSummary {
+  schemaVersion: 1;
+  id: string;
+  status: RunStatus;
+  startedAt: string;
+  durationMs: number;
+  attempts: number;
+  owner: string;
+  message?: string;
+  flowName: string;
+  flowFile: string;
+  deviceId: string;
+  deviceName: string;
+  platform: Platform | 'unknown';
+  osVersion: string;
+  appId: string;
+  appVersion: string;
+  appBuild: string;
+  commit: string;
+  dirty: boolean | 'unknown';
+  stepCount: number;
+  passedSteps: number;
+  failedSteps: number;
+  report?: string;
+}
+
 /** Live frame source. The daemon starts at most one per device and fans frames out. */
 export interface FrameStream {
   /** Called with each encoded JPEG frame, and the device screen (screenshot pixels) it shows when the stream knows it. */
@@ -500,6 +603,8 @@ export interface Backend {
   installApp?(nativeId: string, path: string): Promise<AppInfo | void>;
   uninstallApp?(nativeId: string, appId: string): Promise<void>;
   listApps?(nativeId: string): Promise<AppInfo[]>;
+  /** Single-app metadata (version + build) for provenance; returns null when not installed. */
+  appInfo?(nativeId: string, appId: string): Promise<AppInfo | null>;
   launchApp?(nativeId: string, appId: string, opts?: LaunchOptions): Promise<void>;
   terminateApp?(nativeId: string, appId: string): Promise<void>;
   openUrl?(nativeId: string, url: string): Promise<void>;

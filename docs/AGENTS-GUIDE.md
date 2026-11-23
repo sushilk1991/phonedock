@@ -120,7 +120,7 @@ Optional env: `PHONEDOCK_PORT` / `PHONEDOCK_HOME` (point at a non-default daemon
 | Input | `tap` (`text`, `ref` or x,y), `fill`, `type_text` (`submit`, `secret`), `press_key`, `long_press`, `double_tap`, `swipe` (coords or `direction`), `scroll_to`, `pinch`, `hide_keyboard` |
 | Navigation | `go_back`, `system_gesture` (go_home / app_switcher / control_center / notification_center), `handle_alert` (accept / dismiss / button=…) |
 | Sequencing | `batch` (several tool calls in one round trip), `request_human` (hand the device to a person and wait) |
-| Regression tests | `save_flow` (your session → a flow file: YAML steps + assertions), `run_flow` (PASS/FAIL per step, HTML report every run, artifacts on failure) |
+| Regression tests | `save_flow` (your session → a flow file: YAML steps + assertions), `run_flow` (PASS/FAIL per step, HTML report + persistent `Run ID` every run, artifacts on failure), `list_runs` / `get_run` (provenance & public-safe PR Markdown) |
 | Performance | `start_trace`, `stop_trace` (iOS: xctrace hangs + main-thread hot spots; Android: perfetto + janky frames / frame-time percentiles; compares with the previous run) |
 | Apps/system | `list_apps`, `install_app`, `uninstall_app`, `launch_app` (optional `args` / `env`, never logged), `terminate_app`, `open_url`, `shell` (runs inside the device), `get_logs`, `set_location`, `set_appearance` (dark/light), `device_settings` (text size, contrast, bold text, reduce motion), `rotate`, `clipboard` (get / set the device clipboard's text), `push_file`, `pull_file`, `push_notification`, `wait` (plain sleep) |
 | Debug/state | `list_crashes`, `get_crash`, `record_screen` (start/stop/status → .mp4), `app_data` (save/restore/list an app's data container) |
@@ -351,6 +351,10 @@ Recipe: **explore, then `save_flow`, then `run_flow`.**
    Every run also writes a self-contained, script-free `report.html`. `capture_steps=true` opts into before/after
    screenshots with action markers and adds observation latency.
 4. Commit the file; CI runs `phonedock test flows/ --junit junit.xml` (`docs/CI.md`).
+5. Every `run_flow` and `phonedock test` run saves a persistent `Run ID` (`schemaVersion: 1`) with device, app version/build,
+   and git commit provenance. Use `list_runs` / `get_run(run_id, format="md")` (or `phonedock runs`, `runs show`,
+   `runs export --format md`) to retrieve results or paste a public-safe Markdown summary (repo-relative flow path,
+   no absolute local paths) into a PR.
 
 Typed secrets are saved as `${SECRET_1}`; set that variable when the flow runs (`run_flow env={…}`, `--env`).
 Known secret text is redacted from reports and diagnostics; screenshot pixels are unchanged, so inspect artifacts

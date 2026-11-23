@@ -178,7 +178,10 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   metadata (`action="network"`). It does not enable debugging, act on DOM, intercept native HTTP or inspect iOS.
   CSS coordinates and diagnostic `w…` refs are not native input coordinates/refs; verify mapped bounds against the screen.
 - **Record a regression.** `save_flow` → review the YAML → `run_flow`. Every run writes a self-contained,
-  script-free `report.html`; `capture_steps=true` opts into before/after screenshots and adds latency.
+  script-free `report.html` and persists a retrievable run record (`Run ID`) with device, app version/build, and git
+  commit provenance (`list_runs`, `get_run format="summary"|"md"|"json"`, or CLI `phonedock runs` / `runs show` /
+  `runs export --format md` for public-safe PR Markdown with no local paths); `capture_steps=true` opts into
+  before/after screenshots and adds latency.
   CLI/MCP share full-resolution RGBA baseline comparison via FFmpeg. `tolerance` is a changed-pixel fraction,
   `pixelThreshold` is the channel threshold, and `ignore` rectangles use device pixels. Missing tools/images or
   dimension changes fail explicitly; thumbnail comparison is opt-in. Default `baseline_mode="compare"` refuses

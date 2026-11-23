@@ -708,3 +708,54 @@ test('empty UI reads clear stale refs, and batch rollback never wipes concurrent
     assert.deepEqual(tapRefCalls.at(-1), { device: devA.id, ref: 'e8', snapshotId: 'snap-a0' });
   } finally { await s.close(); }
 });
+
+test('MCP list_runs and get_run support summary, public-safe md, and json formats', async () => {
+  const rec: import('../sdk/client.ts').RunRecord = {
+    schemaVersion: 1,
+    id: '2026-11-23T12-00-00-000Z-abcd',
+    status: 'pass',
+    startedAt: '2026-11-23T12:00:00.000Z',
+    endedAt: '2026-11-23T12:00:01.500Z',
+    durationMs: 1500,
+    attempts: 1,
+    owner: 'mcp:test',
+    flow: { name: 'Checkout', file: '/Users/local/repo/flows/checkout.yaml', fileDisplay: 'flows/checkout.yaml', sha256: 'a'.repeat(64) },
+    source: { commit: '1234567890abcdef1234567890abcdef12345678', branch: 'main', dirty: false },
+    device: { id: 'android-emulator:pdtest-x', name: 'pdtest-x', platform: 'android', backend: 'android-emulator', kind: 'virtual', osVersion: '14', model: 'Pixel 9' },
+    app: { id: 'com.example.shop', name: 'Shop', version: '4.2.0', build: '420' },
+    steps: [{ index: 1, description: 'launch com.example.shop', status: 'pass', ms: 900 }],
+    artifacts: { dir: '/Users/local/.phonedock/test-runs/r1', report: '/Users/local/.phonedock/test-runs/r1/report.html' },
+  };
+  const summary: import('../sdk/client.ts').RunSummary = {
+    schemaVersion: 1, id: rec.id, status: 'pass', startedAt: rec.startedAt, durationMs: 1500, attempts: 1, owner: rec.owner,
+    flowName: 'Checkout', flowFile: 'flows/checkout.yaml', deviceId: rec.device.id, deviceName: rec.device.name,
+    platform: 'android', osVersion: '14', appId: 'com.example.shop', appVersion: '4.2.0', appBuild: '420',
+    commit: rec.source.commit, dirty: false, stepCount: 1, passedSteps: 1, failedSteps: 0, report: rec.artifacts?.report,
+  };
+  const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, []);
+  fake.listRuns = async () => [summary];
+  fake.getRun = async () => rec;
+  fake.exportRun = async (_id: string, fmt: string) => (fmt === 'md' ? '### PhoneDock Run: Checkout — PASS\nFlow: `flows/checkout.yaml`\n' : JSON.stringify(rec));
+
+  const s = await connect(fake);
+  try {
+    const listed = await s.call('list_runs', { status: 'pass', limit: 10 });
+    assert.equal(listed.isError, false, listed.text);
+    assert.match(listed.text, /2026-11-23T12-00-00-000Z-abcd/);
+    assert.match(listed.text, /com\.example\.shop@4\.2\.0\(420\)/);
+
+    const sumRes = await s.call('get_run', { run_id: rec.id });
+    assert.equal(sumRes.isError, false, sumRes.text);
+    assert.match(sumRes.text, /\/Users\/local\/repo\/flows\/checkout\.yaml/);
+    assert.match(sumRes.text, /version=4\.2\.0 build=420/);
+
+    const mdRes = await s.call('get_run', { run_id: rec.id, format: 'md' });
+    assert.equal(mdRes.isError, false, mdRes.text);
+    assert.match(mdRes.text, /flows\/checkout\.yaml/);
+    assert.doesNotMatch(mdRes.text, /\/Users\/local/);
+
+    const jsonRes = await s.call('get_run', { run_id: rec.id, format: 'json' });
+    assert.equal(jsonRes.isError, false, jsonRes.text);
+    assert.equal(JSON.parse(jsonRes.text).id, rec.id);
+  } finally { await s.close(); }
+});

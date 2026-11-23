@@ -246,6 +246,7 @@ export const backend: Backend & {
   async installApp(s, p) { return A.installApp(await requireOnline(s), p); },
   async uninstallApp(s, id) { await A.uninstallApp(await requireOnline(s), id); },
   async listApps(s: string, opts?: { system?: boolean }) { return A.listApps(await requireOnline(s), !!opts?.system); },
+  async appInfo(s, id) { return A.appInfo(await requireOnline(s), id); },
   async launchApp(s, id, opts) { await A.launchApp(await requireOnline(s), id, opts); },
   async terminateApp(s, id) { await A.terminateApp(await requireOnline(s), id); },
   async openUrl(s, u) { await A.openUrl(await requireOnline(s), u); },

@@ -609,8 +609,37 @@ export async function listApps(serial: string, includeSystem = false): Promise<A
   if (missing.length && helperEnabled()) await Promise.race([resolveLabels(serial, missing), sleep(LABEL_WAIT_MS)]);
   return pkgs.map((p) => {
     const name = labelCache.get(labelKey(serial, p.id, p.versionCode));
-    return { id: p.id, ...(name ? { name } : {}), system: !ids3.has(p.id) };
+    return { id: p.id, ...(name ? { name } : {}), ...(p.versionCode ? { build: p.versionCode } : {}), system: !ids3.has(p.id) };
   });
+}
+
+/** Parse active package metadata (`versionName`, `versionCode`, `SYSTEM` flag) from `dumpsys package <id>`. */
+export function parseDumpsysPackage(out: string, id: string): AppInfo | null {
+  if (!out || /Unable to find package:/i.test(out)) return null;
+  const marker = `Package [${id}]`;
+  const start = out.indexOf(marker);
+  if (start < 0) return null;
+  const hidden = out.indexOf('Hidden system packages:', start);
+  const block = hidden > start ? out.slice(start, hidden) : out.slice(start);
+  const version = /\bversionName=([^\r\n]+)/.exec(block)?.[1]?.trim();
+  const build = /\bversionCode=(\d+)/.exec(block)?.[1]?.trim();
+  const system = /\bflags=\[[^\]]*\bSYSTEM\b/.test(block);
+  return {
+    id,
+    ...(version ? { version } : {}),
+    ...(build ? { build } : {}),
+    system,
+  };
+}
+
+/** Read single-app metadata (version + build/versionCode) via `adb -s <serial> shell dumpsys package <id>`. */
+export async function appInfo(serial: string, id: string): Promise<AppInfo | null> {
+  checkPkg(id);
+  const r = await adb(serial, ['shell', 'dumpsys', 'package', id], { allowFail: true, timeoutMs: 10_000 });
+  const parsed = parseDumpsysPackage(r.stdout, id);
+  if (!parsed) return null;
+  const name = labelCache.get(labelKey(serial, id, parsed.build));
+  return name ? { ...parsed, name } : parsed;
 }
 const PKG_RE = /^[A-Za-z0-9._]+$/;
 function checkPkg(id: string) { if (!PKG_RE.test(id)) throw new PhoneDockError('The package name is invalid', 'bad_request', 400, undefined, `Invalid package name ${JSON.stringify(id)}`); }

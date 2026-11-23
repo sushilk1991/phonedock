@@ -620,6 +620,21 @@ r.get('/v1/devices/:id/apps', async (c) => {
   const f = need(b, 'listApps', 'app listing') as (n: string, o?: { system?: boolean }) => ReturnType<NonNullable<Backend['listApps']>>;
   return f(nid, { system: truthy(c.q('system')) });
 });
+r.get('/v1/devices/:id/apps/:appId', async (c) => {
+  const { b, nid } = dev(c);
+  const appId = c.params.appId;
+  let info: import('../core/types.ts').AppInfo | null | undefined;
+  if (b.appInfo) {
+    info = await b.appInfo(nid, appId);
+  } else if (b.listApps) {
+    const f = b.listApps as (n: string, o?: { system?: boolean }) => Promise<import('../core/types.ts').AppInfo[]>;
+    info = (await f(nid, { system: true })).find((a) => a.id === appId) ?? null;
+  } else {
+    throw notSupported('app info', b.id);
+  }
+  if (!info) throw new PhoneDockError('The app is not installed on this device', 'not_found', 404, undefined, `App ${appId} not found on ${c.params.id}`);
+  return info;
+});
 async function download(url: string): Promise<string> {
   const u = new URL(url);
   if (!/^https?:$/.test(u.protocol)) throw badRequest('url must be http(s)');
