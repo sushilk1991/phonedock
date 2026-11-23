@@ -354,19 +354,25 @@ launch and input (exit 1 when not verified). MCP: `expect` on tap, long_press, d
 press_key and launch_app (also inside `batch`).
 
 **Post-action UI observation (`returnUi`, `settleMs`, `screenHash`).** `GET /v1/devices/:id/ui` and input routes with
-`returnUi: true` attach `screenHash` (a deterministic 16-hex-char SHA-256 of visible elements, refs, bounds, flags,
-prompts, and overlay windows; equal hashes guarantee identical refs and coordinates). Input routes (`/input`, `/fill`,
-`/swipe`, `/scroll-to`, `/back`, `/gesture`, `/alert`, `/keyboard/hide`, `/apps/:appId/launch`) accept optional
-`returnUi: true` and `settleMs` (integer `0..10000`, `400 bad_request` if invalid, `delivery: 'not_sent'`). When
-`expect` already read a fresh post-action screen at the current `actionGeneration`, `returnUi` reuses it without a
-second device read; otherwise it waits `settleMs` inside the input claim, reads the accessibility tree (with OCR
-fallback), attaches `prompt`, `snapshotId`, and `screenHash`, and scrubs any secret substrings without blanking
-unrelated UI text. UI capture failures never fail an already-sent action (`observationUnavailable: true`). In MCP,
-action tools accept `observe: "none" | "image" | "ui" | "both"` (and `batch` accepts `observe_at_end`, backward
-compatible with `return_screenshot` / `screenshot_at_end`, rejecting conflicting combinations before sending input):
-`observe: "ui"` and `"both"` default to the tool's existing settle (700 ms, 1500 ms for `launch_app`/`open_url`, or 0 ms
-when `expect` waited), suppress repeated screens with `Screen unchanged (obs=#N, hash=…, snapshot=…).`, and cap action
-outlines to 120 elements / 8,000 characters with an explicit truncation notice.
+`returnUi: true` attach `screenHash` (a deterministic 16-hex-char SHA-256 of the device-pixel UI tree — visible
+elements, tap points, bounds, flags, prompts, overlay windows including `texts`, and OCR metadata — for HTTP/SDK
+consumers). Input routes (`/input`, `/fill`, `/swipe`, `/scroll-to`, `/back`, `/gesture`, `/alert`, `/keyboard/hide`,
+`/apps/:appId/launch`) accept optional `returnUi: true` and `settleMs` (integer `0..10000`, `400 bad_request` if
+invalid, `delivery: 'not_sent'`). When `expect` already read a fresh post-action screen at the current
+`actionGeneration`, `returnUi` reuses it without a second device read; otherwise it waits `settleMs` inside the input
+claim, reads the accessibility tree (falling back to OCR and registering it in `uiCache` + snapshots identically to
+`GET /ui` so returned refs work immediately), attaches `prompt`, `snapshotId`, and `screenHash`, and scrubs any secret
+substrings without blanking unrelated UI text. Observation failures never fail an already-sent action
+(`observationUnavailable: true`). In MCP, action tools accept `observe: "none" | "image" | "ui" | "both"` (and `batch`
+accepts `observe_at_end` plus `settle_ms`, backward compatible with `return_screenshot` / `screenshot_at_end`, rejecting
+conflicting combinations before sending input): `observe: "ui"` and `"both"` default to the tool's existing settle (700
+ms, 1500 ms for `launch_app`/`open_url`, or 0 ms when `expect` waited — including `batch` `observe_at_end`). MCP
+computes its reported `hash=` directly over the exact formatted outline it emits (element lines in the reported
+coordinate space, prompt/human warnings, OCR notes, and overlay window lines), so equal MCP hashes guarantee identical
+printed output by construction; repeated screens are suppressed with `Screen unchanged (obs=#N, hash=…, snapshot=…).`
+only against a tree the agent actually received, and every action-mode observation block (including unchanged-screen
+prompt warnings) is capped to 120 elements / 8,000 characters with an explicit truncation notice. Failed screenshots
+after a delivered action append a `Screenshot unavailable (…)` note without marking the action as failed.
 
 **Android input path (changed).** Taps, double taps, long presses, swipes, drags, keys and ASCII text are injected
 by the on-device helper when its session is up (a UI read or an earlier input starts it), with the input manager

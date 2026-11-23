@@ -341,15 +341,23 @@ export function createMcpServer(ctx: McpContext): McpServer {
         catch (e) { unavailReason = (e as Error)?.message ?? String(e); }
       }
       if (tree) {
-        const formatted = await formatUi(d, tree, { mode: 'action' });
-        content.push(text(formatted.text));
+        try {
+          const formatted = await formatUi(d, tree, { mode: 'action' });
+          content.push(text(formatted.text));
+        } catch (e) {
+          content.push(text(`UI observation unavailable (${(e as Error)?.message ?? String(e)}); call get_ui or screenshot.`));
+        }
       } else {
         content.push(text(`UI observation unavailable${unavailReason ? ` (${unavailReason})` : ''}; call get_ui or screenshot.`));
       }
-      if (mode === 'both') content.push(...(await shot(d)));
+      if (mode === 'both') {
+        try { content.push(...(await shot(d))); }
+        catch (e) { content.push(text(`Screenshot unavailable (${(e as Error)?.message ?? String(e)}); call screenshot.`)); }
+      }
     } else if (mode === 'image') {
       if (waitMs > 0) await sleep(waitMs);
-      content.push(...(await shot(d)));
+      try { content.push(...(await shot(d))); }
+      catch (e) { content.push(text(`Screenshot unavailable (${(e as Error)?.message ?? String(e)}); call screenshot.`)); }
     } else if (settleMs) {
       await sleep(settleMs);
     }

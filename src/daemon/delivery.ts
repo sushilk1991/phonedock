@@ -6,10 +6,11 @@
 // The daemon never resends an input whose delivery is unknown (src/backends/android-common.ts sendInput).
 import { sleep } from '../core/exec.ts';
 import { detectPrompt } from '../core/prompts.ts';
-import { PhoneDockError, type Delivery, type UiTree } from '../core/types.ts';
+import { PhoneDockError, type Backend, type Delivery, type UiTree } from '../core/types.ts';
 import { uiTreeHash } from '../core/ui-hash.ts';
 import { actionCount, checkLease, claimInput, deviceLaunchSecrets, getBackend, lastActionAt, noteScreen, splitId, uiCache } from './core.ts';
-import { axTree, ocrTree } from './find.ts';
+import { ocrTree, readUiTree } from './find.ts';
+import { cleanTree } from './media.ts';
 import { deliveryOf, ownershipEpoch, runInput, type InputScope } from './execution.ts';
 import { Raw, type Ctx, type Handler } from './http.ts';
 import { withRequestReceipt } from './requests.ts';
@@ -18,6 +19,12 @@ import { inputSecretValues, redactInputValue, redactSecretStrings } from '../cor
 
 export { deliveryOf } from './execution.ts';
 export const retrySafe = (d: Delivery): boolean => d === 'not_sent';
+
+let readOcrTree: (b: Backend, nid: string) => Promise<UiTree> = ocrTree;
+/** Test hook for exercising OCR fallback observation without invoking Apple Vision. */
+export function setOcrTreeReaderForTests(fn?: (b: Backend, nid: string) => Promise<UiTree>): void {
+  readOcrTree = fn ?? ocrTree;
+}
 
 /** Several inputs in one request: not_sent only when none went in; unknown when any may have; else sent. */
 export function combineDelivery(parts: Delivery[]): Delivery {
@@ -50,9 +57,12 @@ async function withUiObservation(id: string, result: unknown, settleMs?: number)
       if (settleMs && settleMs > 0 && !hasExpect) await sleep(settleMs);
       const { backend, nativeId } = splitId(id);
       const b = getBackend(backend);
-      tree = await axTree({ id, b, nid: nativeId }).catch(() => undefined);
+      tree = undefined;
+      if (b.uiTree) {
+        tree = await readUiTree({ id, b, nid: nativeId }).then(cleanTree, () => undefined);
+      }
       if ((!tree || !tree.root.length) && typeof b.screenshot === 'function') {
-        tree = await ocrTree(b, nativeId);
+        tree = cleanTree(await readOcrTree(b, nativeId));
       }
     }
     if (!tree) return { ...result, observationUnavailable: true };
@@ -61,6 +71,9 @@ async function withUiObservation(id: string, result: unknown, settleMs?: number)
       try { tree = { ...tree, prompt: detectPrompt(tree) }; } catch { /* best effort */ }
     }
     if (!tree.screenHash) tree = { ...tree, screenHash: uiTreeHash(tree) };
+    // Register fresh observations (including OCR fallback) in uiCache + snapshots identically to GET /ui
+    // so refs returned in `ui` resolve immediately on a following tap(ref=..., snapshotId=...).
+    if (!canReuse || !tree.snapshotId) uiCache.set(id, tree);
     return { ...result, ui: tree };
   } catch { return { ...result, observationUnavailable: true }; }
 }

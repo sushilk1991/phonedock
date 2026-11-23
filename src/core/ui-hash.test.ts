@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { UiTree } from './types.ts';
-import { uiTreeHash } from './ui-hash.ts';
+import { outlineHash, uiTreeHash } from './ui-hash.ts';
 
 const baseTree = (): UiTree => ({
   source: 'accessibility',
@@ -85,4 +85,39 @@ test('uiTreeHash: sensitive to text, ref, bounds, state flags, prompt, and overl
     bounds: { x: 0, y: 2500, width: 100, height: 40 },
   });
   assert.equal(uiTreeHash(withOffscreen), h0);
+});
+
+test('uiTreeHash & outlineHash: sensitive to unlabeled inner switch tap point and UiWindow.texts', () => {
+  const toggleAt = (innerX: number): UiTree => ({
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    root: [
+      {
+        ref: 'e1',
+        type: 'CheckBox',
+        text: 'Wi-Fi',
+        clickable: true,
+        bounds: { x: 40, y: 200, width: 1000, height: 80 },
+        children: [
+          // Unlabeled inner switch: not "interesting" on its own, but shifts tapPoint(e1)
+          { ref: 'e2', type: 'Switch', bounds: { x: innerX, y: 210, width: 100, height: 60 } },
+        ],
+      },
+    ],
+  });
+  assert.notEqual(uiTreeHash(toggleAt(800)), uiTreeHash(toggleAt(900)));
+
+  const winWith = (texts: string[]): UiTree => ({
+    ...baseTree(),
+    windows: [{ role: 'heads_up', bounds: { x: 0, y: 100, width: 1080, height: 300 }, texts }],
+  });
+  assert.notEqual(uiTreeHash(winWith(['Allow once'])), uiTreeHash(winWith(['Deny'])));
+
+  const o1 = outlineHash('e1 Button "Sign in" @(100,200) 80x40');
+  const o2 = outlineHash('e1 Button "Sign in" @(100,200) 80x40');
+  const o3 = outlineHash('e1 Button "Sign in" @(120,200) 80x40');
+  assert.match(o1, /^[0-9a-f]{16}$/);
+  assert.equal(o1, o2);
+  assert.notEqual(o1, o3);
 });

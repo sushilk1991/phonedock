@@ -457,8 +457,8 @@ class PhoneDock:
 
     # ── input ─────────────────────────────────────────────────────────────
     def input(self, device_id: str, action: Union[Dict[str, Any], List[Dict[str, Any]]], expect: Expect = None,
-              snapshot_id: Optional[str] = None, return_ui: bool = False, settle_ms: Optional[int] = None,
-              request_id: Optional[str] = None) -> Dict[str, Any]:
+              snapshot_id: Optional[str] = None, return_ui: bool = False, request_id: Optional[str] = None,
+              settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """One action or several in a row. The result has `delivery` ("sent" / "not_sent") and `retrySafe`; with
         `expect` (checked once, after the last action) also `expect`: {ok, outcome, message, …}, where outcome is
         "verified", "screen_unchanged" or "changed_not_found". expect: "text" (visible), {"visible": t},
@@ -476,7 +476,7 @@ class PhoneDock:
 
     def tap(self, device_id: str, x: float, y: float, label: Optional[str] = None,
             selector: Optional[Dict[str, Any]] = None, element: Optional[Dict[str, Any]] = None, expect: Expect = None,
-            return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+            return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """`label` names what the tap is aimed at; `selector` ({text, id, type, match, index}) is the find query that
         chose the point and `element` ({type, id, editable}) what it hit. All three only show in the activity log
         (`save_flow` turns a selector into `tap: <text>`)."""
@@ -487,35 +487,35 @@ class PhoneDock:
             body["selector"] = {k: v for k, v in selector.items() if v not in (None, "", 0) and not (k == "match" and v == "contains")}
         if element:
             body["element"] = {k: v for k, v in element.items() if v is not None}
-        return self.input(device_id, body, expect, return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+        return self.input(device_id, body, expect, return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     def tap_ref(self, device_id: str, ref: str, expect: Expect = None, snapshot_id: Optional[str] = None,
-                return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+                return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         return self.input(device_id, {"action": "tap", "ref": ref.lstrip("@")}, expect, snapshot_id=snapshot_id,
-                          return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+                          return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     def long_press(self, device_id: str, x: float, y: float, duration_ms: Optional[int] = None, expect: Expect = None,
-                   return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+                   return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         return self.input(device_id, {"action": "longPress", "x": round(x), "y": round(y), "durationMs": duration_ms},
-                          expect, return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+                          expect, return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     def swipe(self, device_id: str, x1: float, y1: float, x2: float, y2: float, duration_ms: Optional[int] = None,
-              expect: Expect = None, return_ui: bool = False, settle_ms: Optional[int] = None,
-              request_id: Optional[str] = None) -> Dict[str, Any]:
+              expect: Expect = None, return_ui: bool = False, request_id: Optional[str] = None,
+              settle_ms: Optional[int] = None) -> Dict[str, Any]:
         return self.input(device_id, {"action": "swipe", "x1": round(x1), "y1": round(y1), "x2": round(x2), "y2": round(y2),
-                                      "durationMs": duration_ms}, expect, return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+                                      "durationMs": duration_ms}, expect, return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     def type(self, device_id: str, text: str, secret: bool = False, expect: Expect = None,
-             return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+             return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """secret=True keeps the text out of the action log (stored as '•••'; replay skips it)."""
         action: Dict[str, Any] = {"action": "type", "text": text}
         if secret:
             action["secret"] = True
-        return self.input(device_id, action, expect, return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+        return self.input(device_id, action, expect, return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     def swipe_direction(self, device_id: str, direction: str, distance: Optional[float] = None, duration_ms: Optional[int] = None,
                         x: Optional[float] = None, y: Optional[float] = None, expect: Expect = None,
-                        return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+                        return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """Swipe the finger up/down/left/right ("up" reveals what is below) inside the scroll container, never on the
         keyboard. Returns {swipe, container, delivery, …}; with expect (see input()) also `expect`."""
         body = {k: v for k, v in {"direction": direction, "distance": distance, "durationMs": duration_ms,
@@ -524,18 +524,18 @@ class PhoneDock:
         return self._request("POST", self._dev(device_id, "/swipe"), body, request_id=request_id)
 
     def double_tap(self, device_id: str, x: float, y: float, expect: Expect = None,
-                   return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+                   return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         return self.input(device_id, {"action": "doubleTap", "x": round(x), "y": round(y)}, expect,
-                          return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+                          return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     def pinch(self, device_id: str, x: float, y: float, scale: float, duration_ms: Optional[int] = None,
-              return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+              return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """scale < 1 pinches in (zoom out), > 1 spreads (zoom in)."""
         return self.input(device_id, {"action": "pinch", "x": round(x), "y": round(y), "scale": scale, "durationMs": duration_ms},
-                          return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+                          return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
-    def hide_keyboard(self, device_id: str, return_ui: bool = False, settle_ms: Optional[int] = None,
-                      request_id: Optional[str] = None) -> Dict[str, Any]:
+    def hide_keyboard(self, device_id: str, return_ui: bool = False, request_id: Optional[str] = None,
+                      settle_ms: Optional[int] = None) -> Dict[str, Any]:
         body = {k: v for k, v in {"returnUi": True if return_ui else None, "settleMs": settle_ms}.items() if v is not None}
         return self._request("POST", self._dev(device_id, "/keyboard/hide"), body, request_id=request_id)
 
@@ -572,8 +572,8 @@ class PhoneDock:
     def fill(self, device_id: str, value: str, text: Optional[str] = None, ref: Optional[str] = None, id: Optional[str] = None,
              type: Optional[str] = None, match: Optional[str] = None, index: Optional[int] = None, x: Optional[float] = None,
              y: Optional[float] = None, clear: bool = True, submit: bool = False, secret: bool = False, expect: Expect = None,
-             snapshot_id: Optional[str] = None, return_ui: bool = False, settle_ms: Optional[int] = None,
-             request_id: Optional[str] = None) -> Dict[str, Any]:
+             snapshot_id: Optional[str] = None, return_ui: bool = False, request_id: Optional[str] = None,
+             settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """Tap a field (by text/ref/id or device-pixel x,y), wait for focus, clear it, type value, re-read and verify.
         Returns {element, cleared, clearMethod, previousValue, finalValue, verified, warnings, elapsedMs, delivery, …};
         with expect (see input()) also `expect`."""
@@ -589,7 +589,7 @@ class PhoneDock:
     def scroll_to(self, device_id: str, text: str, match: Optional[str] = None, type: Optional[str] = None,
                   direction: Optional[str] = None, max_scrolls: Optional[int] = None, x: Optional[float] = None,
                   y: Optional[float] = None, ocr_fallback: Optional[bool] = None, return_ui: bool = False,
-                  settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+                  request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """Slow, precise swipes until an element matching `text` is on screen. direction = where to look
         ('down' default, 'up', 'left', 'right'); x, y = device-pixel point to swipe around. Returns
         {found, element, scrolls, endReached, reason?, …}; found is False with reason 'end reached, not found'
@@ -621,14 +621,14 @@ class PhoneDock:
         return r
 
     # ── navigation / system UI / prompts ──────────────────────────────────
-    def go_back(self, device_id: str, return_ui: bool = False, settle_ms: Optional[int] = None,
-                request_id: Optional[str] = None) -> Dict[str, Any]:
+    def go_back(self, device_id: str, return_ui: bool = False, request_id: Optional[str] = None,
+                settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """{ok, method, tapped?}: Android presses Back; iOS taps the nav bar back button, else swipes from the left edge."""
         body = {k: v for k, v in {"returnUi": True if return_ui else None, "settleMs": settle_ms}.items() if v is not None}
         return self._request("POST", self._dev(device_id, "/back"), body, request_id=request_id)
 
-    def system_gesture(self, device_id: str, gesture: str, return_ui: bool = False, settle_ms: Optional[int] = None,
-                       request_id: Optional[str] = None) -> Dict[str, Any]:
+    def system_gesture(self, device_id: str, gesture: str, return_ui: bool = False, request_id: Optional[str] = None,
+                       settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """gesture = 'go_home' | 'app_switcher' | 'control_center' | 'notification_center'."""
         body = {k: v for k, v in {"gesture": gesture, "returnUi": True if return_ui else None, "settleMs": settle_ms}.items() if v is not None}
         return self._request("POST", self._dev(device_id, "/gesture"), body, request_id=request_id)
@@ -639,7 +639,7 @@ class PhoneDock:
         return self._request("GET", self._dev(device_id, "/prompt"), query={"ocrFallback": ocr_fallback})
 
     def handle_alert(self, device_id: str, action: str = "accept", button: Optional[str] = None,
-                     return_ui: bool = False, settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
+                     return_ui: bool = False, request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
         """Tap a system prompt's button by text: action 'accept' | 'dismiss' | 'button=<label>' (or pass button=).
         Raises PhoneDockApiError('needs_human', 403) for passcode / biometric / credential / profile / Allow Paste
         prompts (use request_human), 'no_prompt' 404 when nothing is on screen. Never types."""
@@ -771,8 +771,8 @@ class PhoneDock:
         return self._request("DELETE", _notes_path(app_id))
 
     def key(self, device_id: str, key: str, expect: Expect = None, return_ui: bool = False,
-            settle_ms: Optional[int] = None, request_id: Optional[str] = None) -> Dict[str, Any]:
-        return self.input(device_id, {"action": "key", "key": key}, expect, return_ui=return_ui, settle_ms=settle_ms, request_id=request_id)
+            request_id: Optional[str] = None, settle_ms: Optional[int] = None) -> Dict[str, Any]:
+        return self.input(device_id, {"action": "key", "key": key}, expect, return_ui=return_ui, request_id=request_id, settle_ms=settle_ms)
 
     # ── apps / system ─────────────────────────────────────────────────────
     def apps(self, device_id: str, system: bool = False) -> List[Dict[str, Any]]:
@@ -793,8 +793,8 @@ class PhoneDock:
                env: Optional[Dict[str, str]] = None,
                verify: Optional[bool] = None,
                return_ui: bool = False,
-               settle_ms: Optional[int] = None,
-               request_id: Optional[str] = None) -> Dict[str, Any]:
+               request_id: Optional[str] = None,
+               settle_ms: Optional[int] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {}
         if expect is not None:
             body["expect"] = expect

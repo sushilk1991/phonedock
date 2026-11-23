@@ -372,9 +372,117 @@ test('observe="ui"|"both": compact outline, default settle, unchanged suppressio
     const okBatch = await s.call('batch', {
       steps: [{ tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } }],
       observe_at_end: 'ui',
+      settle_ms: 0,
     });
     assert.equal(okBatch.isError, false, okBatch.text);
     assert.match(okBatch.text, /e1 Button "General"/);
     assert.match(okBatch.text, /Screen unchanged \(obs=#7/);
+  } finally { await s.close(); }
+});
+
+test('observe regressions: failed screenshot preserves delivered action, batch never suppresses against dropped step, observe_at_end settles', async () => {
+  const treeA: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    snapshotId: 'snap-a',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'Alpha', clickable: true })],
+  };
+  const treeB: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:01.000Z',
+    snapshotId: 'snap-b',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'Beta', clickable: true })],
+  };
+  const treeC: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:02.000Z',
+    snapshotId: 'snap-c',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'Gamma', clickable: true })],
+  };
+  let currentTree = treeA;
+  let failShot = false;
+
+  const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, treeA.root);
+  fake.ui = async () => currentTree;
+  fake.screenshot = async () => {
+    if (failShot) throw new Error('framebuffer timeout');
+    return { data: Buffer.from([0xff, 0xd8, 0xff]), mime: 'image/jpeg', deviceWidth: 1080, deviceHeight: 2400, imageWidth: 461, imageHeight: 1024, scale: 2.3438 };
+  };
+  fake.tap = async (_id: string, _x: number, _y: number, _label?: string, meta?: Record<string, unknown>) => ({
+    ok: true,
+    delivery: 'sent',
+    retrySafe: false,
+    ...(meta?.expect ? { expect: { ok: true, outcome: 'verified', message: 'Verified: "Gamma" is on screen (0.1 s).' } } : {}),
+    ...(meta?.returnUi ? { ui: currentTree } : {}),
+  });
+
+  const s = await connect(fake);
+  try {
+    // Item 2: observe="both" with a throwing screenshot keeps action summary + UI and does NOT mark delivered action failed
+    failShot = true;
+    const bothFailedShot = await s.call('tap', { x: 10, y: 10, observe: 'both', settle_ms: 0 });
+    assert.equal(bothFailedShot.isError, false, bothFailedShot.text);
+    assert.match(bothFailedShot.text, /Tapped/);
+    assert.match(bothFailedShot.text, /e1 Button "Alpha"/);
+    assert.match(bothFailedShot.text, /Screenshot unavailable \(framebuffer timeout\)/);
+
+    const imgFailedShot = await s.call('tap', { x: 10, y: 10, observe: 'image', settle_ms: 0 });
+    assert.equal(imgFailedShot.isError, false, imgFailedShot.text);
+    assert.match(imgFailedShot.text, /Tapped/);
+    assert.match(imgFailedShot.text, /Screenshot unavailable \(framebuffer timeout\)/);
+    failShot = false;
+
+    // Item 5a: batch with two observe="ui" steps on a new screen -> Step 1 is shortened, so Step 2 MUST emit full tree + refs
+    currentTree = treeB;
+    const batchTwoObs = await s.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2, observe: 'ui', settle_ms: 0 } },
+      ],
+    });
+    assert.equal(batchTwoObs.isError, false, batchTwoObs.text);
+    assert.match(batchTwoObs.text, /Output of the last step:[\s\S]*e1 Button "Beta"/);
+    assert.doesNotMatch(batchTwoObs.text, /Output of the last step:[\s\S]*Screen unchanged/);
+
+    // Item 5b: batch with Step 1 observe="ui", Step 2 plain tap, and observe_at_end="ui" on a new screen -> end block emits full tree + refs
+    currentTree = treeC;
+    const batchEndObs = await s.call('batch', {
+      steps: [
+        { tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } },
+        { tool: 'tap', args: { x: 2, y: 2 } },
+      ],
+      observe_at_end: 'ui',
+      settle_ms: 0,
+    });
+    assert.equal(batchEndObs.isError, false, batchEndObs.text);
+    assert.match(batchEndObs.text, /e1 Button "Gamma"/);
+    assert.doesNotMatch(batchEndObs.text, /Screen unchanged/);
+
+    // Item 6: observe_at_end applies default 700 ms settle unless settle_ms is given or last step had expect
+    const tDefault = Date.now();
+    await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1 } }],
+      observe_at_end: 'ui',
+    });
+    assert.ok(Date.now() - tDefault >= 650, `expected default ~700 ms settle on observe_at_end, took ${Date.now() - tDefault} ms`);
+
+    const tExpect = Date.now();
+    await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1, expect: { visible: 'Gamma' } } }],
+      observe_at_end: 'ui',
+    });
+    assert.ok(Date.now() - tExpect < 500, `expected observe_at_end to skip default settle after expect, took ${Date.now() - tExpect} ms`);
+
+    const tExplicit = Date.now();
+    await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1 } }],
+      observe_at_end: 'ui',
+      settle_ms: 120,
+    });
+    const explicitMs = Date.now() - tExplicit;
+    assert.ok(explicitMs >= 100 && explicitMs < 550, `expected explicit ~120 ms settle on observe_at_end, took ${explicitMs} ms`);
   } finally { await s.close(); }
 });

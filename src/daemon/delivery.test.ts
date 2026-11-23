@@ -222,3 +222,69 @@ test('inputRoute returnUi + settleMs: validates options, reuses expect tree, set
     core.backends.splice(core.backends.indexOf(backend as never), 1);
   }
 });
+
+test('inputRoute returnUi OCR fallback registers uiCache + snapshot so tap(ref) works immediately', async () => {
+  const core = await import('./core.ts');
+  const { router } = await import('./routes.ts');
+  const { instrumentBackend } = await import('./metrics.ts');
+  const { setOcrTreeReaderForTests } = await import('./delivery.ts');
+  const id = 'fake-ocr:pdtest-ocr';
+  const taps: { x: number; y: number }[] = [];
+
+  const backend = instrumentBackend({
+    id: 'fake-ocr',
+    platform: 'ios',
+    async tap(_nid: string, x: number, y: number) { taps.push({ x, y }); },
+    async screenshot() { return Buffer.from([0x89, 0x50, 0x4e, 0x47]); },
+    // No uiTree -> triggers OCR fallback in withUiObservation
+  }, 'fake-ocr');
+  core.backends.push(backend as never);
+  const inputRouteMatch = router.match('POST', `/v1/devices/${id}/input`);
+  assert.ok(inputRouteMatch && inputRouteMatch !== 'method');
+  const callInput = (body: unknown) => Promise.resolve(inputRouteMatch.h({
+    params: inputRouteMatch.params, owner: 'mcp:test:1', body: async () => body, q: () => undefined,
+  } as unknown as Ctx));
+
+  // Seed an older snapshot in uiCache so we verify OCR replaces it rather than binding to the old tree
+  core.uiCache.set(id, {
+    source: 'accessibility',
+    screen: { width: 1000, height: 2000 },
+    capturedAt: new Date(Date.now() - 60_000).toISOString(),
+    snapshotId: 'old-snap',
+    root: [{ ref: 'e1', type: 'Button', text: 'Stale Button', bounds: { x: 10, y: 10, width: 40, height: 40 } }],
+  });
+
+  setOcrTreeReaderForTests(async () => ({
+    source: 'ocr',
+    screen: { width: 1000, height: 2000 },
+    capturedAt: new Date().toISOString(),
+    root: [{ ref: 'e1', type: 'Text', text: 'Continue', bounds: { x: 400, y: 900, width: 200, height: 80 } }],
+  }));
+
+  try {
+    const obs = await callInput({ action: 'tap', x: 5, y: 5, returnUi: true, settleMs: 0 }) as {
+      delivery?: string;
+      ui?: { source: string; snapshotId?: string; screenHash?: string; root: { ref: string; text?: string }[] };
+    };
+    assert.equal(obs.delivery, 'sent');
+    assert.equal(obs.ui?.source, 'ocr');
+    assert.ok(obs.ui?.snapshotId && obs.ui.snapshotId !== 'old-snap', 'OCR fallback must register a fresh snapshotId');
+    assert.match(obs.ui?.screenHash ?? '', /^[0-9a-f]{16}$/);
+    assert.equal(core.uiCache.get(id)?.snapshotId, obs.ui.snapshotId);
+
+    // Immediate tap(ref="e1", snapshotId) must succeed and hit the OCR element's center (500, 940), NOT stale_ref or old-snap (30, 30)
+    taps.length = 0;
+    const tapRes = await callInput({ action: 'tap', ref: 'e1', snapshotId: obs.ui.snapshotId }) as {
+      delivery?: string;
+      resolved?: { ref: string; x: number; y: number };
+    };
+    assert.equal(tapRes.delivery, 'sent');
+    assert.deepEqual(taps, [{ x: 500, y: 940 }]);
+    assert.equal(tapRes.resolved?.x, 500);
+    assert.equal(tapRes.resolved?.y, 940);
+  } finally {
+    setOcrTreeReaderForTests(undefined);
+    core.uiCache.delete(id);
+    core.backends.splice(core.backends.indexOf(backend as never), 1);
+  }
+});

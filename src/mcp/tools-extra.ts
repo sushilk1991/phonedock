@@ -131,17 +131,33 @@ export function registerExtraTools(k: ToolKit): void {
 
   // ── batch ─────────────────────────────────────────────────────────────
   const NOT_IN_BATCH = new Set(['batch', 'request_human']);
-  tool('batch', 'Run several tool calls in one round trip, in order, e.g. [{tool:"tap",args:{text:"Login"}}, {tool:"fill",args:{target:"Email",value:"a@b.c"}}, {tool:"wait_for",args:{until:"idle"}}, {tool:"get_ui"}]. Each step\'s args are exactly that tool\'s arguments (`device` defaults to the batch\'s `device`). Steps may pass `observe` ("none"|"image"|"ui"|"both"), or set `observe_at_end` on the batch. Returns one line per step; images from steps are dropped except the last step\'s. The last step\'s full text output is included too. batch and request_human cannot be steps.', {
+  tool('batch', 'Run several tool calls in one round trip, in order, e.g. [{tool:"tap",args:{text:"Login"}}, {tool:"fill",args:{target:"Email",value:"a@b.c"}}, {tool:"wait_for",args:{until:"idle"}}, {tool:"get_ui"}]. Each step\'s args are exactly that tool\'s arguments (`device` defaults to the batch\'s `device`). Steps may pass `observe` ("none"|"image"|"ui"|"both"), or set `observe_at_end` on the batch (which waits `settle_ms`, default 700 ms unless the last step used `expect`). Returns one line per step; images from steps are dropped except the last step\'s. The last step\'s full text output is included too. batch and request_human cannot be steps.', {
     device: deviceParam,
     steps: z.array(z.object({ tool: z.string().describe('Tool name, e.g. "tap"'), args: z.record(z.string(), z.unknown()).optional().describe('That tool\'s arguments') })).min(1).max(50),
     stop_on_error: z.boolean().optional().describe('Stop at the first failing step (default true)'),
     observe_at_end: observeModeParam,
     screenshot_at_end: z.boolean().optional().describe('Append a fresh screenshot after the last step (same as observe_at_end="image"). Default false'),
+    settle_ms: settleParam,
   }, async (a, extra) => {
     const endMode = resolveObserve(a.observe_at_end, a.screenshot_at_end);
     const stop = a.stop_on_error !== false;
-    const lines: string[] = []; let failed = 0; let ran = 0; let last: ToolResult | undefined; const t0 = Date.now();
+    // Snapshot what the agent actually received before this batch: earlier steps are shortened to one line, so neither
+    // a later step nor observe_at_end may suppress against a tree that was dropped from this response.
+    const preBatchHashes = new Map<string, string>();
+    for (const [devId, obs] of k.ctx.uiObs ?? []) preBatchHashes.set(devId, obs.hash);
+    const restoreDeliveredHashes = () => {
+      if (!k.ctx.uiObs) return;
+      for (const [devId, obs] of k.ctx.uiObs) {
+        k.ctx.uiObs.set(devId, { ...obs, hash: preBatchHashes.get(devId) ?? '' });
+      }
+    };
+    const lines: string[] = []; let failed = 0; let ran = 0;
+    let last: ToolResult | undefined;
+    let lastStep: { tool: string; args?: Record<string, unknown> } | undefined;
+    const t0 = Date.now();
     for (const [i, s] of a.steps.entries()) {
+      // Every prior step is no longer the last step, so its full output is shortened; discard its suppression hash.
+      if (i > 0) restoreDeliveredHashes();
       const n = i + 1;
       let r: ToolResult;
       const h = handlers.get(s.tool);
@@ -155,6 +171,7 @@ export function registerExtraTools(k: ToolKit): void {
         ran++;
       }
       last = r;
+      lastStep = s;
       lines.push(`${n}. ${s.tool} ${r.isError ? 'FAILED' : 'ok'} (${Date.now() - ts} ms): ${oneLine(r)}`);
       if (r.isError) {
         failed++;
@@ -168,9 +185,12 @@ export function registerExtraTools(k: ToolKit): void {
       if (full.includes('\n') || full.length > 240) content.push(text(`Output of the last step:\n${full}`));
       content.push(...last.content.filter((x) => x.type === 'image'));
     }
+    const lastHadExpect = Boolean(lastStep?.args && (lastStep.args as Record<string, unknown>).expect !== undefined && (lastStep.args as Record<string, unknown>).expect !== null);
+    const endSettle = a.settle_ms ?? (lastHadExpect ? 0 : 700);
     if (endMode === 'ui' || endMode === 'both') {
       try {
         const d = await target(a.device);
+        if (endSettle > 0) await sleep(endSettle);
         try {
           const tree = await c.ui(d.id, { ocrFallback: true });
           const formatted = await formatUi(d, tree, { mode: 'action' });
@@ -178,10 +198,20 @@ export function registerExtraTools(k: ToolKit): void {
         } catch (e) {
           content.push(text(`UI observation unavailable (${(e as Error)?.message ?? String(e)}); call get_ui or screenshot.`));
         }
-        if (endMode === 'both') content.push(...(await shot(d)));
-      } catch (e) { content.push(...errorResult(e).content); }
+        if (endMode === 'both') {
+          try { content.push(...(await shot(d))); }
+          catch (e) { content.push(text(`Screenshot unavailable (${(e as Error)?.message ?? String(e)}); call screenshot.`)); }
+        }
+      } catch (e) { content.push(text(`UI observation unavailable (${(e as Error)?.message ?? String(e)}); call get_ui or screenshot.`)); }
     } else if (endMode === 'image') {
-      try { content.push(...(await shot(await target(a.device)))); } catch (e) { content.push(...errorResult(e).content); }
+      try {
+        const d = await target(a.device);
+        if (endSettle > 0) await sleep(endSettle);
+        try { content.push(...(await shot(d))); }
+        catch (e) { content.push(text(`Screenshot unavailable (${(e as Error)?.message ?? String(e)}); call screenshot.`)); }
+      } catch (e) { content.push(text(`Screenshot unavailable (${(e as Error)?.message ?? String(e)}); call screenshot.`)); }
+    } else if (a.settle_ms) {
+      await sleep(a.settle_ms);
     }
     return { content, isError: failed > 0 };
   });

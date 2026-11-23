@@ -283,6 +283,36 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(captured[2][2], {"action": "tap", "x": 10, "y": 20, "returnUi": True, "settleMs": 300})
         self.assertEqual(captured[3][2], {"returnUi": True, "settleMs": 0})
 
+    def test_positional_request_id_compatibility_for_input_fill_launch(self):
+        captured = []
+
+        def reply(handler, body):
+            captured.append((handler.path, handler.headers.get("X-PhoneDock-Request-ID"), json.loads(body.decode())))
+            json_reply(handler, {"ok": True, "delivery": "sent", "retrySafe": False})
+
+        with serve(reply) as url:
+            c = self.client(url, auto_start=False)
+            # Legacy positional calls: request_id stays at its original position before the new settle_ms parameter
+            c.input("android-emulator:pdtest-1", {"action": "tap", "x": 1, "y": 2}, None, "snap-1", True, "req-input-1")
+            c.fill(
+                "android-emulator:pdtest-1", "hello", "Email", None, None, None, None, None, None, None,
+                True, False, False, None, "snap-2", True, "req-fill-1",
+            )
+            c.launch("ios-simulator:pdtest-1", "com.example.app", None, ["-A"], {"K": "V"}, True, True, "req-launch-1")
+
+        self.assertEqual(captured[0][1], "req-input-1")
+        self.assertNotIn("settleMs", captured[0][2])
+        self.assertEqual(captured[0][2], {"action": "tap", "x": 1, "y": 2, "snapshotId": "snap-1", "returnUi": True})
+
+        self.assertEqual(captured[1][1], "req-fill-1")
+        self.assertNotIn("settleMs", captured[1][2])
+        self.assertEqual(captured[1][2]["snapshotId"], "snap-2")
+        self.assertEqual(captured[1][2]["returnUi"], True)
+
+        self.assertEqual(captured[2][1], "req-launch-1")
+        self.assertNotIn("settleMs", captured[2][2])
+        self.assertEqual(captured[2][2], {"args": ["-A"], "env": {"K": "V"}, "verify": True, "returnUi": True})
+
 
 if __name__ == "__main__":
     unittest.main()

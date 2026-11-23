@@ -113,3 +113,82 @@ test('formatUiObservation: enforces 120-element cap and 8000-char cap in action 
   assert.ok(rChar.text.length <= OBSERVE_MAX_CHARS, `len ${rChar.text.length} exceeded ${OBSERVE_MAX_CHARS}`);
   assert.match(rChar.text, /8000 char limit.*call get_ui for the full tree\./);
 });
+
+test('formatUiObservation: hashes exact printed outline (inner toggle movement, UiWindow.texts, coordinate space)', () => {
+  const scale = standardSpace(1200, 2400);
+
+  // Item 3: moving an unlabeled inner switch changes the printed tap point @(x,y) -> must NOT suppress
+  const ctxToggle = makeCtx();
+  const toggleTree = (innerX: number) => makeTree([{
+    ref: 'e1',
+    type: 'CheckBox',
+    text: 'Airplane Mode',
+    clickable: true,
+    bounds: { x: 40, y: 200, width: 1000, height: 80 },
+    children: [{ ref: 'e2', type: 'Switch', bounds: { x: innerX, y: 210, width: 100, height: 60 } }],
+  }], { screenHash: 'same-daemon-hash' });
+  const t1 = formatUiObservation({ ctx: ctxToggle, device: dev, tree: toggleTree(700), scale, mode: 'action' });
+  const t2 = formatUiObservation({ ctx: ctxToggle, device: dev, tree: toggleTree(950), scale, mode: 'action' });
+  assert.equal(t2.unchanged, false, 'moved inner switch tap point must not be suppressed');
+  assert.notEqual(t2.hash, t1.hash);
+  assert.match(t2.text, /e1 CheckBox "Airplane Mode"/);
+
+  // Item 4: changing UiWindow.texts changes the printed overlay window line -> must NOT suppress
+  const ctxWin = makeCtx();
+  const winTree = (texts: string[]) => makeTree(
+    [{ ref: 'e1', type: 'Button', text: 'OK', clickable: true, bounds: { x: 40, y: 200, width: 200, height: 60 } }],
+    {
+      screenHash: 'same-daemon-hash',
+      windows: [{ role: 'heads_up', bounds: { x: 0, y: 100, width: 1200, height: 400 }, texts }],
+    },
+  );
+  const w1 = formatUiObservation({ ctx: ctxWin, device: dev, tree: winTree(['Allow location?']), scale, mode: 'action' });
+  const w2 = formatUiObservation({ ctx: ctxWin, device: dev, tree: winTree(['Allow camera?']), scale, mode: 'action' });
+  assert.equal(w2.unchanged, false, 'changed UiWindow.texts must not be suppressed');
+  assert.notEqual(w2.hash, w1.hash);
+  assert.match(w2.text, /Allow camera\?/);
+});
+
+test('formatUiObservation: enforces 8000-char cap with notice on unchanged-screen and empty-tree prompt warnings', () => {
+  const ctx = makeCtx();
+  const scale = standardSpace(1200, 2400);
+  const hugeLabel = 'Allow ' + 'X'.repeat(10_500);
+  const treeWithHugePrompt = makeTree(
+    [{ ref: 'e1', type: 'Button', text: 'Settings', clickable: true, bounds: { x: 20, y: 100, width: 200, height: 60 } }],
+    {
+      snapshotId: 'snap-huge-1',
+      prompt: {
+        kind: 'permission',
+        reason: 'Permission dialog',
+        needsHuman: false,
+        buttons: [{ text: hugeLabel, bounds: { x: 10, y: 10, width: 100, height: 40 }, role: 'accept' }],
+      },
+    },
+  );
+
+  const first = formatUiObservation({ ctx, device: dev, tree: treeWithHugePrompt, scale, mode: 'action' });
+  assert.equal(first.unchanged, false);
+  assert.equal(first.truncated, true);
+  assert.ok(first.text.length <= OBSERVE_MAX_CHARS, `first len ${first.text.length} exceeded ${OBSERVE_MAX_CHARS}`);
+  assert.match(first.text, /8000 char limit.*call get_ui for the full tree\./);
+
+  // Item 8: unchanged screen with huge alert button text MUST also obey the 8000-char cap + notice
+  const second = formatUiObservation({ ctx, device: dev, tree: { ...treeWithHugePrompt, snapshotId: 'snap-huge-2' }, scale, mode: 'action' });
+  assert.equal(second.unchanged, true);
+  assert.equal(second.truncated, true);
+  assert.ok(second.text.length <= OBSERVE_MAX_CHARS, `unchanged len ${second.text.length} exceeded ${OBSERVE_MAX_CHARS}`);
+  assert.match(second.text, /^Screen unchanged \(obs=#2,/);
+  assert.match(second.text, /8000 char limit.*call get_ui for the full tree\./);
+
+  // Empty-element tree with huge prompt also obeys the cap
+  const emptyHuge = formatUiObservation({
+    ctx: makeCtx(),
+    device: dev,
+    tree: makeTree([], { prompt: treeWithHugePrompt.prompt }),
+    scale,
+    mode: 'action',
+  });
+  assert.equal(emptyHuge.truncated, true);
+  assert.ok(emptyHuge.text.length <= OBSERVE_MAX_CHARS);
+  assert.match(emptyHuge.text, /8000 char limit.*call get_ui for the full tree\./);
+});

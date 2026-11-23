@@ -1,7 +1,8 @@
 // Shared compact UI formatter for MCP `get_ui` and action `observe: "ui" | "both"`.
-// Handles session observation counters, unchanged-screen suppression, snapshot binding, and size caps.
+// Handles session observation counters, unchanged-screen suppression (hashing exact printed output),
+// snapshot binding, and strict element/character size caps.
 import { windowsLine } from '../backends/android-windows.ts';
-import { uiTreeHash } from '../core/ui-hash.ts';
+import { outlineHash } from '../core/ui-hash.ts';
 import type { Device, UiElement, UiTree } from '../core/types.ts';
 import { promptWarning } from './tools-extra.ts';
 import type { McpContext, ScaleInfo } from './server.ts';
@@ -9,6 +10,7 @@ import type { McpContext, ScaleInfo } from './server.ts';
 export type ObserveMode = 'none' | 'image' | 'ui' | 'both';
 export const OBSERVE_MAX_ELEMENTS = 120;
 export const OBSERVE_MAX_CHARS = 8000;
+const HASH_PLACEHOLDER = '0'.repeat(16);
 
 /** Resolve `observe` + legacy `return_screenshot`, rejecting conflicting combinations before sending input. */
 export function resolveObserve(observe?: ObserveMode, returnScreenshot?: boolean): ObserveMode {
@@ -46,6 +48,14 @@ function tapPoint(e: UiElement): { x: number; y: number } {
   return c(e.bounds ?? { x: 0, y: 0, width: 0, height: 0 });
 }
 
+/** Fit any action-mode block strictly within `maxChars`, appending an explicit truncation notice when cut. */
+function capActionBlock(block: string, maxChars: number | undefined, foot: string): { text: string; capped: boolean } {
+  if (maxChars === undefined || block.length <= maxChars) return { text: block, capped: false };
+  const suffix = `…\n${foot}`;
+  if (suffix.length >= maxChars) return { text: foot.slice(0, maxChars), capped: true };
+  return { text: `${block.slice(0, maxChars - suffix.length)}${suffix}`, capped: true };
+}
+
 export interface FormatUiOptions {
   ctx: McpContext;
   device: Device;
@@ -73,18 +83,18 @@ export interface FormatUiResult {
   truncated: boolean;
 }
 
-/** Format a UiTree for MCP, updating session snapshot, outline cache, and obs counter/hash. */
+/** Format a UiTree for MCP, updating session snapshot, outline cache, and obs counter/hash.
+ *  The MCP hash is computed over the exact printed outline (element lines in reported coordinates,
+ *  prompt/human warnings, OCR notes, and overlay window lines), so equal hashes guarantee identical output. */
 export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
   const { ctx, device: d, tree, mode } = opts;
   ctx.snapshots ??= new Map();
   if (tree.snapshotId) ctx.snapshots.set(d.id, tree.snapshotId);
   if (opts.coordinateSpace !== 'device') ctx.offSpace?.delete(d.id);
 
-  const hash = tree.screenHash || uiTreeHash(tree);
   ctx.uiObs ??= new Map();
   const prevObs = ctx.uiObs.get(d.id);
   const obsCount = (prevObs?.count ?? 0) + 1;
-  ctx.uiObs.set(d.id, { hash, count: obsCount });
 
   const s = opts.coordinateSpace === 'device' ? { ...opts.scale, scale: 1 } : opts.scale;
   const sc = s.scale || 1;
@@ -145,15 +155,6 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
     pr && !(pr.needsHuman && needs) ? promptWarning(pr) : '',
   ].filter(Boolean);
 
-  // Action-mode unchanged-screen suppression: identical hash guarantees identical refs and coordinates.
-  if (mode === 'action' && prevObs && prevObs.hash === hash) {
-    const out = [
-      `Screen unchanged (obs=#${obsCount}, hash=${hash}${tree.snapshotId ? `, snapshot=${tree.snapshotId}` : ''}).`,
-      ...warnings,
-    ].join('\n');
-    return { text: out, hash, obsCount, unchanged: true, totalElements: total, shownElements: 0, truncated: false };
-  }
-
   const space = opts.coordinateSpace === 'device'
     ? `device pixels (${s.deviceWidth || tree.screen?.width}x${s.deviceHeight || tree.screen?.height})`
     : `image space ${s.imageWidth}x${s.imageHeight} (device ${s.deviceWidth}x${s.deviceHeight}, scale ${+sc.toFixed(4)})`;
@@ -168,19 +169,39 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
       ? `\nThe accessibility tree looks incomplete here (${om.regions.length} empty area${om.regions.length > 1 ? 's' : ''}) and OCR failed (${om.error.split('\n')[0].slice(0, 160)}); take a screenshot to see it.`
       : '';
 
-  const obsMeta = `obs=#${obsCount} hash=${hash}${tree.snapshotId ? ` snapshot=${tree.snapshotId}` : ''}`;
+  const headTail = (elemClause: string) =>
+    `coordinates in ${space}. ${elemClause}`
+    + (cutSome ? ' Long texts are cut (…): full_text=true shows them whole.' : '')
+    + (warnings.length ? '\n' + warnings.join('\n') : '')
+    + ocrNote
+    + (over ? `\n${over} (not in this list)` : '');
 
   if (mode === 'action') {
-    const head = `UI of ${d.name} via ${tree.source}; ${obsMeta}; coordinates in ${space}. ${total} elements.`
-      + (cutSome ? ' Long texts are cut (…): full_text=true shows them whole.' : '')
-      + (warnings.length ? '\n' + warnings.join('\n') : '')
-      + ocrNote
-      + (over ? `\n${over} (not in this list)` : '');
+    const tail = headTail(`${total} elements.`);
+    const prefix = `UI of ${d.name} via ${tree.source}; obs=#${obsCount} hash=${HASH_PLACEHOLDER}${tree.snapshotId ? ` snapshot=${tree.snapshotId}` : ''}; `;
+    const head = `${prefix}${tail}`;
+    const stablePrefix = `UI via ${tree.source}; `;
+
     if (!lines.length) {
-      return { text: `${head}\nNo UI elements found — take a screenshot to see the screen.`, hash, obsCount, unchanged: false, totalElements: 0, shownElements: 0, truncated: false };
+      const emptyFoot = `… truncated (${maxChars} char limit); call get_ui for the full tree.`;
+      const rawOut = `${head}\nNo UI elements found — take a screenshot to see the screen.`;
+      const capped = capActionBlock(rawOut, maxChars, emptyFoot);
+      const stableOut = capped.capped
+        ? `${stablePrefix}${capped.text.slice(prefix.length)}`
+        : `${stablePrefix}${tail}\nNo UI elements found — take a screenshot to see the screen.`;
+      const hash = outlineHash(stableOut);
+      ctx.uiObs.set(d.id, { hash, count: obsCount });
+
+      if (prevObs && prevObs.hash && prevObs.hash === hash) {
+        const rawUnchanged = [
+          `Screen unchanged (obs=#${obsCount}, hash=${hash}${tree.snapshotId ? `, snapshot=${tree.snapshotId}` : ''}).`,
+          ...warnings,
+        ].join('\n');
+        const cappedUnchanged = capActionBlock(rawUnchanged, maxChars, emptyFoot);
+        return { text: cappedUnchanged.text, hash, obsCount, unchanged: true, totalElements: 0, shownElements: 0, truncated: cappedUnchanged.capped };
+      }
+      return { text: capped.text.replace(HASH_PLACEHOLDER, hash), hash, obsCount, unchanged: false, totalElements: 0, shownElements: 0, truncated: capped.capped };
     }
-    ctx.outlines ??= new Map();
-    ctx.outlines.set(d.id, { lines });
 
     let elementCapped = total > lines.length;
     let charCapped = false;
@@ -189,7 +210,6 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
       `… truncated: showing ${shown} of ${total} elements (${reasons.join(' / ')}); call get_ui for the full tree.`;
 
     if (maxChars !== undefined) {
-      // Fit head + kept lines (+ footer when truncated) strictly within maxChars.
       const build = (arr: string[], trunc: boolean, reasons: string[]) => {
         const parts = [head, ...arr];
         if (trunc) parts.push(footerFor(arr.length, reasons));
@@ -199,7 +219,6 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
       if (build(kept, elementCapped, initialReasons).length > maxChars) {
         charCapped = true;
         const reasons = [...(elementCapped ? [`${maxLines} element limit`] : []), `${maxChars} char limit`];
-        // Binary search / linear fit the maximum prefix of lines that fits within maxChars
         let lo = 0;
         let hi = kept.length;
         while (lo < hi) {
@@ -216,35 +235,70 @@ export function formatUiObservation(opts: FormatUiOptions): FormatUiResult {
       ...(elementCapped ? [`${maxLines} element limit`] : []),
       ...(charCapped ? [`${maxChars} char limit`] : []),
     ];
-    let textOut = [head, ...kept, ...(truncated ? [footerFor(kept.length, reasons)] : [])].join('\n');
-    if (maxChars !== undefined && textOut.length > maxChars) {
-      const foot = footerFor(0, reasons);
-      const avail = Math.max(0, maxChars - foot.length - 2);
-      textOut = `${head.slice(0, avail)}…\n${foot}`.slice(0, maxChars);
+    const foot = truncated ? footerFor(kept.length, reasons) : '';
+    const rawOut = [head, ...kept, ...(truncated ? [foot] : [])].join('\n');
+    const cappedHead = capActionBlock(rawOut, maxChars, footerFor(0, reasons));
+    const finalTemplate = cappedHead.text;
+    const stableOut = cappedHead.capped
+      ? `${stablePrefix}${finalTemplate.slice(prefix.length)}`
+      : [`${stablePrefix}${tail}`, ...kept, ...(truncated ? [foot] : [])].join('\n');
+    const hash = outlineHash(stableOut);
+
+    ctx.uiObs.set(d.id, { hash, count: obsCount });
+    ctx.outlines ??= new Map();
+    ctx.outlines.set(d.id, { lines });
+
+    // Action-mode unchanged-screen suppression: equal hashes guarantee identical printed outline by construction.
+    if (prevObs && prevObs.hash && prevObs.hash === hash) {
+      const rawUnchanged = [
+        `Screen unchanged (obs=#${obsCount}, hash=${hash}${tree.snapshotId ? `, snapshot=${tree.snapshotId}` : ''}).`,
+        ...warnings,
+      ].join('\n');
+      const unchangedFoot = `… truncated (${maxChars} char limit); call get_ui for the full tree.`;
+      const cappedUnchanged = capActionBlock(rawUnchanged, maxChars, unchangedFoot);
+      return { text: cappedUnchanged.text, hash, obsCount, unchanged: true, totalElements: total, shownElements: 0, truncated: cappedUnchanged.capped };
     }
-    return { text: textOut, hash, obsCount, unchanged: false, totalElements: total, shownElements: kept.length, truncated };
+
+    return {
+      text: finalTemplate.replace(HASH_PLACEHOLDER, hash),
+      hash,
+      obsCount,
+      unchanged: false,
+      totalElements: total,
+      shownElements: cappedHead.capped ? 0 : kept.length,
+      truncated: truncated || cappedHead.capped,
+    };
   }
 
-  // Full `get_ui` mode: preserve existing format + diff semantics, adding obs=#N hash=<hash>.
-  const head = `UI of ${d.name} via ${tree.source}; obs=#${obsCount} hash=${hash}; coordinates in ${space}. ${total} elements${total > lines.length ? ` (showing ${lines.length}; raise max_lines)` : ''}.`
-    + (cutSome ? ' Long texts are cut (…): full_text=true shows them whole.' : '')
-    + (warnings.length ? '\n' + warnings.join('\n') : '')
-    + ocrNote
-    + (over ? `\n${over} (not in this list)` : '');
+  // Full `get_ui` mode: preserve existing format + diff semantics, hashing the exact printed outline.
+  const elemClause = `${total} elements${total > lines.length ? ` (showing ${lines.length}; raise max_lines)` : ''}.`;
+  const tail = headTail(elemClause);
+  const stablePrefix = `UI via ${tree.source}; `;
+
   if (!lines.length) {
+    const hash = outlineHash(`${stablePrefix}${tail}\nNo UI elements found — take a screenshot to see the screen.`);
+    ctx.uiObs.set(d.id, { hash, count: obsCount });
+    const head = `UI of ${d.name} via ${tree.source}; obs=#${obsCount} hash=${hash}; ${tail}`;
     return { text: `${head}\nNo UI elements found — take a screenshot to see the screen.`, hash, obsCount, unchanged: false, totalElements: 0, shownElements: 0, truncated: false };
   }
+
   ctx.outlines ??= new Map();
   const previous = ctx.outlines.get(d.id);
   ctx.outlines.set(d.id, { lines });
   const old = new Set(previous?.lines);
   const now = new Set(lines);
-  const shown = opts.diff && previous
+  const isDiff = Boolean(opts.diff && previous);
+  const shown = isDiff
     ? [
-      ...previous.lines.filter((l) => !now.has(l)).map((l) => `- ${l.replace(/\be\d+\b/, '(removed)')}`),
+      ...previous!.lines.filter((l) => !now.has(l)).map((l) => `- ${l.replace(/\be\d+\b/, '(removed)')}`),
       ...lines.filter((l) => !old.has(l)).map((l) => `+ ${l}`),
     ]
     : lines;
-  const fullOut = `${head}${tree.snapshotId ? ` snapshot=${tree.snapshotId}` : ''}\n${opts.diff && previous ? 'Changes (removed lines cannot be targeted):\n' : ''}${shown.join('\n') || '(unchanged)'}`;
+  const body = `${isDiff ? 'Changes (removed lines cannot be targeted):\n' : ''}${shown.join('\n') || '(unchanged)'}`;
+  const hash = outlineHash(`${stablePrefix}${tail}\n${body}`);
+  ctx.uiObs.set(d.id, { hash, count: obsCount });
+
+  const head = `UI of ${d.name} via ${tree.source}; obs=#${obsCount} hash=${hash}; ${tail}`;
+  const fullOut = `${head}${tree.snapshotId ? ` snapshot=${tree.snapshotId}` : ''}\n${body}`;
   return { text: fullOut, hash, obsCount, unchanged: false, totalElements: total, shownElements: lines.length, truncated: total > lines.length };
 }
