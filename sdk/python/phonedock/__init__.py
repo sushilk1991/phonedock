@@ -22,7 +22,7 @@ import uuid
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 __all__ = ["PhoneDock", "PhoneDockApiError", "phonedock_home", "read_daemon_info"]
-__version__ = "0.2.7"
+__version__ = "0.3.0"
 
 DEFAULT_PORT = 47420
 

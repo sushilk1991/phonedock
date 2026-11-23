@@ -24,7 +24,7 @@ import { registerFlowTools } from './tools-flow.ts';
 import { notesHint, registerNotesTools } from './tools-notes.ts';
 import { registerTraceTools } from './tools-trace.ts';
 
-const VERSION = '0.2.7';
+const VERSION = '0.3.0';
 const DEFAULT_MAX_SIZE = 1024;
 const RUNTIME_TOOLS = new Set(['list_devices', 'acquire_device', 'release_device', 'get_ui', 'screenshot', 'tap',
   'swipe', 'type_text', 'fill', 'press_key', 'scroll_to', 'go_back', 'system_gesture', 'hide_keyboard', 'wait_for',
