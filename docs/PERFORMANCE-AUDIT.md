@@ -6,9 +6,9 @@ The Mac app, daemon, CLI and MCP were exercised with an isolated iOS simulator. 
 
 ## Method and environment
 
-- Apple Silicon MacBook, 36 GiB RAM; exact OS/chip are in [environment.json](performance/2026-11-23/environment.json). Node 24.11.0 locally; Node 24.22.3 for focused Linux checks on the retained Instabox `fe-hero`.
+- Apple Silicon MacBook, 36 GiB RAM; exact OS/chip are in [environment.json](performance/2026-11-23/environment.json). Node 24.11.0 locally; Node 24.22.3 for focused checks on a Linux sandbox.
 - 38 available Xcode simulators, including one newly created `pdtest-perf-ios`, iPhone 17 Pro / iOS 26.5 (23F77), 1206 × 2622. The backend enumerated the full inventory; the `pdtest-` filter exposed only the test phone.
-- Private source daemon on **47433**, scratch `PHONEDOCK_HOME`, `PHONEDOCK_DEVICE_FILTER=pdtest-`. The daemon on 47420, existing devices, Android runtimes and the Mac mini were left alone.
+- Private source daemon on **47433**, scratch `PHONEDOCK_HOME`, `PHONEDOCK_DEVICE_FILTER=pdtest-`. The default daemon on 47420, existing devices and Android runtimes were left alone.
 - Release Mac binary in a copied, ad-hoc signed 0.4.0 bundle. Background `open -g -n -F`; 1280 × 840 window, inspector open, selected simulator, JPEG live view at `maxSize=900`. Opt-in SelfTest counters were present in both measured app builds.
 - Same Node executable, simulator, filtering, app steps and measurement harness before/after. No builds overlapped the controlled measurements. This is a busy shared Mac: memory pressure and swap varied considerably. Sequential whole-system results are observations, **not causal speedup claims**. The CLI comparison alternated before/after order; discovery was also measured with a deterministic backend call counter.
 - HTTP device listing: 50 calls, then 50 fresh iOS-backend calls. Screenshots: 10 each, raw HTTP and MCP. MCP kept its normal prompt/UI checks. Idle daemon: 20 s. `/frame`: 30 s at a 75 ms target interval, including 304 responses. Separate multipart `/stream`: 30 s, request 15 fps. Frame age is daemon arrival-to-response age, not camera-to-display latency.
