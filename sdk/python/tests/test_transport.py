@@ -272,12 +272,16 @@ class TransportTests(unittest.TestCase):
 
         with serve(reply) as url:
             c = self.client(url, auto_start=False)
-            c.launch("ios-simulator:pdtest-1", "com.example.app", args=["-UITesting"], env={"API_KEY": "secret"}, return_ui=True)
+            c.launch("ios-simulator:pdtest-1", "com.example.app", args=["-UITesting"], env={"API_KEY": "secret"}, return_ui=True, settle_ms=700)
             c.launch("android-emulator:pdtest-2", "com.example.app", args={"debug": True, "count": 2}, verify=False)
+            c.tap("android-emulator:pdtest-2", 10, 20, return_ui=True, settle_ms=300)
+            c.go_back("android-emulator:pdtest-2", return_ui=True, settle_ms=0)
         self.assertEqual(captured[0][0], "POST")
         self.assertTrue(captured[0][1].endswith("/apps/com.example.app/launch"))
-        self.assertEqual(captured[0][2], {"args": ["-UITesting"], "env": {"API_KEY": "secret"}, "returnUi": True})
+        self.assertEqual(captured[0][2], {"args": ["-UITesting"], "env": {"API_KEY": "secret"}, "returnUi": True, "settleMs": 700})
         self.assertEqual(captured[1][2], {"args": {"debug": True, "count": 2}, "verify": False})
+        self.assertEqual(captured[2][2], {"action": "tap", "x": 10, "y": 20, "returnUi": True, "settleMs": 300})
+        self.assertEqual(captured[3][2], {"returnUi": True, "settleMs": 0})
 
 
 if __name__ == "__main__":

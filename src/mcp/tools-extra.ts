@@ -41,7 +41,7 @@ function sinceIso(v?: string): string | undefined {
 
 export function registerExtraTools(k: ToolKit): void {
   const { tool, c, target, scaleFor, toDevice, act, text, shot, errorResult, handlers, describeMatch, sleep,
-    deviceParam, spaceParam, observeParam, settleParam, matchParam, expectParam } = k;
+    deviceParam, spaceParam, observeParam, observeModeParam, settleParam, matchParam, expectParam, resolveObserve, uiOpts, formatUi } = k;
   const imgScale = async (d: Parameters<typeof scaleFor>[0], space?: 'image' | 'device') => (space === 'device' ? 1 : (await scaleFor(d)).scale || 1);
 
   // ── fill ──────────────────────────────────────────────────────────────
@@ -59,8 +59,9 @@ export function registerExtraTools(k: ToolKit): void {
     clear: z.boolean().optional().describe('Remove existing text first (default true)'),
     submit: z.boolean().optional().describe('Press Enter / the keyboard return key afterwards (default false)'),
     secret: z.boolean().optional().describe('Password/OTP: never echoed, logged as "•••", skipped by replay'),
-    return_screenshot: observeParam, settle_ms: settleParam, expect: expectParam,
+    observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam, expect: expectParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
     let ref = a.ref; let txt = a.text; let id = a.element_id;
     const expect = toExpect(a.expect);
@@ -70,7 +71,7 @@ export function registerExtraTools(k: ToolKit): void {
       else if (/^id:/i.test(t)) id = t.slice(3).trim();
       else txt = t;
     }
-    const body: Record<string, unknown> = { value: a.value, clear: a.clear, submit: a.submit, secret: a.secret, match: a.match, index: a.index, type: a.element_type, ...(expect ? { expect } : {}) };
+    const body: Record<string, unknown> = { value: a.value, clear: a.clear, submit: a.submit, secret: a.secret, match: a.match, index: a.index, type: a.element_type, ...(expect ? { expect } : {}), ...uiOpts(mode, a.settle_ms, 700, !!expect) };
     if (ref) { body.ref = ref; const snapshotId = k.ctx.snapshots?.get(d.id); if (snapshotId) body.snapshotId = snapshotId; }
     else if (txt || id || a.element_type) { body.text = txt; body.id = id; }
     else if (a.x !== undefined && a.y !== undefined) { const [x, y] = await toDevice(d, a.x, a.y, a.coordinate_space); body.x = x; body.y = y; }
@@ -90,7 +91,7 @@ export function registerExtraTools(k: ToolKit): void {
     if (!r.focused && r.keyboard === false && !r.verified) line += ' (no focus/keyboard was detected)';
     line += ` ${secs(r.elapsedMs)}.`;
     if (r.warnings.length) line += `\nWarnings:\n- ${r.warnings.join('\n- ')}`;
-    const res = await act(d, line, a.return_screenshot, a.settle_ms, undefined, { report: r.expect, what: 'text' });
+    const res = await act(d, line, mode, a.settle_ms, 700, { report: r.expect, what: 'text' }, { tree: r.ui, unavailable: r.observationUnavailable });
     if (r.verified === false && !(r.expect && !r.expect.ok)) res.isError = false; // reported in text; the agent decides
     return res;
   });
@@ -106,8 +107,9 @@ export function registerExtraTools(k: ToolKit): void {
     timeout_ms: z.number().int().min(0).max(60000).optional().describe('Give up after this long (default 10000, max 60000 — call again to keep waiting)'),
     interval_ms: z.number().int().min(50).max(5000).optional().describe('Poll interval (default 300; idle 200)'),
     stable_ms: z.number().int().min(0).max(30000).optional().describe('idle: how long the screen must stay unchanged (default 1000). visible/gone: how long the condition must hold (default 0)'),
-    return_screenshot: observeParam,
+    observe: observeModeParam, return_screenshot: observeParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
     if (a.until !== 'idle' && !a.text && !a.element_id && !a.element_type) throw new Error(`until="${a.until}" needs text, element_id or element_type`);
     const r = await c.waitFor(d.id, { until: a.until, text: a.text, id: a.element_id, type: a.element_type, match: a.match, timeoutMs: a.timeout_ms ?? 10_000, intervalMs: a.interval_ms, stableMs: a.stable_ms });
@@ -124,17 +126,19 @@ export function registerExtraTools(k: ToolKit): void {
       const g = r.changedRegion;
       msg = `Screen idle after ${secs(r.elapsedMs)} (unchanged for ${r.stableMs} ms; ${r.changes} change${r.changes === 1 ? '' : 's'} seen${g ? `, changed region x=${Math.round(g.x / sc)} y=${Math.round(g.y / sc)} ${Math.round(g.width / sc)}x${Math.round(g.height / sc)} in image space` : ''}).`;
     }
-    return act(d, msg, a.return_screenshot, 0);
+    return act(d, msg, mode, 0, 0);
   });
 
   // ── batch ─────────────────────────────────────────────────────────────
   const NOT_IN_BATCH = new Set(['batch', 'request_human']);
-  tool('batch', 'Run several tool calls in one round trip, in order, e.g. [{tool:"tap",args:{text:"Login"}}, {tool:"fill",args:{target:"Email",value:"a@b.c"}}, {tool:"wait_for",args:{until:"idle"}}, {tool:"get_ui"}]. Each step\'s args are exactly that tool\'s arguments (`device` defaults to the batch\'s `device`). Returns one line per step; images from steps are dropped except the last step\'s. The last step\'s full text output is included too, so end with get_ui to see the result. batch and request_human cannot be steps.', {
+  tool('batch', 'Run several tool calls in one round trip, in order, e.g. [{tool:"tap",args:{text:"Login"}}, {tool:"fill",args:{target:"Email",value:"a@b.c"}}, {tool:"wait_for",args:{until:"idle"}}, {tool:"get_ui"}]. Each step\'s args are exactly that tool\'s arguments (`device` defaults to the batch\'s `device`). Steps may pass `observe` ("none"|"image"|"ui"|"both"), or set `observe_at_end` on the batch. Returns one line per step; images from steps are dropped except the last step\'s. The last step\'s full text output is included too. batch and request_human cannot be steps.', {
     device: deviceParam,
     steps: z.array(z.object({ tool: z.string().describe('Tool name, e.g. "tap"'), args: z.record(z.string(), z.unknown()).optional().describe('That tool\'s arguments') })).min(1).max(50),
     stop_on_error: z.boolean().optional().describe('Stop at the first failing step (default true)'),
-    screenshot_at_end: z.boolean().optional().describe('Append a fresh screenshot after the last step (default false)'),
+    observe_at_end: observeModeParam,
+    screenshot_at_end: z.boolean().optional().describe('Append a fresh screenshot after the last step (same as observe_at_end="image"). Default false'),
   }, async (a, extra) => {
+    const endMode = resolveObserve(a.observe_at_end, a.screenshot_at_end);
     const stop = a.stop_on_error !== false;
     const lines: string[] = []; let failed = 0; let ran = 0; let last: ToolResult | undefined; const t0 = Date.now();
     for (const [i, s] of a.steps.entries()) {
@@ -164,7 +168,21 @@ export function registerExtraTools(k: ToolKit): void {
       if (full.includes('\n') || full.length > 240) content.push(text(`Output of the last step:\n${full}`));
       content.push(...last.content.filter((x) => x.type === 'image'));
     }
-    if (a.screenshot_at_end) { try { content.push(...(await shot(await target(a.device)))); } catch (e) { content.push(...errorResult(e).content); } }
+    if (endMode === 'ui' || endMode === 'both') {
+      try {
+        const d = await target(a.device);
+        try {
+          const tree = await c.ui(d.id, { ocrFallback: true });
+          const formatted = await formatUi(d, tree, { mode: 'action' });
+          content.push(text(formatted.text));
+        } catch (e) {
+          content.push(text(`UI observation unavailable (${(e as Error)?.message ?? String(e)}); call get_ui or screenshot.`));
+        }
+        if (endMode === 'both') content.push(...(await shot(d)));
+      } catch (e) { content.push(...errorResult(e).content); }
+    } else if (endMode === 'image') {
+      try { content.push(...(await shot(await target(a.device)))); } catch (e) { content.push(...errorResult(e).content); }
+    }
     return { content, isError: failed > 0 };
   });
 
@@ -282,35 +300,41 @@ export function registerExtraTools(k: ToolKit): void {
   });
 
   // ── gestures / keyboard ───────────────────────────────────────────────
-  tool('hide_keyboard', 'Dismiss the on-screen keyboard (e.g. when it covers a button you need). Doesn\'t submit the form.', { device: deviceParam, return_screenshot: observeParam, settle_ms: settleParam }, async (a) => {
-    const d = await target(a.device); await c.hideKeyboard(d.id);
-    return act(d, 'Keyboard hidden.', a.return_screenshot, a.settle_ms);
+  tool('hide_keyboard', 'Dismiss the on-screen keyboard (e.g. when it covers a button you need). Doesn\'t submit the form.', { device: deviceParam, observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
+    const d = await target(a.device);
+    const r = await c.hideKeyboard(d.id, uiOpts(mode, a.settle_ms, 700, false));
+    return act(d, 'Keyboard hidden.', mode, a.settle_ms, 700, undefined, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   tool('double_tap', 'Double-tap at x,y (standard image space: get_ui @(x,y) / a default-size screenshot, unless coordinate_space="device"), e.g. to zoom a map/photo or select a word.', {
-    device: deviceParam, x: z.number().describe('x in the standard image space (get_ui @(x,y) / a default-size screenshot), unless coordinate_space="device"'), y: z.number().describe('y, same space as x'), coordinate_space: spaceParam, return_screenshot: observeParam, settle_ms: settleParam, expect: expectParam,
+    device: deviceParam, x: z.number().describe('x in the standard image space (get_ui @(x,y) / a default-size screenshot), unless coordinate_space="device"'), y: z.number().describe('y, same space as x'), coordinate_space: spaceParam, observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam, expect: expectParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
+    const expect = toExpect(a.expect);
     const [x, y] = await toDevice(d, a.x, a.y, a.coordinate_space);
-    const r = await c.doubleTap(d.id, x, y, { expect: toExpect(a.expect) });
-    return act(d, `Double-tapped (${a.x},${a.y})${a.coordinate_space === 'device' ? '' : ` → device (${x},${y})`}.`, a.return_screenshot, a.settle_ms, undefined, { report: r.expect, what: 'double tap' });
+    const r = await c.doubleTap(d.id, x, y, { expect, ...uiOpts(mode, a.settle_ms, 700, !!expect) });
+    return act(d, `Double-tapped (${a.x},${a.y})${a.coordinate_space === 'device' ? '' : ` → device (${x},${y})`}.`, mode, a.settle_ms, 700, { report: r.expect, what: 'double tap' }, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   tool('pinch', 'Two-finger pinch centred on x,y (image space unless coordinate_space="device"). scale is the final finger distance relative to the start: <1 pinches in (zoom out), >1 spreads (zoom in); e.g. 0.5 or 2.', {
     device: deviceParam, x: z.number().describe('x in the standard image space (get_ui @(x,y) / a default-size screenshot), unless coordinate_space="device"'), y: z.number().describe('y, same space as x'), scale: z.number().min(0.1).max(10).describe('Final finger distance ÷ start distance: <1 zooms out, >1 zooms in'),
     duration_ms: z.number().int().min(100).max(5000).optional().describe('default 400'),
-    coordinate_space: spaceParam, return_screenshot: observeParam, settle_ms: settleParam,
+    coordinate_space: spaceParam, observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
     const [x, y] = await toDevice(d, a.x, a.y, a.coordinate_space);
-    await c.pinch(d.id, x, y, a.scale, a.duration_ms);
-    return act(d, `Pinched ×${a.scale} at (${a.x},${a.y}).`, a.return_screenshot, a.settle_ms);
+    const r = await c.pinch(d.id, x, y, a.scale, a.duration_ms, uiOpts(mode, a.settle_ms, 700, false));
+    return act(d, `Pinched ×${a.scale} at (${a.x},${a.y}).`, mode, a.settle_ms, 700, undefined, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   // ── system routes that had no tool ────────────────────────────────────
   tool('rotate', 'Rotate the device to portrait or landscape. Screen size changes: take a new screenshot/get_ui before using coordinates.', {
-    device: deviceParam, orientation: z.enum(['portrait', 'landscape']), return_screenshot: observeParam, settle_ms: settleParam,
+    device: deviceParam, orientation: z.enum(['portrait', 'landscape']), observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
     const r = await c.rotate(d.id, a.orientation);
     // the screen as it really ended up (the daemon reads it after the turn settles) is the new image space
@@ -320,7 +344,7 @@ export function registerExtraTools(k: ToolKit): void {
     const msg = r.orientation && r.orientation !== a.orientation
       ? `${d.name} stays in ${r.orientation}${size}: ${r.note ?? 'the app on screen does not rotate.'}`
       : `Rotated ${d.name} to ${a.orientation}${size}. Coordinates from earlier screenshots are now invalid.`;
-    return act(d, msg, a.return_screenshot, a.settle_ms, 500);
+    return act(d, msg, mode, a.settle_ms, 500);
   });
 
   const remoteHelp = 'Android: an absolute device path, e.g. /sdcard/Download/x.png. iOS simulator: app://<bundleId>/<path> (the app\'s data container, e.g. app://com.me.app/Documents/a.json), group://<appGroupId>/<path>, or data://<path> (simulator data dir)';
@@ -363,12 +387,13 @@ export function registerExtraTools(k: ToolKit): void {
     direction: z.enum(['down', 'up', 'left', 'right']).optional().describe('Where to look (default "down" = scroll down to reveal what is below)'),
     max_scrolls: z.number().int().min(0).max(30).optional().describe('Give up after this many swipes (default 8)'),
     x: z.number().optional().describe('Point inside the scrollable area to swipe around (default: screen centre)'), y: z.number().optional().describe('y of that point'),
-    coordinate_space: spaceParam, return_screenshot: observeParam, settle_ms: settleParam,
+    coordinate_space: spaceParam, observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
     let x: number | undefined, y: number | undefined;
     if (a.x !== undefined && a.y !== undefined) [x, y] = await toDevice(d, a.x, a.y, a.coordinate_space);
-    const r = await c.scrollTo(d.id, a.text, { match: a.match, type: a.element_type, direction: a.direction, maxScrolls: a.max_scrolls, x, y });
+    const r = await c.scrollTo(d.id, a.text, { match: a.match, type: a.element_type, direction: a.direction, maxScrolls: a.max_scrolls, x, y, ...uiOpts(mode, a.settle_ms, 0, false) });
     const n = (k: number) => `${k} scroll${k === 1 ? '' : 's'}`;
     const kb = r.keyboardHidden ? ' (The keyboard was up: it was hidden first so no swipe could type on it.)' : '';
     if (!r.found || !r.element) {
@@ -381,38 +406,41 @@ export function registerExtraTools(k: ToolKit): void {
     }
     const sc = await imgScale(d, a.coordinate_space);
     const how = r.element.ref ? ` Tap it with tap(ref="${r.element.ref}").` : ` (via OCR, no ref: tap its coordinates.)`;
-    return act(d, `Found ${describeMatch(r.element, sc)} after ${n(r.scrolls)} ${r.direction} (${secs(r.elapsedMs)}).${how}${r.note ? ` Note: ${r.note}.` : ''}${kb}`, a.return_screenshot, a.settle_ms, 0);
+    return act(d, `Found ${describeMatch(r.element, sc)} after ${n(r.scrolls)} ${r.direction} (${secs(r.elapsedMs)}).${how}${r.note ? ` Note: ${r.note}.` : ''}${kb}`, mode, a.settle_ms, 0, undefined, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   tool('go_back', 'Go back one screen. Android: the system Back key (also closes dialogs, the keyboard and the notification shade). iOS has no Back key: this taps the navigation bar\'s back button when there is one, otherwise it swipes in from the left edge, which only works where the app supports it; if nothing changed, tap the app\'s own close / back control.', {
-    device: deviceParam, return_screenshot: observeParam, settle_ms: settleParam,
+    device: deviceParam, observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
-    const r = await c.goBack(d.id);
+    const r = await c.goBack(d.id, uiOpts(mode, a.settle_ms, 700, false));
     const how = r.tapped ? `tapped the back button "${r.tapped.text ?? 'Back'}"` : r.method === 'left-edge swipe' ? 'swiped in from the left edge' : 'pressed Back';
-    return act(d, `Went back on ${d.name}: ${how}.`, a.return_screenshot, a.settle_ms);
+    return act(d, `Went back on ${d.name}: ${how}.`, mode, a.settle_ms, 700, undefined, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   tool('system_gesture', 'Open system UI: gesture="go_home" (home screen), "app_switcher" (recent apps), "control_center" (iOS Control Center; Android quick settings), "notification_center" (the notification list / shade). Android uses key events and `cmd statusbar`; iOS uses the home button and edge swipes built from the screen size. Close the shade / switcher / Control Center again with go_home (Android: go_back also works). Not available on Linux/QEMU devices.', {
     device: deviceParam,
     gesture: z.enum(['go_home', 'app_switcher', 'control_center', 'notification_center']),
-    return_screenshot: observeParam, settle_ms: settleParam,
+    observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
-    const r = await c.systemGesture(d.id, a.gesture as SystemGesture);
-    return act(d, `${a.gesture} on ${d.name} (${r.method}).`, a.return_screenshot, a.settle_ms, 900);
+    const r = await c.systemGesture(d.id, a.gesture as SystemGesture, uiOpts(mode, a.settle_ms, 900, false));
+    return act(d, `${a.gesture} on ${d.name} (${r.method}).`, mode, a.settle_ms, 900, undefined, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   tool('handle_alert', 'Answer the system prompt or alert that is on screen by tapping one of its buttons by text (it never types anything). action="accept" grants or confirms ("Allow While Using App", "While using the app", "Allow", "OK"), "dismiss" declines ("Don\'t Allow", "Not Now", "Cancel"), "button=<label>" taps a specific one, e.g. "button=Allow Once". Works on iOS and Android permission dialogs and on alerts with 1–3 buttons (accessibility tree, or OCR without one); get_ui and screenshot show a "SYSTEM PROMPT" line when one is up. It REFUSES prompts a person must answer: passcode, Face ID / Touch ID, Apple Account / Google password sheets, profile / certificate installs and "Allow Paste". Use request_human for those.', {
     device: deviceParam,
     action: z.string().regex(/^(accept|dismiss|button\s*=\s*.+)$/is, 'accept | dismiss | button=<label>').describe('"accept", "dismiss" or "button=<label>"'),
-    return_screenshot: observeParam, settle_ms: settleParam,
+    observe: observeModeParam, return_screenshot: observeParam, settle_ms: settleParam,
   }, async (a) => {
+    const mode = resolveObserve(a.observe, a.return_screenshot);
     const d = await target(a.device);
     const m = /^button\s*=\s*(.+)$/is.exec(a.action.trim());
     const action: AlertActionInput = m ? { button: m[1].trim() } : (a.action.trim().toLowerCase() as 'accept' | 'dismiss');
     let r;
-    try { r = await c.handleAlert(d.id, action); } catch (e) {
+    try { r = await c.handleAlert(d.id, action, uiOpts(mode, a.settle_ms, 700, false)); } catch (e) {
       if (e instanceof PhoneDockApiError && e.code === 'needs_human') {
         return { isError: true, content: [text(`Refused: ${e.message}. Call request_human(reason="…") describing what the person should do on ${d.name}, wait for it, then get_ui.`)] };
       }
@@ -420,7 +448,7 @@ export function registerExtraTools(k: ToolKit): void {
     }
     const state = r.dismissed === true ? ' The prompt is gone.' : r.dismissed === false ? ' The prompt is still on screen (take a screenshot).' : '';
     const next = r.after ? `\n${promptWarning(r.after)}` : '';
-    return act(d, `Tapped [${r.tapped.text}] on the ${r.prompt.kind} prompt (${r.prompt.reason}).${state} ${secs(r.elapsedMs)}.${next}`, a.return_screenshot, a.settle_ms);
+    return act(d, `Tapped [${r.tapped.text}] on the ${r.prompt.kind} prompt (${r.prompt.reason}).${state} ${secs(r.elapsedMs)}.${next}`, mode, a.settle_ms, 700, undefined, { tree: r.ui, unavailable: r.observationUnavailable });
   });
 
   // ── clipboard ─────────────────────────────────────────────────────────

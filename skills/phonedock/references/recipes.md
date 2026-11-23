@@ -11,7 +11,7 @@ Pass `device` explicitly whenever more than one device is in play.
    question is visual (alignment, contrast, truncation, dark mode).
 4. Test credentials from the user only. In one `batch`:
    `fill target="Email" value=…` → `fill target="Password" value=… secret=true submit=true` →
-   `wait_for until="visible" text="<what success shows>" timeout_ms=15000` → `get_ui`.
+   `wait_for until="visible" text="<what success shows>" timeout_ms=15000` with `observe_at_end="ui"` (or `observe="ui"` on individual actions to get fresh refs in one call without repeating unchanged screens).
 5. Error paths: an empty submit, a wrong password (`value="wrong"` is fine to type: it isn't a real secret), and
    check the message text each time.
 6. A Face ID, 2FA or CAPTCHA screen appears: `request_human reason="Complete the 2FA step for <app>, then press Done"`.

@@ -54,8 +54,9 @@ may show them as `mcp__phonedock__get_ui` or similar). No MCP tools? Use the CLI
 4. **Wait on the app, not the clock:** `wait_for until="visible" text="Welcome"`, `until="gone" text="Loading"`,
    or `until="idle"`. Not `wait` with a guess.
 5. **Verify** the outcome the user cares about (the text that should appear, the toggle that should be on), with
-   `get_ui` or the result text, which already says what was hit and what a field now holds. Or check it in the
-   same call: `tap text="Sign in" expect={"visible": "Welcome"}` (also `{"gone": "Loading"}`, `{"id": "…"}`,
+   `observe="ui"` on the action itself (returns a compact outline in one call, suppresses unchanged screens with
+   `Screen unchanged (obs=#N, hash=…)`, and updates refs for the next `tap ref=…`; use `observe="both"` for UI +
+   screenshot, or `observe_at_end="ui"` on `batch`), `get_ui`, or `expect`: `tap text="Sign in" expect={"visible": "Welcome"}` (also `{"gone": "Loading"}`, `{"id": "…"}`,
    `{"changed": true}`; on tap, long_press, double_tap, swipe, type_text, fill, press_key, launch_app). The result
    says `Verified: …`, `Not verified: the screen did not change …` (the input probably missed) or
    `Not verified: the screen changed, but "Welcome" never appeared` (it did something else: read the screen).

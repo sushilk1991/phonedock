@@ -277,3 +277,104 @@ test('launch_app forwards args/env (and arguments alias) without echoing secret 
     });
   } finally { await s.close(); }
 });
+
+test('observe="ui"|"both": compact outline, default settle, unchanged suppression, snapshot ref binding, conflict error, and batch support', async () => {
+  const tree1: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:00.000Z',
+    snapshotId: 'snap-obs-1',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'General', clickable: true })],
+  };
+  const tree2: UiTree = {
+    source: 'accessibility',
+    screen: { width: 1080, height: 2400 },
+    capturedAt: '2026-11-23T10:00:02.000Z',
+    snapshotId: 'snap-obs-2',
+    root: [el('e1', 'Button', 100, 200, 200, 80, { text: 'About', clickable: true })],
+  };
+  let currentTree = tree1;
+  let tapCalls: unknown[] = [];
+  let tapRefCalls: unknown[] = [];
+  let launchCalls: unknown[] = [];
+  let uiCalls = 0;
+  let shotCalls = 0;
+
+  const fake = androidFake({ width: 1080, height: 2400 }, { width: 1080, height: 2400 }, tree1.root);
+  fake.ui = async () => { uiCalls++; return currentTree; };
+  fake.screenshot = async () => {
+    shotCalls++;
+    return { data: Buffer.from([0xff, 0xd8, 0xff]), mime: 'image/jpeg', deviceWidth: 1080, deviceHeight: 2400, imageWidth: 461, imageHeight: 1024, scale: 2.3438 };
+  };
+  fake.tap = async (_id: string, x: number, y: number, _label?: string, meta?: Record<string, unknown>) => {
+    tapCalls.push({ x, y, meta });
+    return { ok: true, delivery: 'sent', retrySafe: false, ...(meta?.returnUi ? { ui: currentTree } : {}) };
+  };
+  fake.tapRef = async (_id: string, ref: string, opts?: Record<string, unknown>) => {
+    tapRefCalls.push({ ref, opts });
+    return { ok: true, delivery: 'sent', retrySafe: false, resolved: { ref, x: 200, y: 240 }, ...(opts?.returnUi ? { ui: currentTree } : {}) };
+  };
+  fake.launch = async (_id: string, appId: string, opts?: Record<string, unknown>) => {
+    launchCalls.push({ appId, opts });
+    return { ok: true, inFront: true, delivery: 'sent', retrySafe: false, ...(opts?.returnUi ? { ui: currentTree } : {}) };
+  };
+
+  const s = await connect(fake);
+  try {
+    // 1) Conflicting observe="ui" + return_screenshot=true fails BEFORE sending input
+    const conflict = await s.call('tap', { x: 10, y: 10, observe: 'ui', return_screenshot: true });
+    assert.equal(conflict.isError, true);
+    assert.match(conflict.text, /Conflicting options/);
+    assert.equal(tapCalls.length, 0);
+
+    // 2) tap with observe="ui" forwards returnUi + default settleMs=700 to daemon and renders compact outline without extra get_ui
+    const r1 = await s.call('tap', { x: 10, y: 10, observe: 'ui' });
+    assert.equal(r1.isError, false, r1.text);
+    assert.equal((tapCalls[0] as { meta?: Record<string, unknown> }).meta?.returnUi, true);
+    assert.equal((tapCalls[0] as { meta?: Record<string, unknown> }).meta?.settleMs, 700);
+    assert.equal(uiCalls, 0, 'daemon pre-captured UI must not trigger a second c.ui() call');
+    assert.match(r1.text, /obs=#1 hash=[0-9a-f]{16} snapshot=snap-obs-1/);
+    assert.match(r1.text, /e1 Button "General"/);
+
+    // 3) Immediate tap(ref="e1", observe="ui") uses bound snapshotId from prior observe="ui" and suppresses unchanged screen
+    const r2 = await s.call('tap', { ref: 'e1', observe: 'ui', settle_ms: 0 });
+    assert.equal(r2.isError, false, r2.text);
+    assert.equal((tapRefCalls[0] as { opts?: Record<string, unknown> }).opts?.snapshotId, 'snap-obs-1');
+    assert.equal((tapRefCalls[0] as { opts?: Record<string, unknown> }).opts?.settleMs, 0);
+    assert.match(r2.text, /Screen unchanged \(obs=#2, hash=[0-9a-f]{16}, snapshot=snap-obs-1\)\./);
+
+    // 4) Screen changes -> full outline emitted again; launch_app defaults to settleMs=1500 (or 0 with expect)
+    currentTree = tree2;
+    const r3 = await s.call('launch_app', { app_id: 'com.example.app', observe: 'ui' });
+    assert.equal(r3.isError, false, r3.text);
+    assert.equal((launchCalls[0] as { opts?: Record<string, unknown> }).opts?.settleMs, 1500);
+    assert.match(r3.text, /obs=#3 hash=[0-9a-f]{16} snapshot=snap-obs-2/);
+    assert.match(r3.text, /e1 Button "About"/);
+
+    const r4 = await s.call('launch_app', { app_id: 'com.example.app', observe: 'ui', expect: { visible: 'About' } });
+    assert.equal(r4.isError, false, r4.text);
+    assert.equal((launchCalls[1] as { opts?: Record<string, unknown> }).opts?.settleMs, 0, 'expect skips default settle');
+
+    // 5) observe="both" returns UI + screenshot in a single settle
+    shotCalls = 0;
+    const rBoth = await s.client.callTool({ name: 'tap', arguments: { x: 10, y: 10, observe: 'both', settle_ms: 0 } }) as { content: { type: string; text?: string }[]; isError?: boolean };
+    assert.equal(!!rBoth.isError, false);
+    assert.equal(shotCalls, 1);
+    assert.ok(rBoth.content.some((c) => c.type === 'image'));
+    assert.ok(rBoth.content.some((c) => c.type === 'text' && (c.text ?? '').includes('obs=#5')));
+
+    // 6) batch supports per-step observe and observe_at_end, and rejects observe_at_end/screenshot_at_end conflicts
+    const badBatch = await s.call('batch', { steps: [{ tool: 'tap', args: { x: 1, y: 1 } }], observe_at_end: 'ui', screenshot_at_end: true });
+    assert.equal(badBatch.isError, true);
+    assert.match(badBatch.text, /Conflicting options/);
+
+    currentTree = tree1;
+    const okBatch = await s.call('batch', {
+      steps: [{ tool: 'tap', args: { x: 1, y: 1, observe: 'ui', settle_ms: 0 } }],
+      observe_at_end: 'ui',
+    });
+    assert.equal(okBatch.isError, false, okBatch.text);
+    assert.match(okBatch.text, /e1 Button "General"/);
+    assert.match(okBatch.text, /Screen unchanged \(obs=#7/);
+  } finally { await s.close(); }
+});

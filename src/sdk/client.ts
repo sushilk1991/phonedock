@@ -31,10 +31,10 @@ export type {
 
 /** Every input result: how far it got (`delivery`: sent / not_sent), whether sending it again is safe (`retrySafe`:
  *  only when nothing was sent), and with `expect` the check of what the screen showed afterwards. */
-export interface InputDelivery { delivery?: Delivery; retrySafe?: boolean; expect?: ExpectReport; requestId?: string; ui?: UiTree }
+export interface InputDelivery { delivery?: Delivery; retrySafe?: boolean; expect?: ExpectReport; requestId?: string; ui?: UiTree; observationUnavailable?: boolean }
 export interface InputResult extends InputDelivery { ok: boolean; resolved?: unknown }
 /** Options of every input call: `expect` waits (after the input) for what the screen should show. */
-export interface InputOptions { expect?: Expect | string; snapshotId?: string; returnUi?: boolean; requestId?: string }
+export interface InputOptions { expect?: Expect | string; snapshotId?: string; returnUi?: boolean; settleMs?: number; requestId?: string }
 export interface LaunchCallOptions extends InputOptions, LaunchOptions { verify?: boolean }
 
 /** Element query for find / waitFor / fill / tapText. `match` applies to text and id (default contains, case-insensitive). */
@@ -124,7 +124,7 @@ export interface AppNotesRead { appId: string; path: string; notes: string | nul
 /** Set on a launch / trace start result when the app has notes. */
 export interface AppNotesHint { updatedAt: string; sizeBytes: number }
 /** scrollTo: `direction` is where to look (default 'down' = reveal what is below); x,y = device-pixel point to swipe around. */
-export interface ScrollToOptions extends Omit<FindOptions, 'index' | 'limit'> {
+export interface ScrollToOptions extends Omit<FindOptions, 'index' | 'limit'>, InputOptions {
   direction?: 'up' | 'down' | 'left' | 'right'; maxScrolls?: number; x?: number; y?: number; durationMs?: number; distance?: number;
 }
 export interface ScrollToResult extends InputDelivery {
@@ -153,7 +153,7 @@ export interface BackResult extends InputDelivery { ok: true; method: string; ta
 export interface PromptResult { prompt: SystemPrompt | null; source: 'accessibility' | 'ocr' | null; capturedAt: string; text?: string; summary?: string }
 /** handleAlert action: 'accept' | 'dismiss' | 'button=<label>' | { button: '<label>' }. */
 export type AlertActionInput = 'accept' | 'dismiss' | `button=${string}` | { button: string };
-export interface AlertResult {
+export interface AlertResult extends InputDelivery {
   ok: true; action: 'accept' | 'dismiss' | 'button'; prompt: SystemPrompt;
   tapped: { text: string; ref?: string; role?: 'accept' | 'dismiss'; bounds: Bounds; x: number; y: number };
   dismissed: boolean | null; after: SystemPrompt | null; elapsedMs: number;
@@ -723,14 +723,23 @@ export class PhoneDockClient {
   }
 
   // ── input ──────────────────────────────────────────────────────────────
+  private inputOptsBody(opts?: InputOptions): Record<string, unknown> {
+    if (!opts) return {};
+    return {
+      ...(opts.expect !== undefined ? { expect: opts.expect } : {}),
+      ...(opts.snapshotId ? { snapshotId: opts.snapshotId } : {}),
+      ...(opts.returnUi ? { returnUi: true } : {}),
+      ...(opts.settleMs !== undefined ? { settleMs: opts.settleMs } : {}),
+    };
+  }
   /** One action or several in a row; `expect` is checked once, after the last. */
   input(id: string, action: InputAction | InputAction[], opts: InputOptions = {}): Promise<InputResult> {
-    const ex = { ...(opts.expect !== undefined ? { expect: opts.expect } : {}), ...(opts.snapshotId ? { snapshotId: opts.snapshotId } : {}), ...(opts.returnUi ? { returnUi: true } : {}) };
+    const ex = this.inputOptsBody(opts);
     return this.request('POST', this.dev(id, '/input'), { body: Array.isArray(action) ? { actions: action, ...ex } : { ...action, ...ex }, input: true, requestId: opts.requestId });
   }
   /** `label` names what the tap is aimed at (e.g. a matched element's text); it only shows in the activity log. */
-  tap(id: string, x: number, y: number, label?: string, meta?: { selector?: TapSelector; element?: { type?: string; id?: string; editable?: boolean }; expect?: Expect | string }) {
-    return this.input(id, { action: 'tap', x: Math.round(x), y: Math.round(y), ...(label ? { label } : {}), ...(meta?.selector ? { selector: meta.selector } : {}), ...(meta?.element ? { element: meta.element } : {}) }, { expect: meta?.expect });
+  tap(id: string, x: number, y: number, label?: string, meta?: { selector?: TapSelector; element?: { type?: string; id?: string; editable?: boolean } } & InputOptions) {
+    return this.input(id, { action: 'tap', x: Math.round(x), y: Math.round(y), ...(label ? { label } : {}), ...(meta?.selector ? { selector: meta.selector } : {}), ...(meta?.element ? { element: meta.element } : {}) }, meta);
   }
   tapRef(id: string, ref: string, opts: InputOptions = {}) { return this.input(id, { action: 'tap', ref: ref.replace(/^@/, '') }, opts); }
   longPress(id: string, x: number, y: number, durationMs?: number, opts: InputOptions = {}) { return this.input(id, { action: 'longPress', x: Math.round(x), y: Math.round(y), durationMs }, opts); }
@@ -741,8 +750,10 @@ export class PhoneDockClient {
   type(id: string, text: string, opts: { secret?: boolean } & InputOptions = {}) { return this.input(id, opts.secret ? { action: 'type', text, secret: true } : { action: 'type', text }, opts); }
   doubleTap(id: string, x: number, y: number, opts: InputOptions = {}) { return this.input(id, { action: 'doubleTap', x: Math.round(x), y: Math.round(y) }, opts); }
   /** scale < 1 pinches in (zoom out), > 1 spreads (zoom in). */
-  pinch(id: string, x: number, y: number, scale: number, durationMs?: number) { return this.input(id, { action: 'pinch', x: Math.round(x), y: Math.round(y), scale, durationMs }); }
-  hideKeyboard(id: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/keyboard/hide'), { body: {}, input: true }); }
+  pinch(id: string, x: number, y: number, scale: number, durationMs?: number, opts: InputOptions = {}) { return this.input(id, { action: 'pinch', x: Math.round(x), y: Math.round(y), scale, durationMs }, opts); }
+  hideKeyboard(id: string, opts: InputOptions = {}): Promise<{ ok: boolean } & InputDelivery> {
+    return this.request('POST', this.dev(id, '/keyboard/hide'), { body: this.inputOptsBody(opts), input: true, requestId: opts.requestId });
+  }
   key(id: string, key: KeyName, opts: InputOptions = {}) { return this.input(id, { action: 'key', key }, opts); }
   actions(id: string, opts: { limit?: number } = {}): Promise<ActionRecord[]> { return this.request('GET', this.dev(id, '/actions'), { query: opts }); }
   async replay(id: string, actions: (InputAction & { delayMs?: number })[], opts: WaitOptions = {}): Promise<Job> {
@@ -771,28 +782,35 @@ export class PhoneDockClient {
   /** Turn this device's recent actions into a flow file's text (`phonedock flow save`); the caller writes the file. */
   saveFlow(id: string, opts: SaveFlowOptions = {}): Promise<SaveFlowResult> { return this.request('POST', this.dev(id, '/flow'), { body: opts }); }
   scrollTo(id: string, text: string, opts: Omit<ScrollToOptions, 'text'> = {}): Promise<ScrollToResult> {
-    return this.request('POST', this.dev(id, '/scroll-to'), { body: { ...opts, text }, input: true });
+    const { requestId, ...rest } = opts;
+    return this.request('POST', this.dev(id, '/scroll-to'), { body: { ...rest, text }, input: true, requestId });
   }
   /** Swipe in a direction (finger movement), inside the scroll container and never on the keyboard. */
   swipeDirection(id: string, direction: 'up' | 'down' | 'left' | 'right', opts: { distance?: number; durationMs?: number; x?: number; y?: number } & InputOptions = {}): Promise<SwipeDirectionResult> {
-    return this.request('POST', this.dev(id, '/swipe'), { body: { ...opts, direction }, input: true });
+    const { requestId, ...rest } = opts;
+    return this.request('POST', this.dev(id, '/swipe'), { body: { ...rest, direction }, input: true, requestId });
   }
 
   // ── navigation / system UI ─────────────────────────────────────────────
   /** Android: the Back key. iOS: a left-edge swipe (interactive pop; only where the app supports it). */
   /** Back one screen: Android Back key; iOS taps the nav bar back button, else swipes from the left edge. */
-  goBack(id: string): Promise<BackResult> { return this.request('POST', this.dev(id, '/back'), { body: {}, input: true }); }
+  goBack(id: string, opts: InputOptions = {}): Promise<BackResult> {
+    return this.request('POST', this.dev(id, '/back'), { body: this.inputOptsBody(opts), input: true, requestId: opts.requestId });
+  }
   /** go_home | app_switcher | control_center (Android: quick settings) | notification_center. */
-  systemGesture(id: string, gesture: SystemGesture): Promise<GestureResult> { return this.request('POST', this.dev(id, '/gesture'), { body: { gesture }, input: true }); }
+  systemGesture(id: string, gesture: SystemGesture, opts: InputOptions = {}): Promise<GestureResult> {
+    return this.request('POST', this.dev(id, '/gesture'), { body: { gesture, ...this.inputOptsBody(opts) }, input: true, requestId: opts.requestId });
+  }
   /** The system prompt / alert on screen now (null if none). ocrFallback (default true) OCRs devices without a tree. */
   prompt(id: string, opts: { ocrFallback?: boolean; signal?: AbortSignal } = {}): Promise<PromptResult> {
     return this.request('GET', this.dev(id, '/prompt'), { query: { ocrFallback: opts.ocrFallback }, signal: opts.signal });
   }
   /** Tap a system prompt's button by its text: accept (e.g. "Allow While Using App"), dismiss ("Don't Allow") or a label.
    *  Refuses (403 needs_human) passcode, biometric, credential, profile and "Allow Paste" prompts. Never types. */
-  handleAlert(id: string, action: AlertActionInput = 'accept', opts: { verify?: boolean; ocrFallback?: boolean } = {}): Promise<AlertResult> {
+  handleAlert(id: string, action: AlertActionInput = 'accept', opts: { verify?: boolean; ocrFallback?: boolean } & InputOptions = {}): Promise<AlertResult> {
+    const { requestId, ...rest } = opts;
     const body = typeof action === 'object' ? { action: 'button', button: action.button } : { action };
-    return this.request('POST', this.dev(id, '/alert'), { body: { ...body, ...opts }, input: true });
+    return this.request('POST', this.dev(id, '/alert'), { body: { ...body, ...rest }, input: true, requestId });
   }
 
   // ── human handoff ──────────────────────────────────────────────────────
@@ -894,6 +912,7 @@ export class PhoneDockClient {
     if (opts.env !== undefined) body.env = opts.env;
     if (opts.verify !== undefined) body.verify = opts.verify;
     if (opts.returnUi) body.returnUi = true;
+    if (opts.settleMs !== undefined) body.settleMs = opts.settleMs;
     return this.request('POST', this.dev(id, `/apps/${enc(appId)}/launch`), { body, input: true, requestId: opts.requestId });
   }
   terminate(id: string, appId: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, `/apps/${enc(appId)}/terminate`), { body: {} }); }

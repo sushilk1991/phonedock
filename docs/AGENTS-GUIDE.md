@@ -181,12 +181,16 @@ with the action sent before them, and a screen read has to see that action's res
     the result adds `Note: … use (76,232) instead`. A tap never goes to the wrong place without saying so.
   * `coordinate_space: "device"` takes full-resolution device pixels instead (what the HTTP API and SDKs use), for
     clients that already scale.
-* **Observation.** Action tools accept `return_screenshot: true` to get a fresh screenshot after a short
-  settle delay (`settle_ms`, default 700 ms), which saves a round trip. `get_ui` cuts texts longer than about 80
+* **Observation.** Action tools accept `observe: "none" | "image" | "ui" | "both"` (default `"none"`; legacy
+  `return_screenshot: true` maps to `"image"` and conflicts with `"none"`/`"ui"`), plus `batch` `observe_at_end`.
+  `observe: "ui"` returns the compact structured UI outline in the same call after the tool's default settle
+  (`settle_ms`: 700 ms, or 1500 ms for `launch_app`/`open_url`, skipped when `expect` already waited), suppresses
+  unchanged screens to `Screen unchanged (obs=#N, hash=…, snapshot=…).`, and caps outlines at 120 elements / 8,000
+  chars. `observe: "both"` returns UI + screenshot in a single settle. `get_ui` cuts texts longer than about 80
   characters (marked `…`, and the header says so); `full_text: true` prints them whole. `visible_only` defaults
   true; `interactive_only=true` narrows to actionable/editable/scrollable elements. `diff=true` returns changed
   outline lines since this session's previous read, including changed refs. Removed lines cannot be targeted.
-  The latest `get_ui` or successful visible `wait_for` snapshot is kept in the MCP session; `tap ref=…` binds to
+  The latest `get_ui`, `observe="ui"|"both"`, or successful visible `wait_for` snapshot is kept in the MCP session; `tap ref=…` binds to
   that read instead of another client's latest read. A snapshot expires after up to two minutes or on ownership invalidation: re-read on `stale_ref`.
 * Long operations (`create_device`, `boot_device`, `install_os_image`, `clone_device`) wait up to
   `wait_seconds`. If the job is still running when that time is up, they return a job id for `get_job`.
