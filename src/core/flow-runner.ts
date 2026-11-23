@@ -7,9 +7,9 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { PhoneDockClient } from '../sdk/client.ts';
-import type { AppInfo, Device, ElementMatch, RunRecord } from './types.ts';
+import type { AppInfo, Device, ElementMatch, RunAppProvenance, RunRecord } from './types.ts';
 import {
-  FlowError, compareVersions, describeSelector, describeStep, interpolateStep, osVersionNumber, parseFlow,
+  FlowError, compareVersions, describeSelector, describeStep, flowSourceSha256, interpolateStep, osVersionNumber, parseFlow,
   type Flow, type Point, type Selector, type Step,
 } from './flow.ts';
 import { compareImages, type ImageComparisonOptions } from './image-comparison.ts';
@@ -63,8 +63,8 @@ export interface RunOptions {
   captureSteps?: boolean;
   /** Idle settle after each action step (default true; tests turn it off). */
   settle?: boolean;
-  /** Raw inline flow text (when not backed by a file), used to hash flow provenance before secret interpolation. */
-  rawSource?: string;
+  /** Exact raw flow bytes/text loaded for execution, used to hash flow provenance before secret interpolation. */
+  rawSource?: string | Buffer;
   /** Skip persisting the run record to the daemon/local store (default false). */
   recordRun?: boolean;
   /** Optional local runs directory override when FlowClient has no saveRun() (primarily for unit tests). */
@@ -155,10 +155,14 @@ export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promi
   const retries = Math.max(0, Math.floor(o.retries ?? 0));
   let res: FlowResult | undefined;
   let lastDevice: Device | undefined;
+  let lastApp: RunAppProvenance | undefined;
+  let lastTargetAppId: string | undefined;
   for (let attempt = 1; attempt <= retries + 1; attempt++) {
     const out = await attemptFlow(c, flowIn, { ...o, log }, attempt, retries + 1, secrets);
     res = out.result;
     if (out.device) lastDevice = out.device;
+    if (out.app) lastApp = out.app;
+    if (out.targetAppId) lastTargetAppId = out.targetAppId;
     res.attempts = attempt;
     if (res.status !== 'fail' || o.signal?.aborted) break;
     if (attempt <= retries) log(`  retrying (${attempt}/${retries})…`);
@@ -168,15 +172,48 @@ export async function runFlow(c: FlowClient, flowIn: Flow, o: RunOptions): Promi
     res!.artifacts ??= dir;
     res!.report = writeFlowReport(join(dir, 'report.html'), [res!], secrets);
   }
-  const safeRes = redactValue(res!, secrets);
+  const safeRes = redactFlowResult(res!, secrets);
   if (o.recordRun !== false) {
-    const runId = await persistRunRecord(c, flowIn, safeRes, lastDevice, o, secrets);
+    const runId = await persistRunRecord(c, flowIn, safeRes, lastDevice, o, secrets, env, lastApp, lastTargetAppId);
     if (runId) safeRes.runId = runId;
   }
   return safeRes;
 }
 
-async function resolveAppProvenance(c: FlowClient, device: Device | undefined, appId: string | undefined): Promise<{ id: string; name: string; version: string; build: string }> {
+/** Redact free-text fields in FlowResult without corrupting status enums, timestamps, or file paths. */
+function redactFlowResult(res: FlowResult, secrets: readonly string[]): FlowResult {
+  if (!secrets.length) return res;
+  return {
+    ...res,
+    ...(res.message !== undefined ? { message: redactText(res.message, secrets) } : {}),
+    steps: res.steps.map((s) => {
+      const { kind, ...rest } = s.step;
+      return {
+        ...s,
+        step: { ...redactValue(rest, secrets), kind } as Step,
+        description: redactText(s.description, secrets),
+        ...(s.message !== undefined ? { message: redactText(s.message, secrets) } : {}),
+      };
+    }),
+  };
+}
+
+/** Redact only free-text content (messages, step descriptions and notes) in RunRecord.
+ *  Never redacts ids, enums, platform, backend, version, build, timestamps, or hashes. */
+function redactRunRecord(record: RunRecord, secrets: readonly string[]): RunRecord {
+  if (!secrets.length) return record;
+  return {
+    ...record,
+    ...(record.message !== undefined ? { message: redactText(record.message, secrets) } : {}),
+    steps: record.steps.map((s) => ({
+      ...s,
+      description: redactText(s.description, secrets),
+      ...(s.message !== undefined ? { message: redactText(s.message, secrets) } : {}),
+    })),
+  };
+}
+
+async function resolveAppProvenance(c: FlowClient, device: Device | undefined, appId: string | undefined): Promise<RunAppProvenance> {
   if (!appId) return { id: 'unknown', name: 'unknown', version: 'unknown', build: 'unknown' };
   let info: AppInfo | null | undefined;
   if (device && device.state === 'running') {
@@ -196,12 +233,20 @@ async function resolveAppProvenance(c: FlowClient, device: Device | undefined, a
   };
 }
 
-function flowSha256(flowIn: Flow, rawSource?: string): string {
-  if (rawSource !== undefined) return sha256Hex(rawSource);
-  if (flowIn.file && existsSync(flowIn.file)) {
-    try { return sha256Hex(readFileSync(flowIn.file)); } catch { /* fall through */ }
+function fallbackTargetAppId(flowIn: Flow, env: Record<string, string | undefined>): string | undefined {
+  const launch = flowIn.steps.find((s): s is Extract<Step, { kind: 'launch' }> => s.kind === 'launch' && !!s.app);
+  if (launch) {
+    try {
+      const resolved = interpolateStep(launch, env);
+      if (resolved.kind === 'launch' && resolved.app) return resolved.app;
+    } catch { /* unresolved variable; fall back below */ }
   }
-  return 'unknown';
+  return flowIn.appId;
+}
+
+function flowSha256(flowIn: Flow, rawSource?: string | Buffer): string {
+  if (rawSource !== undefined) return sha256Hex(rawSource);
+  return flowSourceSha256(flowIn) ?? 'unknown';
 }
 
 function listArtifactFiles(dir?: string): string[] | undefined {
@@ -224,14 +269,19 @@ async function persistRunRecord(
   device: Device | undefined,
   o: RunOptions,
   secrets: readonly string[],
+  env: Record<string, string | undefined>,
+  precollectedApp?: RunAppProvenance,
+  targetAppId?: string,
 ): Promise<string | undefined> {
   try {
-    const targetAppId = flowIn.appId ?? flowIn.steps.find((s): s is Extract<Step, { kind: 'launch' }> => s.kind === 'launch' && !!s.app)?.app;
-    const [git, app] = await Promise.all([
-      readGitProvenance(flowIn.file ? dirname(flowIn.file) : process.cwd()),
-      resolveAppProvenance(c, device, targetAppId),
-    ]);
-    const startedAt = Number.isFinite(Date.parse(res.startedAt)) ? res.startedAt : new Date().toISOString();
+    const git = await readGitProvenance(flowIn.file ? dirname(flowIn.file) : process.cwd());
+    const app: RunAppProvenance = precollectedApp ?? {
+      id: targetAppId ?? fallbackTargetAppId(flowIn, env) ?? 'unknown',
+      name: 'unknown',
+      version: 'unknown',
+      build: 'unknown',
+    };
+    const startedAt = Number.isFinite(Date.parse(res.startedAt)) ? new Date(Date.parse(res.startedAt)).toISOString() : new Date().toISOString();
     const endedAt = new Date(Date.parse(startedAt) + Math.max(0, Math.round(res.ms))).toISOString();
     const id = newRunId(startedAt);
     const files = listArtifactFiles(res.artifacts);
@@ -260,9 +310,9 @@ async function persistRunRecord(
       device: {
         id: device?.id ?? o.deviceId ?? 'unknown',
         name: device?.name?.trim() || 'unknown',
-        platform: device?.platform ?? 'unknown',
+        platform: device?.platform && (['android', 'ios', 'linux', 'other'] as const).includes(device.platform) ? device.platform : 'unknown',
         backend: device?.backend?.trim() || 'unknown',
-        kind: device?.kind ?? 'unknown',
+        kind: device?.kind && (['virtual', 'physical', 'cloud'] as const).includes(device.kind) ? device.kind : 'unknown',
         osVersion: device?.osVersion?.trim() || 'unknown',
         model: device?.model?.trim() || 'unknown',
       },
@@ -284,8 +334,7 @@ async function persistRunRecord(
         },
       } : {}),
     };
-    // One final redaction pass over the finished record before persisting (reusing redactValue).
-    const safeRecord = redactValue(rawRecord, secrets);
+    const safeRecord = redactRunRecord(rawRecord, secrets);
     if (c.saveRun) await c.saveRun(safeRecord);
     else if (o.runsDir) writeRunRecord(safeRecord, o.runsDir);
     else return undefined;
@@ -296,7 +345,14 @@ async function persistRunRecord(
   }
 }
 
-async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: number, attempts: number, secrets: string[]): Promise<{ result: FlowResult; device?: Device }> {
+interface AttemptOutput {
+  result: FlowResult;
+  device?: Device;
+  app?: RunAppProvenance;
+  targetAppId?: string;
+}
+
+async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: number, attempts: number, secrets: string[]): Promise<AttemptOutput> {
   const log = o.log ?? (() => {});
   const t0 = Date.now(); const startedAt = new Date(t0).toISOString();
   const base: FlowResult = { name: flowIn.name, file: flowIn.file, status: 'pass', steps: [], ms: 0, attempts: attempt, startedAt };
@@ -370,9 +426,14 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
     res.artifacts ??= ctx.artifactDir;
     res.report = writeFlowReport(join(ctx.artifactDir, 'report.html'), [res], secrets);
     writeFileSync(join(ctx.artifactDir, 'result.json'), JSON.stringify(redactValue({ ...res, shots: ctx.shots }, secrets), null, 2));
-    return { result: res, device };
+    // Collect app provenance while still holding the lease so another owner cannot swap builds in between.
+    const targetAppId = ctx.launchedAppId
+      ?? steps.find((s): s is Extract<Step, { kind: 'launch' }> => s.kind === 'launch' && !!s.app)?.app
+      ?? flowIn.appId;
+    const app = await resolveAppProvenance(c, device, targetAppId);
+    return { result: res, device, app, targetAppId };
   } finally {
-    // Keep the lease through evidence capture; a different owner must not alter the failure screen first.
+    // Keep the lease through evidence capture and app provenance lookup; a different owner must not alter the device first.
     if (!held) await c.releaseLease(device.id).catch(() => {});
   }
 }
@@ -393,6 +454,7 @@ class Ctx {
   timeoutMs: number; idleBroken = false; shots: string[] = [];
   lastShot?: string;
   actionPoint?: { x: number; y: number };
+  launchedAppId?: string;
   artifactDir: string;
   constructor(c: FlowClient, device: Device, flow: Flow, o: RunOptions) {
     this.c = c; this.device = device; this.flow = flow; this.o = o;
@@ -451,6 +513,7 @@ class Ctx {
     switch (s.kind) {
       case 'launch': {
         const app = appOf(s.app);
+        this.launchedAppId = app;
         if (s.stop) await c.terminate(id, app).catch(() => {});
         const launchOpts = s.arguments || s.env ? { ...(s.arguments ? { args: s.arguments } : {}), ...(s.env ? { env: s.env } : {}) } : undefined;
         try { await c.launch(id, app, launchOpts); }
@@ -620,17 +683,27 @@ export async function runFlowFiles(c: FlowClient, files: string[], o: RunOptions
   for (const f of files) {
     if (o.signal?.aborted) break;
     let flow: Flow;
-    try { flow = parseFlow(readFileSync(f, 'utf8'), f); }
-    catch (e) {
+    let rawBytes: Buffer;
+    try {
+      rawBytes = readFileSync(f);
+      flow = parseFlow(rawBytes.toString('utf8'), f);
+    } catch (e) {
       const r: FlowResult = { name: basename(f).replace(FLOW_FILE, ''), file: f, status: 'fail', message: `invalid flow: ${(e as Error).message}`, steps: [], ms: 0, attempts: 1, startedAt: new Date().toISOString() };
       log(`FAIL  ${displayPath(f)}: ${r.message}`); flows.push(r); continue;
     }
     for (const w of flow.warnings) log(`  note: ${displayPath(f)}: ${w}`);
     if (o.platform && flow.platform && flow.platform !== o.platform) {
-      flows.push({ name: flow.name, file: f, status: 'skip', message: `for ${flow.platform} (--platform ${o.platform})`, steps: [], ms: 0, attempts: 0, startedAt: new Date().toISOString() });
+      const skipped: FlowResult = { name: flow.name, file: f, status: 'skip', message: `for ${flow.platform} (--platform ${o.platform})`, steps: [], ms: 0, attempts: 0, startedAt: new Date().toISOString() };
+      if (o.recordRun !== false) {
+        const device = await c.device(o.deviceId).catch(() => undefined);
+        const env = { ...flow.env, ...process.env, ...(o.env ?? {}) };
+        const runId = await persistRunRecord(c, flow, skipped, device, { ...o, rawSource: rawBytes }, [], env);
+        if (runId) skipped.runId = runId;
+      }
+      flows.push(skipped);
       log(`SKIP  ${flow.name}: for ${flow.platform}`); continue;
     }
-    const r = await runFlow(c, flow, o);
+    const r = await runFlow(c, flow, { ...o, rawSource: rawBytes });
     flows.push(r);
     const at = r.steps.find((s) => s.status === 'fail');
     const how = r.status === 'pass' ? `${r.steps.length} steps` : at ? `failed at step ${at.index} of ${r.steps.length}` : 'did not run';

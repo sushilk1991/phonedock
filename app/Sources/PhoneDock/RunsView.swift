@@ -11,8 +11,8 @@ struct RunsTab: View {
     @State private var open: RunSummary?
 
     private enum Scope: String, CaseIterable {
-        case device = "This"
-        case all = "All"
+        case device = "This device"
+        case all = "All devices"
     }
 
     private enum LoadState: Equatable {
@@ -30,12 +30,17 @@ struct RunsTab: View {
         VStack(spacing: 0) {
             SectionHeader("Runs") {
                 Picker("Scope", selection: $scope) {
-                    ForEach(Scope.allCases, id: \.self) { s in Text(s.rawValue).tag(s) }
+                    ForEach(Scope.allCases, id: \.self) { s in
+                        Text(s.rawValue)
+                            .accessibilityLabel(s.rawValue)
+                            .tag(s)
+                    }
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .controlSize(.small)
-                .frame(width: 96)
+                .fixedSize()
+                .accessibilityLabel("Run scope")
                 .help(scope == .device ? "Showing runs on \(device.name)" : "Showing runs across all devices")
                 .testAnchor("Runs scope")
 
@@ -177,6 +182,9 @@ struct RunDetailSheet: View {
     @State private var record: RunRecord?
     @State private var problem: FriendlyError?
     @State private var copied = false
+    @State private var existingReportPath: String?
+    @State private var existingArtifactsDir: String?
+    @State private var expandedSteps: Set<Int> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -318,11 +326,25 @@ struct RunDetailSheet: View {
                                             .foregroundStyle(Theme.Ink.secondary)
                                     }
                                     if let note = st.message, !note.isEmpty {
-                                        Text(note)
-                                            .font(Theme.Fonts.mono)
-                                            .foregroundStyle(st.status == "fail" ? Theme.Status.errorText : Theme.Ink.secondary)
-                                            .textSelection(.enabled)
-                                            .padding(.leading, 46)
+                                        let isExpanded = expandedSteps.contains(st.index)
+                                        let isLong = note.count > 180 || note.contains("\n")
+                                        VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                                            Text(note)
+                                                .font(Theme.Fonts.callout)
+                                                .foregroundStyle(Theme.Ink.secondary)
+                                                .lineLimit(isExpanded ? nil : 3)
+                                                .textSelection(.enabled)
+                                            if isLong {
+                                                Button(isExpanded ? "Show less" : "Show more") {
+                                                    if isExpanded { expandedSteps.remove(st.index) }
+                                                    else { expandedSteps.insert(st.index) }
+                                                }
+                                                .buttonStyle(.plain)
+                                                .font(Theme.Fonts.meta)
+                                                .foregroundStyle(Theme.Accent.text)
+                                            }
+                                        }
+                                        .padding(.leading, 46)
                                     }
                                 }
                                 .padding(.horizontal, Theme.Space.l)
@@ -360,12 +382,7 @@ struct RunDetailSheet: View {
     }
 
     private var footer: some View {
-        let reportPath = record?.artifacts?.report ?? summary.report
-        let reportExists = reportPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
-        let dirPath = record?.artifacts?.dir
-        let dirExists = dirPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
-
-        return HStack(spacing: Theme.Space.m) {
+        HStack(spacing: Theme.Space.m) {
             Button {
                 Task { await copyPrSummary() }
             } label: {
@@ -375,7 +392,7 @@ struct RunDetailSheet: View {
             .testAnchor("Copy PR Summary")
             .task(id: copied) { if copied { try? await Task.sleep(for: .seconds(1.5)); copied = false } }
 
-            if let reportPath, reportExists {
+            if let reportPath = existingReportPath {
                 Button {
                     let url = URL(fileURLWithPath: reportPath)
                     if !SelfTest.blocksForeground("open flow report \(url.lastPathComponent)") {
@@ -387,7 +404,7 @@ struct RunDetailSheet: View {
                 .testAnchor("Open Run Report")
             }
 
-            if let dirPath, dirExists {
+            if let dirPath = existingArtifactsDir {
                 Button {
                     let url = URL(fileURLWithPath: dirPath)
                     if !SelfTest.blocksForeground("show run artifacts \(url.lastPathComponent)") {
@@ -414,7 +431,18 @@ struct RunDetailSheet: View {
             return
         }
         do {
-            record = try await c.get(RunRecord.self, "/v1/runs/\(DaemonClient.enc(summary.id))", timeout: 30)
+            let loaded = try await c.get(RunRecord.self, "/v1/runs/\(DaemonClient.enc(summary.id))", timeout: 30)
+            let reportCandidate = loaded.artifacts?.report ?? summary.report
+            let dirCandidate = loaded.artifacts?.dir
+            let (validReport, validDir) = await Task.detached(priority: .utility) { () -> (String?, String?) in
+                let fm = FileManager.default
+                let r = reportCandidate.flatMap { fm.fileExists(atPath: $0) ? $0 : nil }
+                let d = dirCandidate.flatMap { fm.fileExists(atPath: $0) ? $0 : nil }
+                return (r, d)
+            }.value
+            record = loaded
+            existingReportPath = validReport
+            existingArtifactsDir = validDir
             problem = nil
         } catch {
             problem = FriendlyError.from(error, title: "Couldn’t load run details")

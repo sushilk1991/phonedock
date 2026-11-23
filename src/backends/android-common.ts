@@ -621,7 +621,8 @@ export function parseDumpsysPackage(out: string, id: string): AppInfo | null {
   if (start < 0) return null;
   const hidden = out.indexOf('Hidden system packages:', start);
   const block = hidden > start ? out.slice(start, hidden) : out.slice(start);
-  const version = /\bversionName=([^\r\n]+)/.exec(block)?.[1]?.trim();
+  const rawVersion = /\bversionName=([^\r\n]+)/.exec(block)?.[1]?.trim();
+  const version = rawVersion && rawVersion.toLowerCase() !== 'null' ? rawVersion : undefined;
   const build = /\bversionCode=(\d+)/.exec(block)?.[1]?.trim();
   const system = /\bflags=\[[^\]]*\bSYSTEM\b/.test(block);
   return {

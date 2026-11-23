@@ -21,6 +21,7 @@
 // This module is pure: parse / validate / write flows, turn an action log + screen observations into a flow
 // (`flowFromLog`), and export to Maestro. The runner is src/core/flow-runner.ts; the daemon side is
 // src/daemon/observe.ts (observations) and src/daemon/routes-flow.ts (POST /v1/devices/:id/flow).
+import { createHash } from 'node:crypto';
 import { validateSettingsInput, type SettingsInput } from './device-settings.ts';
 import { validateLaunchOptions } from './launch-options.ts';
 import { redactSecretStrings } from './secrets.ts';
@@ -109,6 +110,13 @@ const TOP_KEYS = new Set(['version', 'name', 'appId', 'platform', 'minOS', 'reco
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : undefined);
 
+const FLOW_SOURCE_SHA256 = new WeakMap<Flow, string>();
+
+/** SHA-256 hex digest of the exact source text parsed by `parseFlow`, if available. */
+export function flowSourceSha256(flow: Flow): string | undefined {
+  return FLOW_SOURCE_SHA256.get(flow);
+}
+
 /** Parse flow text (YAML, or JSON when the file name ends in .json or the text starts with `{`/`[`). */
 export function parseFlow(text: string, file?: string): Flow {
   let raw: unknown;
@@ -119,7 +127,9 @@ export function parseFlow(text: string, file?: string): Flow {
     if (e instanceof YamlError) throw new FlowError(`${where}${e.message}`);
     throw new FlowError(`${where}not valid ${json ? 'JSON' : 'YAML'}: ${(e as Error).message}`);
   }
-  return validateFlow(raw, file);
+  const flow = validateFlow(raw, file);
+  FLOW_SOURCE_SHA256.set(flow, createHash('sha256').update(text).digest('hex'));
+  return flow;
 }
 function isJsonish(t: string): boolean { try { JSON.parse(t); return true; } catch { return false; } }
 

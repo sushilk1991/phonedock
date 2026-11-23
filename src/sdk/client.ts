@@ -915,8 +915,9 @@ export class PhoneDockClient {
   getRun(runId: string): Promise<RunRecord> {
     return this.request('GET', `/v1/runs/${enc(runId)}`);
   }
-  exportRun(runId: string, format: 'md' | 'json' = 'md'): Promise<string> {
-    return this.request('GET', `/v1/runs/${enc(runId)}/export`, { query: { format } });
+  async exportRun(runId: string, format: 'md' | 'json' = 'md'): Promise<string> {
+    const res = await this.request<Response>('GET', `/v1/runs/${enc(runId)}/export`, { query: { format }, raw: true });
+    return await res.text();
   }
   saveRun(record: RunRecord): Promise<RunSummary> {
     return this.request('POST', '/v1/runs', { body: record });

@@ -8,7 +8,6 @@ import { num, str, type ParsedArgs } from './args.ts';
 export const RUNS_HELP = `Runs:       runs [--device ID] [--status pass|fail|skip] [--flow NAME] [--app ID] [--limit N]
             runs show <runId> | runs export <runId> [--format md|json] [-o file]`;
 
-const err = (msg: string) => { process.stderr.write(`phonedock: ${msg}\n`); return 2; };
 const fmtDur = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`);
 
 function fmtTable(rows: RunSummary[]): string {
@@ -46,19 +45,27 @@ function fmtDetail(r: RunRecord): string {
   return lines.join('\n');
 }
 
-export async function runsCmd(c: PhoneDockClient, a: ParsedArgs, json: boolean): Promise<number> {
+export interface RunsCmdIO {
+  stdout?: (s: string) => void;
+  stderr?: (s: string) => void;
+}
+
+export async function runsCmd(c: PhoneDockClient, a: ParsedArgs, json: boolean, io?: RunsCmdIO): Promise<number> {
   const p = a.positionals;
   const sub = p[1];
-  const print = (s: string) => process.stdout.write(s.endsWith('\n') ? s : `${s}\n`);
+  const writeOut = io?.stdout ?? ((s: string) => { process.stdout.write(s); });
+  const writeErr = io?.stderr ?? ((s: string) => { process.stderr.write(s); });
+  const fail = (msg: string) => { writeErr(`phonedock: ${msg}\n`); return 2; };
+  const print = (s: string) => writeOut(s.endsWith('\n') ? s : `${s}\n`);
 
   if (!sub || sub === 'ls' || sub === 'list') {
     const status = str(a.flags, 'status');
     if (status && status !== 'pass' && status !== 'fail' && status !== 'skip') {
-      return err('--status must be pass, fail or skip');
+      return fail('--status must be pass, fail or skip');
     }
     const limit = num(a.flags, 'limit');
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) {
-      return err('--limit must be an integer between 1 and 200');
+      return fail('--limit must be an integer between 1 and 200');
     }
     const rows = await c.listRuns({
       device: str(a.flags, 'device'),
@@ -74,7 +81,7 @@ export async function runsCmd(c: PhoneDockClient, a: ParsedArgs, json: boolean):
 
   if (sub === 'show' || sub === 'get') {
     const runId = p[2];
-    if (!runId) return err('Missing argument: runs show <runId>');
+    if (!runId) return fail('Missing argument: runs show <runId>');
     const run = await c.getRun(runId);
     if (json) print(JSON.stringify(run, null, 2));
     else print(fmtDetail(run));
@@ -83,9 +90,9 @@ export async function runsCmd(c: PhoneDockClient, a: ParsedArgs, json: boolean):
 
   if (sub === 'export') {
     const runId = p[2];
-    if (!runId) return err('Missing argument: runs export <runId> [--format md|json] [-o file]');
+    if (!runId) return fail('Missing argument: runs export <runId> [--format md|json] [-o file]');
     const fmt = (str(a.flags, 'format') ?? 'md').toLowerCase();
-    if (fmt !== 'md' && fmt !== 'json') return err('--format must be md or json');
+    if (fmt !== 'md' && fmt !== 'json') return fail('--format must be md or json');
     const out = await c.exportRun(runId, fmt);
     const outFile = str(a.flags, 'output');
     if (outFile) {
@@ -95,10 +102,10 @@ export async function runsCmd(c: PhoneDockClient, a: ParsedArgs, json: boolean):
       if (json) print(JSON.stringify({ ok: true, id: runId, format: fmt, file: abs }, null, 2));
       else print(`Wrote ${displayPath(abs)} (${fmt})`);
     } else {
-      process.stdout.write(out.endsWith('\n') ? out : `${out}\n`);
+      writeOut(out.endsWith('\n') ? out : `${out}\n`);
     }
     return 0;
   }
 
-  return err(`Unknown runs subcommand "${sub}" (ls | show | export)`);
+  return fail(`Unknown runs subcommand "${sub}" (ls | show | export)`);
 }

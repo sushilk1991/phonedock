@@ -23,7 +23,8 @@ import {
 } from './types.ts';
 
 export const RUN_SCHEMA_VERSION = 1 as const;
-export const RUN_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+export const RUN_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+const UTC_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 export const MAX_RUN_BODY_BYTES = 2 * 1024 * 1024;
 export const MAX_RUN_STEPS = 2000;
 export const DEFAULT_MAX_RUNS = 200;
@@ -58,12 +59,12 @@ export function newRunId(startedAt: Date | string = new Date()): string {
 }
 
 export function assertValidRunId(id: string): string {
-  if (typeof id !== 'string' || !RUN_ID_RE.test(id) || /^\.+$/.test(id)) {
+  if (typeof id !== 'string' || !RUN_ID_RE.test(id)) {
     throw new PhoneDockError(
       'The run ID is invalid',
       'bad_request',
       400,
-      ['Run IDs must be 1–128 characters of letters, digits, ".", "_", or "-".'],
+      ['Run IDs must be 1–128 characters of letters, digits, ".", "_", or "-", and cannot start with ".".'],
       `Invalid run id ${JSON.stringify(id)}`,
     );
   }
@@ -121,21 +122,36 @@ function reqNonNegInt(obj: Record<string, unknown>, key: string, path: string): 
   return v;
 }
 
+export interface ValidateRunOptions {
+  /** Require UTC `Z` ISO-8601 timestamps (default true, enforced on POST / writeRunRecord). */
+  requireUtc?: boolean;
+}
+
+function isValidTimestamp(ts: string, requireUtc: boolean): boolean {
+  if (!Number.isFinite(Date.parse(ts))) return false;
+  return requireUtc ? UTC_ISO_RE.test(ts) : true;
+}
+
 /** Validate an untrusted run payload strictly before persisting. Rejects schemaVersion !== 1 and > 2000 steps. */
-export function validateRunRecord(raw: unknown): RunRecord {
+export function validateRunRecord(raw: unknown, opts: ValidateRunOptions = {}): RunRecord {
+  const requireUtc = opts.requireUtc ?? true;
   checkNoForbiddenKeys(raw);
   const o = assertSafeObject(raw, 'run');
   if (o.schemaVersion !== RUN_SCHEMA_VERSION) {
     throw badRun(`schemaVersion must be ${RUN_SCHEMA_VERSION} (got ${JSON.stringify(o.schemaVersion)})`);
   }
-  const id = assertValidRunId(String(o.id ?? ''));
   if (typeof o.id !== 'string') throw badRun('run.id must be a string');
+  const id = assertValidRunId(o.id);
   const status = o.status as RunStatus;
   if (typeof status !== 'string' || !RUN_STATUSES.has(status)) throw badRun('run.status must be pass | fail | skip');
   const startedAt = reqStr(o, 'startedAt', 'run');
-  if (!Number.isFinite(Date.parse(startedAt))) throw badRun('run.startedAt must be a valid ISO timestamp');
+  if (!isValidTimestamp(startedAt, requireUtc)) {
+    throw badRun(requireUtc ? 'run.startedAt must be a valid UTC ISO-8601 timestamp ending in Z' : 'run.startedAt must be a valid ISO timestamp');
+  }
   const endedAt = reqStr(o, 'endedAt', 'run');
-  if (!Number.isFinite(Date.parse(endedAt))) throw badRun('run.endedAt must be a valid ISO timestamp');
+  if (!isValidTimestamp(endedAt, requireUtc)) {
+    throw badRun(requireUtc ? 'run.endedAt must be a valid UTC ISO-8601 timestamp ending in Z' : 'run.endedAt must be a valid ISO timestamp');
+  }
   const durationMs = reqNonNegNum(o, 'durationMs', 'run');
   const attempts = reqNonNegInt(o, 'attempts', 'run');
   const owner = reqStr(o, 'owner', 'run');
@@ -309,6 +325,15 @@ export function writeRunRecord(record: RunRecord, dirOverride?: string): RunSumm
   return toRunSummary(valid);
 }
 
+function compareRunsDesc(a: { startedAt: string; id: string }, b: { startedAt: string; id: string }): number {
+  const ta = Date.parse(a.startedAt);
+  const tb = Date.parse(b.startedAt);
+  const na = Number.isFinite(ta) ? ta : -Infinity;
+  const nb = Number.isFinite(tb) ? tb : -Infinity;
+  if (nb !== na) return nb - na;
+  return b.id < a.id ? -1 : b.id > a.id ? 1 : 0;
+}
+
 /** Keep at most `keep` newest manifest files in `dir`. Never deletes non-manifest files or artifact dirs. */
 export function pruneRuns(dir: string, keep: number): number {
   let entries: { name: string; startedAt: string; id: string }[];
@@ -328,7 +353,7 @@ export function pruneRuns(dir: string, keep: number): number {
     return 0;
   }
   if (entries.length <= keep) return 0;
-  entries.sort((a, b) => (b.startedAt < a.startedAt ? -1 : b.startedAt > a.startedAt ? 1 : b.id.localeCompare(a.id)));
+  entries.sort(compareRunsDesc);
   let removed = 0;
   for (const old of entries.slice(keep)) {
     try { unlinkSync(join(dir, old.name)); removed++; } catch { /* ignore */ }
@@ -341,7 +366,7 @@ export function readRunRecord(id: string, dirOverride?: string): RunRecord | nul
   const file = join(runsDir(dirOverride), `${id}.json`);
   if (!existsSync(file)) return null;
   try {
-    return validateRunRecord(JSON.parse(readFileSync(file, 'utf8')));
+    return validateRunRecord(JSON.parse(readFileSync(file, 'utf8')), { requireUtc: false });
   } catch {
     return null;
   }
@@ -362,12 +387,11 @@ export function listRunSummaries(filter: RunListFilter = {}, dirOverride?: strin
   const summaries: RunSummary[] = [];
   for (const name of files) {
     try {
-      const parsed = JSON.parse(readFileSync(join(dir, name), 'utf8')) as RunRecord;
-      if (parsed?.schemaVersion !== RUN_SCHEMA_VERSION || typeof parsed.id !== 'string') continue;
+      const parsed = validateRunRecord(JSON.parse(readFileSync(join(dir, name), 'utf8')), { requireUtc: false });
       summaries.push(toRunSummary(parsed));
-    } catch { /* skip unreadable manifest */ }
+    } catch { /* skip invalid or unreadable manifest */ }
   }
-  summaries.sort((a, b) => (b.startedAt < a.startedAt ? -1 : b.startedAt > a.startedAt ? 1 : b.id.localeCompare(a.id)));
+  summaries.sort(compareRunsDesc);
 
   const devQ = filter.device?.toLowerCase();
   const flowQ = filter.flow?.toLowerCase();
@@ -428,18 +452,20 @@ export function sha256Hex(content: Buffer | string): string {
 function sanitizePublicPath(p: string): string {
   const trimmed = p.trim();
   if (!trimmed || trimmed === 'unknown') return 'unknown';
-  if (trimmed.startsWith('/') || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('file://')) {
-    return basename(trimmed.replace(/^file:\/\//, '')) || 'unknown';
+  if (trimmed.startsWith('/') || trimmed.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('file://')) {
+    return basename(trimmed.replace(/^file:\/\//, '').replace(/\\/g, '/')) || 'unknown';
   }
   return trimmed.replace(/\\/g, '/');
 }
 
 function sanitizePublicText(s: string): string {
-  // Replace local absolute paths (e.g. /Users/..., /home/..., /private/var/..., /tmp/..., file:///..., C:\...) with basenames.
+  // Replace every absolute local path (file:///..., ~/..., any /-rooted path of 2+ segments, and Windows drive paths) with its basename.
+  // URLs like https://example.com/a/b are left intact because // has an empty first segment and path slashes follow alphanumeric chars.
   return s
-    .replace(/file:\/\/\/[^\s)'"`]+/g, (m) => basename(m.slice(7)) || '[local-file]')
-    .replace(/(?<![A-Za-z0-9._-])\/(?:Users|home|private|var|tmp|opt|Volumes|Library|Applications|System|etc)\/[^\s)'"`,;:]+/g, (m) => basename(m) || '[local-path]')
-    .replace(/(?<![A-Za-z0-9._-])[A-Za-z]:\\[^\s)'"`,;:]+/g, (m) => basename(m.replace(/\\/g, '/')) || '[local-path]');
+    .replace(/file:\/\/\/[^\s)'"`,;:]+/g, (m) => basename(m.slice(7)) || '[local-file]')
+    .replace(/(?<![A-Za-z0-9._/-])~\/[^\s)'"`,;:]+/g, (m) => basename(m) || '[local-path]')
+    .replace(/(?<![A-Za-z0-9._/-])\/[^/\s)'"`,;:]+(?:\/[^/\s)'"`,;:]+)+\/?/g, (m) => basename(m) || '[local-path]')
+    .replace(/(?<![A-Za-z0-9._/-])[A-Za-z]:[\\/][^\s)'"`,;:]+/g, (m) => basename(m.replace(/\\/g, '/')) || '[local-path]');
 }
 
 const mdCell = (s: string) => sanitizePublicText(s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();

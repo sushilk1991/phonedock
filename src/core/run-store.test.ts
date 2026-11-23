@@ -9,6 +9,7 @@ import {
   listRunSummaries,
   MAX_RUN_STEPS,
   newRunId,
+  pruneRuns,
   publicFlowPath,
   readGitProvenance,
   readRunRecord,
@@ -73,6 +74,10 @@ test('validateRunRecord: enforces schemaVersion=1, id regex, <=2000 steps, field
   assert.throws(() => validateRunRecord({ ...sampleRun(), schemaVersion: 2 }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
   assert.throws(() => validateRunRecord({ ...sampleRun(), id: '../escape' }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
   assert.throws(() => validateRunRecord({ ...sampleRun(), id: '..' }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
+  assert.throws(() => validateRunRecord({ ...sampleRun(), id: '.hidden' }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
+  assert.throws(() => readRunRecord('.hidden'), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
+  assert.throws(() => validateRunRecord({ ...sampleRun(), startedAt: '2026-11-23T15:30:00+05:30' }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
+  assert.throws(() => validateRunRecord({ ...sampleRun(), endedAt: '2026-11-23T15:30:05+05:30' }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
   assert.throws(() => validateRunRecord({ ...sampleRun(), status: 'unknown' }), (e: unknown) => e instanceof PhoneDockError && e.status === 400);
 
   const tooManySteps = Array.from({ length: MAX_RUN_STEPS + 1 }, (_, i) => ({
@@ -173,4 +178,66 @@ test('readGitProvenance: returns unknown outside git and real commit inside git 
   assert.notEqual(here.branch, 'unknown');
   assert.equal(typeof here.dirty, 'boolean');
   assert.ok(here.gitRoot);
+});
+
+test('formatRunMarkdown: replaces non-standard absolute roots and ~/ paths with basenames while preserving URLs and relative paths', () => {
+  const md = formatRunMarkdown(sampleRun({
+    status: 'fail',
+    message: 'Diff at /srv/private/project/baseline.png and ~/secrets/dir/shot.png; see https://example.com/docs/flows and flows/settings.yaml',
+    flow: {
+      name: 'Non-standard root check',
+      file: '/srv/private/project/flows/login.yaml',
+      fileDisplay: '~/private/flows/login.yaml',
+      sha256: 'd'.repeat(64),
+    },
+    steps: [
+      { index: 1, description: 'compare /data/ci/run-42/expected.png', status: 'fail', ms: 120, message: 'Now: /mnt/secret/out.png (file:///srv/private/raw.png)' },
+    ],
+  }));
+
+  assert.doesNotMatch(md, /\/srv\//);
+  assert.doesNotMatch(md, /\/data\//);
+  assert.doesNotMatch(md, /\/mnt\//);
+  assert.doesNotMatch(md, /~\//);
+  assert.match(md, /baseline\.png/);
+  assert.match(md, /shot\.png/);
+  assert.match(md, /expected\.png/);
+  assert.match(md, /out\.png/);
+  assert.match(md, /raw\.png/);
+  assert.match(md, /`login\.yaml`/);
+  assert.match(md, /https:\/\/example\.com\/docs\/flows/);
+  assert.match(md, /flows\/settings\.yaml/);
+});
+
+test('listRunSummaries & pruneRuns: sort by Date.parse(startedAt) with id tiebreak and skip corrupt manifests', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pd-runs-sort-'));
+  try {
+    // Chronological order:
+    //   1. offset-old: 15:00:00+05:30 == 09:30:00Z (oldest, though lexically "15:00" > "10:00"!)
+    //   2. whole-sec:  10:00:00Z      == 10:00:00.000Z (lexically "Z" > "."!)
+    //   3. frac-a/b:   10:00:00.500Z  (same timestamp -> id tiebreak puts frac-b before frac-a)
+    const offsetOld = sampleRun({ id: 'run-offset-old', startedAt: '2026-11-23T15:00:00+05:30', endedAt: '2026-11-23T15:00:05+05:30' });
+    const wholeSec = sampleRun({ id: 'run-whole-sec', startedAt: '2026-11-23T10:00:00Z', endedAt: '2026-11-23T10:00:05Z' });
+    const fracA = sampleRun({ id: 'run-frac-a', startedAt: '2026-11-23T10:00:00.500Z', endedAt: '2026-11-23T10:00:05.500Z' });
+    const fracB = sampleRun({ id: 'run-frac-b', startedAt: '2026-11-23T10:00:00.500Z', endedAt: '2026-11-23T10:00:05.500Z' });
+
+    for (const r of [offsetOld, wholeSec, fracA, fracB]) {
+      writeFileSync(join(dir, `${r.id}.json`), JSON.stringify(r));
+    }
+    // Corrupt manifest with device.name: null must be skipped without breaking filtering
+    const corrupt = { ...sampleRun({ id: 'run-corrupt' }), device: { ...sampleRun().device, name: null } };
+    writeFileSync(join(dir, 'run-corrupt.json'), JSON.stringify(corrupt));
+
+    const listed = listRunSummaries({ device: 'pdtest-1' }, dir);
+    assert.deepEqual(listed.map((r) => r.id), ['run-frac-b', 'run-frac-a', 'run-whole-sec', 'run-offset-old']);
+
+    // Prune keeping 3 removes the corrupt/oldest entries (corrupt + run-offset-old)
+    pruneRuns(dir, 3);
+    assert.equal(existsSync(join(dir, 'run-offset-old.json')), false, 'oldest by epoch (+05:30) should be pruned');
+    assert.equal(existsSync(join(dir, 'run-frac-b.json')), true);
+    assert.equal(existsSync(join(dir, 'run-frac-a.json')), true);
+    assert.equal(existsSync(join(dir, 'run-whole-sec.json')), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

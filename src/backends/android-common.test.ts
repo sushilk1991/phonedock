@@ -202,4 +202,17 @@ Hidden system packages:
     system: true,
   });
   assert.equal(parseDumpsysPackage('Unable to find package: com.missing', 'com.missing'), null);
+
+  const nullVersion = `
+Packages:
+  Package [com.example.noversion] (1234):
+    versionCode=7 minSdk=26 targetSdk=34
+    versionName=null
+    flags=[ HAS_CODE ]
+`;
+  assert.deepEqual(parseDumpsysPackage(nullVersion, 'com.example.noversion'), {
+    id: 'com.example.noversion',
+    build: '7',
+    system: false,
+  });
 });

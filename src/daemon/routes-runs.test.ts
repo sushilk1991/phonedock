@@ -121,6 +121,31 @@ test('routes-runs: POST/GET/export /v1/runs, bounds enforcement, 409 conflict, S
     callRoute('GET', '/v1/runs/does-not-exist'),
     (e: unknown) => e instanceof PhoneDockError && e.status === 404,
   );
+
+  // Dot-prefixed ids -> 400 on POST and GET
+  await assert.rejects(
+    callRoute('POST', '/v1/runs', { body: makeRecord('.hidden-run') }),
+    (e: unknown) => e instanceof PhoneDockError && e.status === 400,
+  );
+  await assert.rejects(
+    callRoute('GET', '/v1/runs/.hidden-run'),
+    (e: unknown) => e instanceof PhoneDockError && e.status === 400,
+  );
+  await assert.rejects(
+    callRoute('GET', '/v1/runs/.hidden-run/export', { query: { format: 'md' } }),
+    (e: unknown) => e instanceof PhoneDockError && e.status === 400,
+  );
+
+  // Non-UTC offset timestamps -> 400 on POST
+  await assert.rejects(
+    callRoute('POST', '/v1/runs', {
+      body: makeRecord('2026-11-23T12-00-04-000Z-ffff', {
+        startedAt: '2026-11-23T17:30:00+05:30',
+        endedAt: '2026-11-23T17:30:02+05:30',
+      }),
+    }),
+    (e: unknown) => e instanceof PhoneDockError && e.status === 400,
+  );
 });
 
 test('GET /v1/devices/:id/apps/:appId returns AppInfo with build or 404 when not installed', async () => {

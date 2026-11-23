@@ -840,7 +840,7 @@ before persistence.
 | GET | /v1/runs | `?device=&status=pass\|fail\|skip&flow=&appId=&limit=50` (max 200) | `RunSummary[]`, newest first |
 | GET | /v1/runs/:runId | – | Full `RunRecord` (`schemaVersion: 1`, provenance, steps, local artifact paths); `404` if missing |
 | GET | /v1/runs/:runId/export | `?format=md\|json` (default `md`) | `text/markdown` (public-safe PR summary: repo-relative flow path inside git or bare filename outside, zero absolute local paths) or `application/json` |
-| POST | /v1/runs | `RunRecord` (`<= 2 MB`, `<= 2000` steps, `schemaVersion: 1`, id matching `[A-Za-z0-9._-]{1,128}`) | `201` `RunSummary` (emits SSE `event: run`); `400` on invalid schema/fields, `413` over 2 MB, `409 conflict` on existing id (never overwrites) |
+| POST | /v1/runs | `RunRecord` (`<= 2 MB`, `<= 2000` steps, `schemaVersion: 1`, UTC `Z` timestamps, id matching `[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}`) | `201` `RunSummary` (emits SSE `event: run`); `400` on invalid schema/fields, `413` over 2 MB, `409 conflict` on existing id (never overwrites) |
 
 CLI: `phonedock runs [--device ID] [--status pass|fail|skip] [--flow NAME] [--app ID] [--limit N]`,
 `phonedock runs show <runId>` (keeps local paths), and `phonedock runs export <runId> [--format md|json] [-o file]`.
