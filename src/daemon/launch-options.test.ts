@@ -215,20 +215,45 @@ test('per-device launch secrets: scrub later observations & flow save, clear on 
       core.clearLaunchSecrets(failDev);
     }
 
-    // Disappearing from inventory clears a device's launch secrets even with zero SSE subscribers (GET /v1/devices?fresh=true)
+    // Inventory pruning: only on absence from a completed, non-stale refresh (never on state or pending refresh)
     assert.equal(core.sseClients.size, 0);
     const goneDev = 'fake-launch-ios:pdtest-gone';
-    let present = true;
-    fakeIos.listDevices = async () => present ? [{
-      id: goneDev, backend: 'fake-launch-ios', nativeId: 'pdtest-gone', name: 'pdtest-gone',
-      platform: 'ios', kind: 'virtual', state: 'running', managed: true, capabilities: ['launch'],
-    }] : [];
+    let devState: 'running' | 'stopped' | 'absent' = 'running';
+    fakeIos.listDevices = async () => {
+      if (devState === 'absent') return [];
+      return [{
+        id: goneDev, backend: 'fake-launch-ios', nativeId: 'pdtest-gone', name: 'pdtest-gone',
+        platform: 'ios', kind: 'virtual', state: devState, managed: true, capabilities: ['launch'],
+      }];
+    };
     await call('GET', '/v1/devices', undefined, { fresh: 'true' });
-    core.rememberLaunchSecrets(goneDev, ['disappeared-secret']);
-    assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['disappeared-secret']);
-    present = false;
+    core.rememberLaunchSecrets(goneDev, ['inventory-secret']);
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['inventory-secret']);
+
+    // 1) A cached/reported `stopped` device must NOT have its secrets pruned by inventory refresh
+    devState = 'stopped';
     await call('GET', '/v1/devices', undefined, { fresh: 'true' });
-    assert.deepEqual(core.deviceLaunchSecrets(goneDev), []);
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['inventory-secret'], 'stopped state in inventory must not prune secrets');
+    devState = 'running';
+    await call('GET', '/v1/devices', undefined, { fresh: 'true' });
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['inventory-secret']);
+
+    // 2) A snapshot returned while a refresh is pending must NOT prune secrets (even if the cached snapshot omits the device)
+    const pendingDev = 'fake-launch-ios:pdtest-pending';
+    core.rememberLaunchSecrets(pendingDev, ['pending-secret']);
+    let releasePending!: () => void;
+    const pendingGate = new Promise<void>((r) => { releasePending = r; });
+    fakeIos.listDevices = async () => { await pendingGate; return []; };
+    // Trigger refresh whose listDevices stays pending past BackendInventory's 250ms initialWaitMs
+    await call('GET', '/v1/devices', undefined, { fresh: 'true' });
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), ['inventory-secret'], 'pending refresh snapshot must not prune existing device');
+    assert.deepEqual(core.deviceLaunchSecrets(pendingDev), ['pending-secret'], 'pending refresh snapshot must not prune device absent from stale cache');
+
+    // 3) Once the pending refresh completes with both devices absent, their secrets ARE pruned (with zero SSE clients)
+    releasePending();
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(core.deviceLaunchSecrets(goneDev), [], 'absence after completed refresh must prune secrets');
+    assert.deepEqual(core.deviceLaunchSecrets(pendingDev), [], 'absence after completed refresh must prune pending device secrets');
 
     // Tracked device count is capped (LRU eviction)
     const devCap = core.MAX_LAUNCH_SECRET_DEVICES;

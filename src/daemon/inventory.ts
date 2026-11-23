@@ -110,6 +110,12 @@ export class BackendInventory {
     }
     return out;
   }
+  /** True only when `backend` has a completed, non-pending, non-error, non-stale scan. */
+  isFresh(backend: string): boolean {
+    const e = this.entries.get(backend);
+    if (!e || e.pending || e.error || e.timedOut || e.at === undefined) return false;
+    return this.now() - e.at < this.opts.maxAgeMs;
+  }
   status(): Record<string, InventoryStatus> {
     return Object.fromEntries([...this.entries].map(([id, e]) => [id, {
       refreshing: !!e.pending, ...(e.at !== undefined ? { at: e.at } : {}), ...(e.error ? { error: e.error } : {}),

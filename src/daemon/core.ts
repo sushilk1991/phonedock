@@ -332,16 +332,15 @@ export function deviceLaunchSecrets(id: string): string[] { return [...(launchSe
 export function clearLaunchSecrets(id: string) { launchSecrets.delete(id); }
 function pruneLaunchSecrets(list: readonly Device[], backend?: string) {
   if (!launchSecrets.size) return;
-  const st = inventory.status();
-  const alive = new Set(list.filter((d) => d.state !== 'stopped' && d.state !== 'offline').map((d) => d.id));
+  const present = new Set(list.map((d) => d.id));
   for (const id of [...launchSecrets.keys()]) {
     const sep = id.indexOf(':');
     if (sep <= 0) continue;
     const bId = id.slice(0, sep);
     if (backend && bId !== backend) continue;
-    const s = st[bId];
-    if (!s || s.at === undefined || s.error || s.timedOut) continue;
-    if (!alive.has(id)) launchSecrets.delete(id);
+    // Prune only when the device is absent from a completed, non-stale inventory scan (never based on state or pending refresh).
+    if (!inventory.isFresh(bId)) continue;
+    if (!present.has(id)) launchSecrets.delete(id);
   }
 }
 
@@ -505,7 +504,7 @@ export async function pollDevices(fresh = true) {
       seen.set(d.id, key);
       if (lastSeen.get(d.id) !== key) emit('device', d);
     }
-    for (const [id] of lastSeen) if (!seen.has(id)) { clearLaunchSecrets(id); emit('device', { ...(lastDevices.get(id) ?? { id }), state: 'unknown', removed: true }); }
+    for (const [id] of lastSeen) if (!seen.has(id)) emit('device', { ...(lastDevices.get(id) ?? { id }), state: 'unknown', removed: true });
     lastSeen = seen; lastDevices = new Map(list.map((d) => [d.id, d]));
   } catch { /* ignore */ } finally { polling = false; }
 }

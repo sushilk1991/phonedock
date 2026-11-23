@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FlowError, compareVersions, describeStep, flowFromLog, interpolate, interpolateStep, parseFlow, parseStep, pickAssertText, stepOut, toMaestro, writeFlow, type LogEntry, type Observation, type Step } from './flow.ts';
+import { FlowError, compareVersions, describeStep, flowFromLog, interpolate, interpolateStep, parseFlow, parseStep, pickAssertText, redactFlowStep, stepOut, toMaestro, writeFlow, type LogEntry, type Observation, type Step } from './flow.ts';
 
 const SAMPLE = `# hand-written
 name: Greet
@@ -380,11 +380,11 @@ steps:
   assert.ok(!onlySecret.text.includes('alpha-secret'));
   assert.ok(!onlySecret.text.includes('assert_visible'));
 
-  // Structural fields (timestamps, action names, owners, ids) must never be corrupted by secret redaction
+  // Structural fields (timestamps, action names, owners, launch app id) must never be corrupted; output YAML parses cleanly
   const structural = flowFromLog(
     [
-      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['year'] } },
-      { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: 'Continue', id: 'btn_tap' } } },
+      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.tap.mcp2026', hasArgs: true, argKeys: ['year'] } },
+      { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: 'Continue', id: 'btn_continue' } } },
       { at: '2026-11-23T10:00:02.000Z', owner: 'mcp:a:1', action: { action: 'type', text: 'pin 2026' } },
     ],
     [
@@ -392,29 +392,55 @@ steps:
     ],
     { owner: 'mcp:a:1', since: '2026-11-23T09:59:00.000Z', secrets: ['2026', 'tap', 'mcp'] },
   );
-  assert.ok(structural.flow.steps.some((s) => s.kind === 'tap' && s.sel?.id === 'btn_tap' && s.sel?.text === 'Continue'), `tap step corrupted: ${JSON.stringify(structural.flow.steps)}`);
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'launch' && s.app === 'com.tap.mcp2026'), 'launch app id must stay intact');
+  assert.ok(structural.flow.steps.some((s) => s.kind === 'tap' && s.sel?.id === 'btn_continue' && s.sel?.text === 'Continue'), `tap step corrupted: ${JSON.stringify(structural.flow.steps)}`);
   assert.ok(structural.flow.steps.some((s) => s.kind === 'type' && s.text === 'pin •••'), `typed secret not redacted: ${JSON.stringify(structural.flow.steps)}`);
   assert.ok(structural.flow.steps.some((s) => s.kind === 'assert_visible' && s.sel.text === 'Dashboard'), `expected Dashboard assert: ${JSON.stringify(structural.flow.steps)}`);
   assert.ok(!structural.flow.steps.some((s) => s.kind === 'assert_visible' && (s.sel.text ?? '').includes('2026')));
+  assert.doesNotThrow(() => parseFlow(structural.text));
 
-  // Inverted denylist redacts secrets in tap, fill, openUrl, wait, scroll_to, and alert
+  // Output redaction pass catches assembled legacy fill chunks, arguments.action / env.owner, and all six action kinds
   const tok = 'launch-token-7744';
   const allSix = flowFromLog(
     [
-      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['token'] } },
+      { at: '2026-11-23T10:00:00.000Z', owner: 'mcp:a:1', action: { action: 'launch', appId: 'com.example.app', hasArgs: true, argKeys: ['action'], envKeys: ['owner'] } },
       { at: '2026-11-23T10:00:01.000Z', owner: 'mcp:a:1', action: { action: 'tap', selector: { text: `Open ${tok}` } } },
       { at: '2026-11-23T10:00:02.000Z', owner: 'mcp:a:1', action: { action: 'tap' }, fill: { text: `Field ${tok}`, value: `Bearer ${tok}` } },
       { at: '2026-11-23T10:00:03.000Z', owner: 'mcp:a:1', action: { action: 'openUrl', url: `myapp://cb?t=${tok}` } },
+      // Legacy fill chunks split across two type events whose joined text equals the secret
+      { at: '2026-11-23T10:00:03.500Z', owner: 'mcp:a:1', via: 'fill', action: { action: 'tap', selector: { text: 'Token' } } },
+      { at: '2026-11-23T10:00:03.600Z', owner: 'mcp:a:1', via: 'fill', action: { action: 'type', text: 'launch-token-' } },
+      { at: '2026-11-23T10:00:03.700Z', owner: 'mcp:a:1', via: 'fill', action: { action: 'type', text: '7744' } },
       { at: '2026-11-23T10:00:06.000Z', owner: 'mcp:a:1', via: 'alert', action: { action: 'tap' }, resolved: { element: { text: `Trust ${tok}` } } },
     ],
     [
       { at: '2026-11-23T10:00:04.000Z', kind: 'wait', owner: 'mcp:a:1', until: 'visible', query: { text: `Loaded ${tok}` }, ok: true },
       { at: '2026-11-23T10:00:05.000Z', kind: 'scroll_to', owner: 'mcp:a:1', query: { text: `Row ${tok}` }, found: true },
     ],
-    { owner: 'mcp:a:1', autoAssert: false, secrets: [tok] },
+    {
+      owner: 'mcp:a:1', autoAssert: false, secrets: [tok],
+      assertions: [{ kind: 'launch', app: 'com.example.app', stop: true, arguments: { action: tok, kept: '${LAUNCH_ARG_KEPT}' }, env: { owner: tok, KEEP: '${KEEP}' } }],
+    },
   );
-  assert.ok(!allSix.text.includes(tok), `saved flow leaked secret across actions:\n${allSix.text}`);
+  assert.ok(!allSix.text.includes(tok), `saved flow leaked secret:\n${allSix.text}`);
   assert.ok(!JSON.stringify(allSix.flow).includes(tok));
   const kinds = allSix.flow.steps.map((s) => s.kind);
-  assert.deepEqual(kinds, ['launch', 'tap', 'fill', 'open_url', 'wait_for', 'scroll_to', 'alert']);
+  assert.deepEqual(kinds, ['launch', 'tap', 'fill', 'open_url', 'fill', 'wait_for', 'scroll_to', 'alert', 'launch']);
+  // Legacy fill chunks were assembled then redacted to •••
+  assert.equal((allSix.flow.steps[4] as { value?: string }).value, '•••');
+  // launch arguments.action and env.owner redacted while ${VAR} placeholders preserved
+  const lastLaunch = allSix.flow.steps[8] as { arguments?: Record<string, unknown>; env?: Record<string, string> };
+  assert.deepEqual(lastLaunch.arguments, { action: '•••', kept: '${LAUNCH_ARG_KEPT}' });
+  assert.deepEqual(lastLaunch.env, { owner: '•••', KEEP: '${KEEP}' });
+  // Direct helper check for arguments.action and env.owner
+  const directRedacted = redactFlowStep(
+    { kind: 'launch', app: `com.app.${tok}`, stop: true, arguments: { action: tok }, env: { owner: tok } },
+    [tok],
+  );
+  assert.equal(directRedacted.kind, 'launch');
+  assert.equal(directRedacted.app, `com.app.${tok}`);
+  assert.deepEqual(directRedacted.arguments, { action: '•••' });
+  assert.deepEqual(directRedacted.env, { owner: '•••' });
+  // Output YAML still parses cleanly
+  assert.doesNotThrow(() => parseFlow(allSix.text));
 });

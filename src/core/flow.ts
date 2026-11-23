@@ -613,29 +613,72 @@ function pct(x: number, y: number, screen?: { width: number; height: number }): 
   return { x: +(x / screen.width * 100).toFixed(1), y: +(y / screen.height * 100).toFixed(1), unit: '%' };
 }
 
-// Structural keys preserved during secret redaction so filtering, sorting, and action interpretation keep working.
-const STRUCTURAL_KEYS = new Set([
-  'at', 'kind', 'action', 'owner', 'via',
-  'id', 'appId', 'app', 'ref', 'type', 'sig',
-  'match', 'until', 'direction', 'orientation', 'appearance', 'mode', 'unit', 'key', 'gesture',
-  'argKeys', 'envKeys',
-]);
+const PLACEHOLDER_RE = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 
-/** Redact secret substrings in every string value except structural keys (timestamps, action/kind, owner, ids, appId). */
-function redactEntryContent<T>(value: T, secrets: readonly string[], key = ''): T {
-  if (!secrets.length) return value;
-  if (typeof value === 'string') {
-    if (STRUCTURAL_KEYS.has(key)) return value;
-    return redactSecretStrings(value, secrets) as T;
+/** Final output pass: redact every string value in a built Step except grammar/enum tokens, launch app id,
+ *  and launch arguments/env values that are already `${VAR}` placeholders. */
+export function redactFlowStep(step: Step, secrets: readonly string[]): Step {
+  if (!secrets.length) return step;
+  const scrub = (s: string) => redactSecretStrings(s, secrets);
+  const scrubPlaceholderSafe = (s: string) => (PLACEHOLDER_RE.test(s) ? s : scrub(s));
+  const scrubSel = (sel: Selector): Selector => ({
+    ...sel,
+    ...(sel.text !== undefined ? { text: scrub(sel.text) } : {}),
+    ...(sel.id !== undefined ? { id: scrub(sel.id) } : {}),
+    ...(sel.type !== undefined ? { type: scrub(sel.type) } : {}),
+  });
+  const baseLabel = step.label !== undefined ? { label: scrub(step.label) } : {};
+  switch (step.kind) {
+    case 'launch': {
+      let args = step.arguments;
+      if (Array.isArray(args)) args = args.map(scrubPlaceholderSafe);
+      else if (args && typeof args === 'object') {
+        args = Object.fromEntries(Object.entries(args).map(([k, v]) => [k, typeof v === 'string' ? scrubPlaceholderSafe(v) : v]));
+      }
+      const env = step.env ? Object.fromEntries(Object.entries(step.env).map(([k, v]) => [k, scrubPlaceholderSafe(v)])) : undefined;
+      return { ...step, ...baseLabel, ...(args !== undefined ? { arguments: args } : {}), ...(env !== undefined ? { env } : {}) };
+    }
+    case 'terminate':
+      return { ...step, ...baseLabel, ...(step.app !== undefined ? { app: scrub(step.app) } : {}) };
+    case 'tap': case 'long_press': case 'double_tap':
+      return { ...step, ...baseLabel, ...(step.sel ? { sel: scrubSel(step.sel) } : {}) };
+    case 'fill':
+      return { ...step, ...baseLabel, ...(step.field ? { field: scrubSel(step.field) } : {}), value: scrub(step.value) };
+    case 'type':
+      return { ...step, ...baseLabel, text: scrub(step.text) };
+    case 'key':
+      return { ...step, ...baseLabel, key: scrub(step.key) };
+    case 'scroll_to':
+      return { ...step, ...baseLabel, sel: scrubSel(step.sel) };
+    case 'wait_for':
+      return { ...step, ...baseLabel, ...(step.sel ? { sel: scrubSel(step.sel) } : {}) };
+    case 'open_url':
+      return { ...step, ...baseLabel, url: scrub(step.url) };
+    case 'gesture':
+      return { ...step, ...baseLabel, gesture: scrub(step.gesture) };
+    case 'alert':
+      return { ...step, ...baseLabel, ...(step.button !== undefined ? { button: scrub(step.button) } : {}) };
+    case 'assert_visible': case 'assert_not_visible':
+      return { ...step, ...baseLabel, sel: scrubSel(step.sel) };
+    case 'assert_text':
+      return {
+        ...step, ...baseLabel,
+        field: scrubSel(step.field),
+        ...(step.equals !== undefined ? { equals: scrub(step.equals) } : {}),
+        ...(step.contains !== undefined ? { contains: scrub(step.contains) } : {}),
+        ...(step.matches !== undefined ? { matches: scrub(step.matches) } : {}),
+      };
+    case 'screenshot':
+      return {
+        ...step, ...baseLabel,
+        name: scrub(step.name),
+        ...(step.baseline !== undefined ? { baseline: scrub(step.baseline) } : {}),
+      };
+    case 'settings':
+      return { ...step, ...baseLabel, settings: redactSecretStrings(step.settings, secrets) };
+    default:
+      return { ...step, ...baseLabel };
   }
-  if (Array.isArray(value)) {
-    if (STRUCTURAL_KEYS.has(key)) return value;
-    return value.map((v) => redactEntryContent(v, secrets)) as T;
-  }
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactEntryContent(v, secrets, k)])) as T;
-  }
-  return value;
 }
 
 /** Turn an action log (+ screen observations) into a clean flow. Pure: the daemon reads the files and calls this. */
@@ -643,15 +686,12 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
   const secrets = o.secrets?.length ? o.secrets : [];
   const t = (s: string) => Date.parse(s);
   const inRange = (at: string) => (!o.since || t(at) >= t(o.since)) && (!o.until || t(at) <= t(o.until));
-  const rawEntries = entriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
+  const entries = entriesIn.filter((e) => e && e.at && inRange(e.at) && e.owner !== 'daemon' && ownerOk(e.owner, o.owner));
   // Only one owner's actions: screens after someone else took over the device are not this session's.
-  const lastOwn = rawEntries.length ? t(rawEntries[rawEntries.length - 1].at) : -Infinity;
+  const lastOwn = entries.length ? t(entries[entries.length - 1].at) : -Infinity;
   const takeover = o.owner ? entriesIn.find((e) => e && e.at && t(e.at) > lastOwn && e.owner !== 'daemon' && !ownerOk(e.owner, o.owner) && !/^lease\./.test(String(e.action?.action ?? ''))) : undefined;
   const cutoff = takeover ? t(takeover.at) : Infinity;
-  const rawObs = obsIn.filter((x) => x && x.at && inRange(x.at) && t(x.at) < cutoff && (x.kind === 'screen' || ownerOk(x.owner, o.owner)));
-  // Redact all non-structural string fields after filtering, preserving timestamps, owners, action names, and ids.
-  const entries = secrets.length ? rawEntries.map((e) => redactEntryContent(e, secrets)) : rawEntries;
-  const obs = secrets.length ? rawObs.map((x) => redactEntryContent(x, secrets)) : rawObs;
+  const obs = obsIn.filter((x) => x && x.at && inRange(x.at) && t(x.at) < cutoff && (x.kind === 'screen' || ownerOk(x.owner, o.owner)));
   const warnings: string[] = []; const dropped: string[] = [];
   const counts = new Map<string, number>(); const bump = (one: string, many: string) => { const k = `${one}\u0000${many}`; counts.set(k, (counts.get(k) ?? 0) + 1); };
 
@@ -872,6 +912,7 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
 
   // ── assertions ─────────────────────────────────────────────────────────
   const auto = o.autoAssert !== false;
+  const safeScreen = (s?: ScreenObs) => (s && secrets.length ? { texts: s.texts.map((x) => redactSecretStrings(x, secrets)) } : s);
   const final: Raw[] = []; let nAssert = 0;
   const isCheck = (s?: Step) => !!s && ((s.kind === 'wait_for' && s.until === 'visible') || s.kind === 'assert_visible');
   for (let i = 0; i < steps.length; i++) {
@@ -881,10 +922,11 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
       // the screen the next step acted on (the last read before it), compared with the screen before the launch
       const nextAt = steps[i + 1] ? t(steps[i + 1].at) : Infinity;
       const seen = obs.filter((x): x is ScreenObs => x.kind === 'screen' && t(x.at) >= t(r.at) && t(x.at) <= nextAt);
-      const scr = seen[seen.length - 1];
+      const scr = safeScreen(seen[seen.length - 1]);
+      const prevScr = safeScreen(r.before);
       const next = steps[i + 1]?.step as { sel?: Selector; field?: Selector } | undefined;
       const nextTarget = next?.sel?.text ?? next?.field?.text;
-      const txt = pickAssertText(scr, r.before, nextTarget ? [nextTarget] : []) ?? pickAssertText(scr, r.before);
+      const txt = pickAssertText(scr, prevScr, nextTarget ? [nextTarget] : []) ?? pickAssertText(scr, prevScr);
       if (txt) { final.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: r.at, src: -1, note: 'auto' }); nAssert++; }
       else warnings.push(`${scr ? 'nothing distinctive was on screen' : 'the screen was not read (or had no readable text)'} after launching ${(r.step as { app?: string }).app}: add an assert_visible for its first screen yourself`);
     }
@@ -892,13 +934,22 @@ export function flowFromLog(entriesIn: LogEntry[], obsIn: Observation[], o: From
   steps = final;
   const lastAct = [...steps].reverse().find((r) => r.src >= 0);
   if (o.assertions?.length) {
-    for (const s of o.assertions) { steps.push({ step: redactEntryContent(s, secrets), at: o.now ?? new Date().toISOString(), src: -1, note: 'explicit' }); nAssert++; }
+    for (const s of o.assertions) { steps.push({ step: s, at: o.now ?? new Date().toISOString(), src: -1, note: 'explicit' }); nAssert++; }
   } else if (auto && lastAct && !isCheck(steps[steps.length - 1]?.step)) {
-    const after = finalScreen && t(finalScreen.at) >= t(lastAct.at) && finalScreen !== lastAct.before ? finalScreen : undefined;
+    const after = finalScreen && t(finalScreen.at) >= t(lastAct.at) && finalScreen !== lastAct.before ? safeScreen(finalScreen) : undefined;
+    const prevScr = safeScreen(lastAct.before);
     const already = steps.filter((r) => r.step.kind === 'assert_visible').map((r) => (r.step as { sel: Selector }).sel.text ?? '');
-    const txt = after ? (pickAssertText(after, lastAct.before, already) ?? pickAssertText(after, undefined, already)) : undefined;
-    if (txt) { steps.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: after!.at, src: -1, note: 'auto' }); nAssert++; }
+    const txt = after ? (pickAssertText(after, prevScr, already) ?? pickAssertText(after, undefined, already)) : undefined;
+    if (txt) { steps.push({ step: { kind: 'assert_visible', sel: { text: txt } }, at: finalScreen!.at, src: -1, note: 'auto' }); nAssert++; }
     else warnings.push(after ? 'nothing distinctive on the final screen to assert: add an assert_visible yourself' : 'the screen was not read after the last step, so there is no final assertion: add one (or read the screen and save again)');
+  }
+
+  // ── final output redaction pass ────────────────────────────────────────
+  // One pass over the built steps, warnings, and dropped notes (inputs stay unredacted during parsing/assembly).
+  if (secrets.length) {
+    steps = steps.map((r) => ({ ...r, step: redactFlowStep(r.step, secrets), ...(r.note ? { note: redactSecretStrings(r.note, secrets) } : {}) }));
+    for (let i = 0; i < warnings.length; i++) warnings[i] = redactSecretStrings(warnings[i], secrets);
+    for (let i = 0; i < dropped.length; i++) dropped[i] = redactSecretStrings(dropped[i], secrets);
   }
 
   // ── header ─────────────────────────────────────────────────────────────
