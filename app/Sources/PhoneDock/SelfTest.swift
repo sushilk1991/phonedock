@@ -68,6 +68,8 @@ enum Clipboard {
 ///   {"op":"focus","label":"Device name"}                clicks a text field: an anchor name, else a field's label
 ///                                                       or placeholder (sheet first); a miss lists the fields
 ///   {"op":"select","device":"PhoneDock iPhone"}         select a sidebar device by name or id (no input to it)
+///   {"op":"perf","label":"polls","reset":true}           snapshot body/poll counters to PHONEDOCK_APP_PERF (self-tests only)
+///   {"op":"refresh"}                                    await a device refresh
 ///   {"op":"mark","text":"ready-1"}                      logs "MARK ready-1" (sync point for an outside script)
 ///   {"op":"badge","expect":"1"}                         check the Dock badge ("" = none)
 ///   {"op":"fakeScreenError","message":"…","hints":["…"]}   stop the frame loop and show that error
@@ -130,6 +132,28 @@ enum Clipboard {
 /// The script starts when the main window appears; `tap`/`drag` wait for a device screen to be on screen.
 @MainActor
 enum SelfTest {
+    // Opt-in counters avoid per-render logging/I/O, and never collect anything in normal app sessions.
+    nonisolated static let measuring = enabled && ProcessInfo.processInfo.environment["PHONEDOCK_APP_PERF"] != nil
+    private static var perfCounts: [String: Int] = [:]
+    private static var firstDevices = false
+    static func count(_ name: String) { if measuring { perfCounts[name, default: 0] += 1 } }
+    static func devicesApplied(changed: Bool, nonempty: Bool) {
+        guard measuring else { return }
+        count("devicePoll"); if changed { count("devicesChanged") }
+        if nonempty && !firstDevices { firstDevices = true; perfSnapshot("firstDevices") }
+    }
+    static func perfSnapshot(_ label: String, reset: Bool = false) {
+        guard measuring, let path = ProcessInfo.processInfo.environment["PHONEDOCK_APP_PERF"] else { return }
+        let record: [String: Any] = ["label": label, "time": Date().timeIntervalSince1970, "counts": perfCounts]
+        if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) {
+            if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+            if let h = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
+                h.seekToEndOfFile(); h.write(data); h.write(Data([10])); try? h.close()
+            }
+        }
+        if reset { perfCounts = [:] }
+    }
+
     private static var started = false
     private static var logURL: URL?
     private static weak var screenView: DeviceScreenNSView?
@@ -273,6 +297,10 @@ enum SelfTest {
         let op = s["op"] as? String ?? ""
         let w = mainWindow
         switch op {
+        case "perf":
+            perfSnapshot(s["label"] as? String ?? "snapshot", reset: s["reset"] as? Bool ?? false)
+        case "refresh":
+            await model?.refresh()
         case "wait":
             try? await Task.sleep(nanoseconds: UInt64(num(s, "ms")) * 1_000_000)
         case "badge":      // Dock badge check: {"op":"badge","expect":"1"} (use "" for none)

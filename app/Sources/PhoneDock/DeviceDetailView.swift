@@ -78,6 +78,7 @@ struct DeviceDetailView: View {
     }
 
     var body: some View {
+        let _ = SelfTest.count("body.stage")
         GeometryReader { geo in
             let layout = StageLayout(stage: geo.size, pixels: pixelSize, platform: device.platform)
             ZStack(alignment: .topLeading) {
@@ -235,6 +236,7 @@ private struct LiveScreen: View {
     @State private var slowFirstFrame = false
 
     var body: some View {
+        let _ = SelfTest.count("body.screen")
         ZStack(alignment: .top) {
             DeviceScreenView(image: frames.image, videoLayer: frames.videoLayer, devicePixelSize: pixels, handlers: handlers)
             if !frames.hasPicture {

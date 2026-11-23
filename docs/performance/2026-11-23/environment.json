@@ -1,0 +1,16 @@
+{
+  "date": "2026-11-23",
+  "macOS": "27.2.1",
+  "machine": "Apple M4 Max",
+  "memoryBytes": 38654705664,
+  "nodeLocal": "24.11.0",
+  "nodeFocusedTests": "24.22.3",
+  "simulator": "iPhone 17 Pro / iOS 26.5 (23F77), 1206x2622",
+  "inventoryAvailableSimulators": 38,
+  "visibleFilteredDevices": 1,
+  "base": "bf19b9e",
+  "port": 47433,
+  "deviceFilter": "pdtest-",
+  "app": "release, background SelfTest 1280x840, inspector open, JPEG maxSize=900",
+  "hostLimits": "Shared host, memory pressure warn, swap in use; no isolated-host CPU/memory/fps causal claim."
+}

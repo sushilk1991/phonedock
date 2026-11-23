@@ -52,6 +52,7 @@ struct InspectorView: View {
     @Binding var highlight: CGRect?
 
     var body: some View {
+        let _ = SelfTest.count("body.inspector")
         Group {
             switch tab {
             case .info: InfoTab(device: device)

@@ -382,6 +382,7 @@ struct ContentView: View {
     static let narrowToolbarBelow: CGFloat = 340
 
     var body: some View {
+        let _ = SelfTest.count("body.root")
         @Bindable var model = model
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView()
@@ -719,6 +720,7 @@ struct SidebarView: View {
     }
 
     var body: some View {
+        let _ = SelfTest.count("body.sidebar")
         @Bindable var model = model
         let all = model.devices
         let phones = all.filter { $0.kind == "physical" }.sorted(by: Self.byName)
