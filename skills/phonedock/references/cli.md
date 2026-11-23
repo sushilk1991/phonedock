@@ -22,6 +22,7 @@ export PHONEDOCK_OWNER=agent:me
 phonedock devices --json                                   # what exists, state, who holds it
 phonedock acquire --platform ios --json                    # lease a free PhoneDock device (or: lease <id> --ttl 600)
 phonedock create --backend ios-simulator --name pd-test --profile "iPhone 17 Pro" --boot --json   # if there's none
+phonedock create --backend android-emulator --name pdtest-vphone --disguise pixel_8 --carrier tmobile_us --boot --json   # a virtual phone
 phonedock ui pd-test                                       # outline: e12 Button "Sign in" @(810,1815) …
 phonedock tap pd-test --text "Sign in" --json              # find + tap (--type Button, --match exact, --index N)
 phonedock tap pd-test @e12                                 # a ref from the last `ui`
