@@ -96,6 +96,29 @@ struct DaemonClient: Sendable {
         return try JSONDecoder().decode(Job.self, from: data)
     }
 
+    /// Polls a job each second until it finishes, handing each state to `update`. Throws `CancellationError` when the
+    /// calling task is cancelled (its sheet closed), and an `APIError` when the service forgets the job (jobs live in
+    /// its memory, so a restart loses them) or stops answering for 30 s, so no form waits on a job forever.
+    func follow(_ job: Job, update: @MainActor (Job) -> Void) async throws -> Job {
+        var cur = job, misses = 0
+        while !cur.isFinished {
+            try await Task.sleep(for: .seconds(1))
+            do {
+                cur = try await get(Job.self, "/v1/jobs/\(Self.enc(job.id))", timeout: 10)
+                misses = 0
+                await update(cur)
+            } catch let e as APIError where e.status == 404 {
+                throw APIError(status: 410, code: "job_lost", message: "PhoneDock’s service lost track of job \(job.id).",
+                               hints: ["PhoneDock’s service restarted. Try again."], detail: e.message)
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                misses += 1
+                if misses >= 30 { throw error }
+            }
+        }
+        return cur
+    }
+
     func text(_ path: String, query: [String: String] = [:]) async throws -> String {
         let (data, _) = try await raw("GET", path, query: query)
         return String(decoding: data, as: UTF8.self)

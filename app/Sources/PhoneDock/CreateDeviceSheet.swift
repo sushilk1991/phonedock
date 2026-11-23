@@ -57,6 +57,8 @@ struct CreateDeviceSheet: View {
     /// The backend whose models and versions have arrived (nil until the first load ends).
     @State private var listsLoadedFor: String?
     @State private var downloadJob: Job?
+    /// Follows `downloadJob`; cancelled when the sheet closes or the platform changes.
+    @State private var downloadTask: Task<Void, Never>?
     @State private var problem: FriendlyError?
     @FocusState private var nameFocused: Bool
 
@@ -141,6 +143,7 @@ struct CreateDeviceSheet: View {
             suggestName()   // the name follows the platform at once (unless it was typed)
         }
         .onChange(of: model.backends) { pickBackend() }
+        .onDisappear { downloadTask?.cancel() }
         .onChange(of: backendId) { Task { await loadLists() } }
         // Name is the field people change: focus it once it can be edited.
         .onChange(of: loading, initial: true) { _, busy in
@@ -475,6 +478,7 @@ struct CreateDeviceSheet: View {
 
     private func loadLists() async {
         images = []; profiles = []; imageId = nil; profileId = nil; downloadJob = nil
+        downloadTask?.cancel(); downloadTask = nil
         guard let c = model.client, let b = backendId else { return }
         loadingLists = true; defer { loadingLists = false }
         let enc = DaemonClient.enc(b)
@@ -537,23 +541,22 @@ struct CreateDeviceSheet: View {
     private func download(_ img: OsImage) {
         guard let c = model.client, let b = backendId else { return }
         problem = nil
-        Task {
+        downloadTask?.cancel()
+        downloadTask = Task {
             do {
                 let job = try await c.sendJob("POST", "/v1/backends/\(DaemonClient.enc(b))/images/install", json: ["image": img.id])
                 downloadJob = job
-                var cur = job
-                while !cur.isFinished {
-                    try? await Task.sleep(for: .seconds(1))
-                    if let j = try? await c.get(Job.self, "/v1/jobs/\(DaemonClient.enc(job.id))") { cur = j; downloadJob = j }
-                }
-                if cur.isFailed {
-                    problem = FriendlyError.from(job: cur, title: "Couldn’t download \(Self.shortName(img))",
+                let done = try await c.follow(job) { downloadJob = $0 }
+                if done.isFailed {
+                    problem = FriendlyError.from(job: done, title: "Couldn’t download \(Self.shortName(img))",
                                                  fallback: "Check your internet connection and try again.")
                 }
                 let keep = imageId
                 images = (try? await c.get([OsImage].self, "/v1/backends/\(DaemonClient.enc(b))/images")) ?? images
                 imageId = keep ?? img.id
                 downloadJob = nil
+            } catch is CancellationError {
+                return
             } catch {
                 downloadJob = nil
                 problem = FriendlyError.from(error, title: "Couldn’t download \(Self.shortName(img))")

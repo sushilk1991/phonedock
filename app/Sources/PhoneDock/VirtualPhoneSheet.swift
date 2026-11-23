@@ -19,6 +19,8 @@ struct VirtualPhoneSheet: View {
     @State private var catalogProblem: FriendlyError?
     @State private var images: [OsImage] = []
     @State private var imagesLoaded = false
+    /// The image list didn't load (timeout, service trouble): never read as "this SDK doesn't offer it".
+    @State private var imagesProblem: FriendlyError?
     @State private var profileId: String?
     @State private var carrierId: String?
     @State private var name = ""
@@ -26,6 +28,8 @@ struct VirtualPhoneSheet: View {
     @State private var bootAfter = true
     @State private var showAdvanced = false
     @State private var downloadJob: Job?
+    /// Follows `downloadJob`; cancelled when the sheet closes so it never polls a form nobody sees.
+    @State private var downloadTask: Task<Void, Never>?
     @State private var problem: FriendlyError?
     @FocusState private var nameFocused: Bool
 
@@ -43,8 +47,10 @@ struct VirtualPhoneSheet: View {
         model.backends.isEmpty || (androidReady && catalogProblem == nil && (catalog == nil || !imagesLoaded))
     }
     private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
+    /// Create hands the request to the service, so it needs one: never enabled while disconnected.
+    private var connected: Bool { model.connection.isConnected && model.client != nil }
     private var canCreate: Bool {
-        !loading && androidReady && profile != nil && imageReady && !downloading && !trimmedName.isEmpty
+        connected && !loading && androidReady && profile != nil && imageReady && !downloading && !trimmedName.isEmpty
     }
     private var systemName: String { "Android \(profile?.androidRelease ?? "") with Google Play" }
 
@@ -91,7 +97,10 @@ struct VirtualPhoneSheet: View {
             if model.backends.isEmpty { await model.loadBackends() }
             await load()
         }
-        .onChange(of: model.backends) { if catalog == nil || !imagesLoaded { Task { await load() } } }
+        .onChange(of: model.backends) { if needsLoad { Task { await load() } } }
+        // After Restart Service (or any reconnect) the backends may be unchanged, so the connection is the cue to retry.
+        .onChange(of: model.connection) { if model.connection.isConnected, needsLoad { Task { await load() } } }
+        .onDisappear { downloadTask?.cancel() }
         .onChange(of: profileId) { suggestName() }
         // Name is the field people change: focus it once it can be edited.
         .onChange(of: loading, initial: true) { _, busy in
@@ -148,6 +157,12 @@ struct VirtualPhoneSheet: View {
             HStack(spacing: Theme.Space.s) {
                 if loading {
                     Text("Loading…").foregroundStyle(Theme.Ink.secondary)
+                } else if let imagesProblem, !downloading {
+                    Text("Couldn’t check \(systemName).").foregroundStyle(Theme.Ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(imagesProblem.message ?? "")
+                    Button("Try Again") { Task { await loadImages() } }
+                        .testAnchor("Retry system image")
                 } else if imageReady {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.Status.running).accessibilityHidden(true)
                     Text(systemName).foregroundStyle(Theme.Ink.primary)
@@ -240,7 +255,9 @@ struct VirtualPhoneSheet: View {
 
     private var footer: some View {
         HStack(spacing: Theme.Space.m) {
-            if loading {
+            if !connected && !model.backends.isEmpty {
+                Text("Not connected to PhoneDock’s service.").font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary).lineLimit(1)
+            } else if loading {
                 ProgressView().controlSize(.small)
                 Text(model.backends.isEmpty ? "Checking what this Mac can run…" : "Loading phones and system images…")
                     .font(Theme.Fonts.callout)
@@ -261,6 +278,8 @@ struct VirtualPhoneSheet: View {
     }
 
     // MARK: Loading
+
+    private var needsLoad: Bool { catalog == nil || catalogProblem != nil || !imagesLoaded || imagesProblem != nil }
 
     private func load() async {
         guard androidReady, let c = model.client else { return }
@@ -287,7 +306,12 @@ struct VirtualPhoneSheet: View {
 
     private func loadImages() async {
         guard let c = model.client else { return }
-        images = (try? await c.get([OsImage].self, "/v1/backends/\(DaemonClient.enc(Self.backendId))/images")) ?? images
+        do {
+            images = try await c.get([OsImage].self, "/v1/backends/\(DaemonClient.enc(Self.backendId))/images")
+            imagesProblem = nil
+        } catch {
+            imagesProblem = FriendlyError.from(error, title: "Couldn’t check \(systemName)")
+        }
         imagesLoaded = true
         suggestName()
     }
@@ -309,29 +333,29 @@ struct VirtualPhoneSheet: View {
     private func download(_ img: OsImage) {
         guard let c = model.client else { return }
         problem = nil
-        Task {
+        downloadTask?.cancel()
+        downloadTask = Task {
             do {
                 let job = try await c.sendJob("POST", "/v1/backends/\(DaemonClient.enc(Self.backendId))/images/install", json: ["image": img.id])
                 downloadJob = job
-                var cur = job
-                while !cur.isFinished {
-                    try? await Task.sleep(for: .seconds(1))
-                    if let j = try? await c.get(Job.self, "/v1/jobs/\(DaemonClient.enc(job.id))") { cur = j; downloadJob = j }
-                }
-                if cur.isFailed {
-                    problem = FriendlyError.from(job: cur, title: "Couldn’t download \(systemName)",
+                let done = try await c.follow(job) { downloadJob = $0 }
+                if done.isFailed {
+                    problem = FriendlyError.from(job: done, title: "Couldn’t download \(systemName)",
                                                  fallback: "Check your internet connection and try again.")
                 }
-                await loadImages()
-                downloadJob = nil
+            } catch is CancellationError {
+                return
             } catch {
-                downloadJob = nil
                 problem = FriendlyError.from(error, title: "Couldn’t download \(systemName)")
             }
+            // Reload even after a failure: a download whose job was lost may still have finished.
+            await loadImages()
+            downloadJob = nil
         }
     }
 
     private func create() {
+        // canCreate includes a live client, so createDevice accepts it (its own guard) before the sheet closes.
         guard canCreate, let p = profile else { return }
         let n = trimmedName
         var disguise: [String: Any] = ["profile": p.id]
