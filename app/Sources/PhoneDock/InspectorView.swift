@@ -371,7 +371,7 @@ struct InfoTab: View {
             await loadSnapshots()
         }
         .onChange(of: device.spec?.autoStart) { autoStart = device.spec?.autoStart ?? false }
-        // Name prompts are sheets like New Device (not alerts): the same buttons, and room for the name.
+        // Name prompts are sheets like Add Device (not alerts): the same buttons, and room for the name.
         .sheet(isPresented: Binding(get: { savingName != nil }, set: { if !$0 { savingName = nil } })) {
             NamePromptSheet(title: "Save Snapshot",
                             message: "Saves the current state of \(DisplayText.unbroken(device.name))." + (restartsForSnapshot ? restartNote : ""),

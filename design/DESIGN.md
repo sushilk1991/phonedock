@@ -158,17 +158,46 @@ Never show that control changed or a handoff resolved until the service confirms
 explicit click; the first click on the screen during a handoff doesn't take over.
 
 **Toolbar** Title = device name with subtitle "Pixel 9 · Android 16" · Power ▾ (Start, Shut Down; ⌥ Cold Boot) ·
-Screenshot · Record · Open in Separate Window · Inspector toggle. The sidebar's own toolbar band holds only the
-Sidebar toggle, at its trailing end (top right of the sidebar), mirroring the Inspector toggle; with the sidebar
-hidden the system's toggle sits by the traffic lights. Adding lives in the sidebar too: **Add Device** at the foot of
-the sidebar (as Reminders has Add List; laid out like a row, `plus.circle` in the 20 pt glyph column, secondary ink)
-opens the Add menu: New Device…, Connect a Phone…, Connect an Agent…. It sits under the update card, so it never
-moves. With the sidebar hidden, the same menu is ＋▾ in the main toolbar. A connection pill appears only when something is wrong ("Reconnecting…", or "Can’t connect to
+Screenshot · Record · Open in Separate Window · Inspector toggle. The sidebar's own toolbar band holds **＋ Add
+Device** and then the Sidebar toggle at its trailing end (top right of the sidebar), mirroring the Inspector toggle.
+With the sidebar hidden the system moves both to the leading end of the main toolbar, by the traffic lights (see
+[Window chrome](#window-chrome)). A connection pill appears only when something is wrong ("Reconnecting…", or "Can’t connect to
 PhoneDock" with Try Again). While recording: a static red dot and a ticking timer.
 The inspector's own toolbar band holds the inspector tabs (icon-only segmented picker, as in the mockup) and, at
 its trailing end, the Inspector toggle (top right of the window, as in Xcode). With the inspector hidden the toggle
-is the last item of the main toolbar. When the detail column is narrower than 470 pt, Open in Separate Window
-leaves the toolbar first (it stays in the Device menu and the sidebar context menu), so ＋ never falls into ».
+is the last item of the main toolbar. When the detail column is narrower than 340 pt
+(`narrowToolbarBelow`), Open in Separate Window leaves the toolbar first (it stays in the Device menu and the sidebar
+context menu), so nothing falls into ».
+
+**Adding a device (`AddDeviceSheet.swift`)** One way in: **＋ Add Device** opens one sheet (520 pt wide, `xxl`
+margins). Its first step, **Add Device**, asks the one question people can answer, as two choice cards
+(`AddDeviceOptions`: `Surface.card`, `Line.card` outline turning `Accent.fill` on hover, radius 10, an accent glyph,
+headline title, callout description, a chevron):
+
+| Choice | Glyph | Description | Second step |
+|---|---|---|---|
+| **Virtual Device** | `macbook.and.iphone` | An iPhone simulator or Android emulator that runs on this Mac. | **New Virtual Device**: platform, model, version, name |
+| **Physical Device** | `iphone.radiowaves.left.and.right` | Your own iPhone or Android phone, connected with a cable or over Wi-Fi. | **Connect a Physical Device**: the steps for an iPhone or an Android phone |
+
+Under the cards, a callout note with `info.circle`: simulators and emulators made in Xcode or Android Studio show up in
+the sidebar on their own, so nobody goes looking for a way to add them. The second step has a Back chevron before
+its title (⌘[) and stays in the same sheet; the sheet never closes and reopens between steps. File › New Virtual
+Device… (⌘N) and File › Connect a Physical Device… (⇧⌘K) open the second step directly; Connect an Agent… stays in
+the File menu, the empty state's guide and Settings › Agents. When this Mac can run some platform, New Virtual Device
+opens on one (a local backend, never a cloud one) instead of on "isn’t installed"; when it can run none, it opens on
+the remembered platform with how to install it. A cloud backend's form says so ("Runs on Corellium, not on this
+Mac."). Back waits while a system image downloads, and a phone that connects after Back doesn't close the sheet.
+Virtual Device is disabled while PhoneDock isn't connected. The words live in
+`DeviceWords`, so the cards, titles, menus and sidebar sections never drift apart.
+
+**Sidebar sections** Named as the choices are, so what you add lands where you'd look: **Virtual Devices** (made in
+PhoneDock, and the ones being made), **Physical Devices**, **Cloud**, then **From Xcode & Android Studio** with its
+count. Xcode alone makes a dozen simulators per iOS version, so that last section lists only the ones in use
+(running, starting, held by an agent or you, asking for help, recording, busy or selected) and then one quieter row,
+"Show 4 More" ("Show All 6" when none are in use), laid out like a device row with a chevron in the glyph column and
+`Ink.secondary` words (system `.secondary` is about 3.2:1 on the sidebar, and this row is the only way to the rest). It
+toggles to "Show Fewer" and is remembered (`sidebar.discoveredShowAll`). Empty sections aren't shown, and there is
+no add row in the list: ＋ is above it.
 
 **Deleting a device** Device › Delete… (⌘⌫), plain ⌫ in the focused sidebar, or the row's context menu all open the
 one confirmation (Cancel is the default). ⌘⌫ still deletes to the start of the line while a text field is being
@@ -254,13 +283,15 @@ read as one product:
 2. Never show commands, flags, paths, PIDs, ports, HTTP statuses, error codes or config keys in primary copy.
    They go under Details or Copy Details.
 3. Name things the way people do: Simulator, Emulator, iPhone, Android phone, PhoneDock. "Daemon" appears only in
-   Settings › Advanced and the docs.
+   Settings › Advanced and the docs. The two kinds of device are **Virtual Device** (a simulator or emulator on this
+   Mac) and **Physical Device** (your own phone), as in Android Studio. Use them for choices, titles and sections, and
+   use the everyday words in descriptions. Never "New Device" or "Connect a Phone".
 4. Buttons are verbs: Start, Shut Down, Take Over, Hand Back, Connect, Create. Add an ellipsis only when more input
    follows.
 5. One sentence per description, at most two hints. No "Something went wrong", "Error:", "Please" or
    exclamation marks.
 6. Show state words, not counts, unless the count helps a decision.
-7. Real iPhones are labelled **Beta**: in Connect a Phone, in the sidebar subtitle ("iOS 27 · Beta") and in
+7. Real iPhones are labelled **Beta**: in Connect a Physical Device, in the sidebar subtitle ("iOS 27 · Beta") and in
    Info (a Beta badge). On iOS 27 or later they work without WebDriverAgent; never say an iPhone needs it unless it
    runs older iOS.
 
@@ -280,8 +311,8 @@ Where it appears:
 `FriendlyError.from(_:title:device:)` builds the body from the service's error code (lease conflict, not
 supported, timeout, boot failure, missing image, needs a person), falling back to the first hint.
 
-Empty states say what's true: "Select a Device", "No Devices Yet" (with New Device…, Connect a Phone… and
-Connect an Agent…), "No apps found", "No snapshots yet", "Refresh to inspect the screen", "No logs yet",
+Empty states say what's true: "Select a Device", "No Devices Yet" (a guide: this Mac, then a device with Add
+Device's two choice cards, then Connect an Agent…), "No apps found", "No snapshots yet", "Refresh to inspect the screen", "No logs yet",
 "No activity yet", "No crashes". When a feature can't work on a device, say so: "Crash reports aren’t available
 for this device". Confirm before Restore (it replaces the current state) and before Delete.
 
@@ -321,7 +352,9 @@ Never animate:
 - The device screen, frame or bezel. Put `.transaction { $0.animation = nil }` on the stage, and no `.animation`
   modifier on any container that holds it.
 - Frame swaps (no crossfade), log appends or inspector tab switches.
-- Sidebar order. Rows sort by name only and never jump when state changes.
+- Sidebar order. Rows sort by name only and never jump when state changes. (From Xcode & Android Studio lists the
+  devices in use, so one joins it when it starts; it keeps its place by name, and leaves only once it's out of use
+  and not selected.)
 - Countdown and recording digits.
 
 Keep the main actor light: decode images off-main, allocate no formatters or regexes in `body`, and stop timers

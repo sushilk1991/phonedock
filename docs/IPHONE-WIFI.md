@@ -33,7 +33,7 @@ phone.
 
 ### Connect
 
-Open PhoneDock and choose **Connect a Phone…**. Paired iPhones are listed under Nearby iPhones; they also appear
+Open PhoneDock and choose **＋ Add Device › Physical Device** (or File › Connect a Physical Device…). Paired iPhones are listed under Nearby iPhones; they also appear
 in the sidebar on their own. From a terminal:
 
 ```sh

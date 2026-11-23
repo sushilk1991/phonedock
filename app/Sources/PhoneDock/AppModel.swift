@@ -55,8 +55,8 @@ final class AppModel {
     var daemonPid: Int?
     var restartingDaemon = false
 
-    var showCreate = false
-    var showConnect = false
+    /// The Add Device sheet (AddDeviceSheet.swift): nil while closed, else the step it shows.
+    var addDevice: AddDeviceStep?
     var showAgentSetup = false
     /// View menu: the sidebar and inspector, so the menu items can say Show or Hide.
     var sidebarVisible = true
@@ -112,8 +112,9 @@ final class AppModel {
         guard !started else { return }
         started = true
         switch ProcessInfo.processInfo.environment["PHONEDOCK_APP_SHEET"] {   // debug/screenshot hook
-        case "create": Task { try? await Task.sleep(for: .seconds(3)); showCreate = true }
-        case "connect": showConnect = true
+        case "add": addDevice = .choose
+        case "create": Task { try? await Task.sleep(for: .seconds(3)); addDevice = .virtual }
+        case "connect": addDevice = .physical
         case "agent": showAgentSetup = true
         default: break
         }
@@ -797,7 +798,7 @@ final class AppModel {
     }
 }
 
-/// A device the service is still making (the New Device sheet has already closed).
+/// A device the service is still making (the Add Device sheet has already closed).
 struct PendingDevice: Identifiable, Equatable {
     let id: UUID
     var name: String

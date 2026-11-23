@@ -681,7 +681,7 @@ export interface ProbeResult {
 
 const PLATFORMS = [
   { id: 'ios-simulator', name: 'iPhone simulators', fix: 'Install Xcode from the App Store, open it once, then add an iOS runtime in Xcode › Settings › Components. AXe adds input and the UI tree: brew install cameroncooke/axe/axe' },
-  { id: 'android-emulator', name: 'Android emulators', fix: 'Install the Android SDK command-line tools and emulator: brew install --cask android-commandlinetools (or Android Studio), then open PhoneDock › New Device… to download a system image' },
+  { id: 'android-emulator', name: 'Android emulators', fix: 'Install the Android SDK command-line tools and emulator: brew install --cask android-commandlinetools (or Android Studio), then open PhoneDock › Add Device › Virtual Device to download a system image' },
 ];
 
 /** Stages 2, 3 and 5 for real: the service, an MCP handshake with `phonedock mcp`, and which platforms are ready. */
@@ -718,7 +718,7 @@ export async function realProbe(ctx: SetupContext): Promise<ProbeResult> {
         const imgs = await text('list_os_images', { backend: p.id }).catch(() => '');
         const n = imgs.split('\n').filter((l) => l.includes('installed=yes')).length;
         platforms.push(n ? { id: p.id, name: p.name, ready: true, detail: `${n} OS image${n > 1 ? 's' : ''} installed` }
-          : { id: p.id, name: p.name, ready: false, detail: 'no OS image installed yet', fix: p.id === 'android-emulator' ? 'Open PhoneDock › New Device… (it downloads a system image), or: phonedock images android-emulator' : 'Add an iOS runtime in Xcode › Settings › Components' });
+          : { id: p.id, name: p.name, ready: false, detail: 'no OS image installed yet', fix: p.id === 'android-emulator' ? 'Open PhoneDock › Add Device › Virtual Device (it downloads a system image), or: phonedock images android-emulator' : 'Add an iOS runtime in Xcode › Settings › Components' });
       }
     }
   } catch (e) {

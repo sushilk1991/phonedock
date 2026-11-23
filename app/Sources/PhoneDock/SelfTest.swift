@@ -80,7 +80,7 @@ enum Clipboard {
 ///                                                       turns it off). See `ActiveLook` for what it does and doesn't reach.
 ///   {"op":"contextMenu","device":"Pixel","item":"…"}    log a sidebar row's right-click menu ("anchor" or "wx"/"wy" for other
 ///                                                       views) without opening it; "item" runs one
-///   {"op":"toolbarMenu","label":"Add","item":"…"}       the same for a toolbar pull-down; SwiftUI's (＋ ▾, Power ▾) are built
+///   {"op":"toolbarMenu","label":"Power","item":"…"}     the same for a toolbar pull-down; SwiftUI's (Power ▾) are built
 ///                                                       only when they open, so it fails for them: their items are in File,
 ///                                                       Device and Help (dumpMenu / menu)
 ///   {"op":"screenshot","path":"…","render":true}        draw the window in-process instead of asking the window server
@@ -92,7 +92,8 @@ enum Clipboard {
 ///   {"op":"problem","title":"…","message":"…"}          show the blocking alert ("" closes it)
 ///   {"op":"defaults","key":"…","value":…}                set a preference the UI reads
 ///   {"op":"inspector","show":false}                     show or hide the inspector
-///   {"op":"sheet","name":"connect"}                     open a sheet: connect | create | agent (none: close it)
+///   {"op":"sheet","name":"connect"}                     open a sheet: add (Add Device's chooser) | create | connect
+///                                                       (its second steps) | agent (none: close it)
 ///   {"op":"waitFor","text":"Agent needs you","timeoutMs":5000}   poll the AX tree until some element's
 ///                                                       label/title/value contains `text`; logs how long it took
 ///   {"op":"waitGone","text":"…","timeoutMs":5000}       the opposite
@@ -330,7 +331,7 @@ enum SelfTest {
         case "contextMenu", "toolbarMenu":
             // {"op":"contextMenu","device":"Pixel","item":"Copy Device ID"} – the right-click menu of a sidebar row
             //   ("anchor":"<name>" or "wx"/"wy" window points for any other view); logs its items without opening it
-            // {"op":"toolbarMenu","label":"Add","item":"New Device"} – a toolbar pull-down (＋ ▾, Power ▾) the same way
+            // {"op":"toolbarMenu","label":"Power","item":"Start"} – a toolbar pull-down (Power ▾) the same way
             // "item" (optional) runs that item as choosing it would; a disabled item fails.
             var menu: NSMenu?
             var whereText = ""
@@ -462,10 +463,11 @@ enum SelfTest {
             let name = s["name"] as? String ?? ""
             guard let m = model else { fail("#\(i) sheet FAIL no model"); return }
             switch name {
-            case "connect": m.showConnect = true
-            case "create": m.showCreate = true
+            case "add": m.addDevice = .choose          // Add Device's first step (virtual or physical)
+            case "create": m.addDevice = .virtual      // its second steps, as File › New Virtual Device… opens them
+            case "connect": m.addDevice = .physical
             case "agent": m.showAgentSetup = true
-            case "none": m.showConnect = false; m.showCreate = false; m.showAgentSetup = false
+            case "none": m.addDevice = nil; m.showAgentSetup = false
             default: fail("#\(i) sheet \(name) FAIL unknown"); return
             }
             log("#\(i) sheet \(name)")

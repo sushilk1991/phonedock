@@ -80,7 +80,7 @@ extension FriendlyError {
         case "boot_failed":
             body = "Try a cold boot from the Power menu."
         case "no_image":
-            body = "Download a system version in New Device."
+            body = "Download a system version when you add a virtual device."
         case "needs_human":
             body = "Only you can do this on the device."
         default:

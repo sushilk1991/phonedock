@@ -23,12 +23,17 @@ enum PlatformChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// New Device (§8.6): width 520, height fits the content. Hardware fields live under Advanced, which is absent for
-/// backends that pick hardware themselves (iOS Simulator, cloud). Unavailable backends never appear.
+/// New Virtual Device (§8.6), Add Device's second step for a virtual device: width 520, height fits the content.
+/// Hardware fields live under Advanced, which is absent for backends that pick hardware themselves (iOS Simulator,
+/// cloud). Unavailable backends never appear.
 struct CreateDeviceSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @AppStorage("create.platform") private var platformRaw = PlatformChoice.android.rawValue
+    /// Back to Add Device's chooser (‹ before the title); nil hides it.
+    var onBack: (() -> Void)?
+
+    init(onBack: (() -> Void)? = nil) { self.onBack = onBack }
 
     @State private var backendId: String?
     @State private var images: [OsImage] = []
@@ -88,9 +93,8 @@ struct CreateDeviceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("New Device")
-                .font(Theme.Fonts.title)
-                .foregroundStyle(Theme.Ink.primary)
+            // Back waits for a download: its progress lives in this form's state, and the install would go on unseen.
+            SheetTitle(title: DeviceWords.newVirtualDevice, onBack: onBack, backDisabled: downloading)
                 .padding(.bottom, Theme.Space.xl)
             Form {
                 Picker(selection: platformBinding) {
@@ -128,7 +132,7 @@ struct CreateDeviceSheet: View {
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxHeight: 640)
-        .task { if model.backends.isEmpty { await model.loadBackends() }; pickBackend() }
+        .task { if model.backends.isEmpty { await model.loadBackends() }; preferInstalledPlatform(); pickBackend() }
         .onChange(of: platformRaw) {
             problem = nil
             profiles = []; images = []; profileId = nil; imageId = nil   // the old platform's models must not name the new device
@@ -191,6 +195,14 @@ struct CreateDeviceSheet: View {
             .modifier(FormField(label: "Name", width: Self.fieldWidth))
             .disabled(loading)
         Toggle("Start after creating", isOn: $bootAfter)
+        // Add Device calls these "on this Mac"; a cloud backend's device isn't, and its picker hides under Advanced.
+        if let b = backend, b.kind == "cloud" {
+            LabeledContent("") {
+                Label("Runs on \(b.displayName), not on this Mac.", systemImage: "cloud")
+                    .font(Theme.Fonts.callout)
+                    .foregroundStyle(Theme.Ink.secondary)
+            }
+        }
         if hasAdvanced || (model.backends.isEmpty && platform != .ios) { advanced.disabled(loading) }
     }
 
@@ -441,6 +453,18 @@ struct CreateDeviceSheet: View {
 
     // MARK: Loading
 
+    /// Open on a platform this Mac can run: the remembered one (default Android) may not be installed, and a guided flow
+    /// shouldn't start on "isn't installed". Picking it again still shows how to install it. Only local backends
+    /// count: a cloud one (Corellium) isn't "on this Mac", so it's never chosen for you. With none installed at all,
+    /// the remembered platform stays and shows how to install it.
+    private func preferInstalledPlatform() {
+        func runs(_ p: PlatformChoice) -> Bool {
+            model.backends.contains { p.matches($0.platform) && $0.kind != "physical" && $0.kind != "cloud" && $0.isAvailable }
+        }
+        guard !model.backends.isEmpty, !runs(platform), let installed = platforms.first(where: runs) else { return }
+        platformRaw = installed.rawValue
+    }
+
     private func pickBackend() {
         if !platforms.contains(platform) { platformRaw = PlatformChoice.android.rawValue }
         if let b = backendId, backends.contains(where: { $0.id == b }) { return }
@@ -564,6 +588,7 @@ private struct FormField: ViewModifier {
     let label: String
     let width: CGFloat
     func body(content: Content) -> some View {
-        LabeledContent(label) { content.labelsHidden().frame(width: width) }
+        // Leading: a pop-up sizes to its longest item, so a short one (Model) was centered in the column.
+        LabeledContent(label) { content.labelsHidden().frame(width: width, alignment: .leading) }
     }
 }
