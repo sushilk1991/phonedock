@@ -5,7 +5,7 @@ import {
   accessSync, constants, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
   readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { run, sleep } from './exec.ts';
 import { stateDir, which } from './paths.ts';
 import {
@@ -16,6 +16,7 @@ import {
   assertAllowedUrl, COMPONENT_IDS, componentKey, currentPlatformKey, isComponentId, loadManifest, selectArtifact,
   type ComponentArtifact, type ComponentManifest, type ComponentSpec,
 } from './components-manifest.ts';
+import { hasUnsafeTarPath, inspectTarGzHeaders } from './tar-inspect.ts';
 
 export { COMPONENT_IDS, isComponentId } from './components-manifest.ts';
 
@@ -90,6 +91,8 @@ export interface ComponentManagerOptions {
   lockHeartbeatMs?: number;
   lockPollMs?: number;
   lockWaitTimeoutMs?: number;
+  /** Test hook invoked right before attempting stale-lock reclamation (for ABA interleaving tests). */
+  onBeforeReclaim?: (reclaimKey: string) => Promise<void> | void;
   /** Override write stream factory (unit tests for filesystem error handling). */
   createWriteStream?: typeof createWriteStream;
   /** Skip default network download / venv steps in unit tests when custom hooks provided. */
@@ -133,65 +136,10 @@ export function isolatedPythonEnv(baseEnv: NodeJS.ProcessEnv = process.env): Nod
   return out;
 }
 
-function hasUnsafeLinkTarget(target: string): boolean {
-  if (!target || target.includes('\0')) return true;
-  if (target.startsWith('/') || target.startsWith('\\')) return true;
-  return target.split(/[\\/]+/).includes('..');
-}
-
-/** Validate every tar entry path and link target before extraction; rejects absolute paths, `..`, unsafe links, and special device nodes. */
+/** Validate every tar entry's real binary header (type, path, symlink/hardlink target) before extraction. */
 export async function inspectTarSafety(tarballPath: string, targetDir: string): Promise<string[]> {
-  const listRes = await run('/usr/bin/tar', ['-tzf', tarballPath], {
-    timeoutMs: 30_000,
-    failureMessage: 'Could not inspect downloaded archive',
-  });
-  const entries = listRes.stdout.split(/\r?\n/).filter((l) => l.length > 0);
-  if (entries.length === 0) {
-    throw new PhoneDockError('Downloaded archive is empty', 'unsafe_archive', 502);
-  }
-  const base = resolve(targetDir);
-  for (const entry of entries) {
-    if (entry.includes('\0')) {
-      throw new PhoneDockError('Archive contains invalid filename', 'unsafe_archive', 502, undefined, `NUL byte in tar entry: ${entry}`);
-    }
-    if (entry.startsWith('/') || entry.startsWith('\\')) {
-      throw new PhoneDockError('Archive contains an absolute path', 'unsafe_archive', 502, undefined, `Rejected absolute tar entry: ${entry}`);
-    }
-    const parts = entry.split(/[\\/]+/);
-    if (parts.includes('..')) {
-      throw new PhoneDockError('Archive contains a path traversal entry', 'unsafe_archive', 502, undefined, `Rejected tar traversal entry: ${entry}`);
-    }
-    const resolved = resolve(base, normalize(entry));
-    if (resolved !== base && !resolved.startsWith(base + sep)) {
-      throw new PhoneDockError('Archive entry escapes destination directory', 'unsafe_archive', 502, undefined, `Rejected escaping tar entry: ${entry}`);
-    }
-  }
-  // Check verbose listing for device nodes, FIFOs, and unsafe symlink/hardlink targets (absolute or `..`).
-  const verbRes = await run('/usr/bin/tar', ['-tvzf', tarballPath], {
-    timeoutMs: 30_000,
-    failureMessage: 'Could not inspect downloaded archive metadata',
-  });
-  for (const line of verbRes.stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const modeChar = line[0];
-    if (modeChar === 'b' || modeChar === 'c' || modeChar === 'p') {
-      throw new PhoneDockError('Archive contains unsupported special file', 'unsafe_archive', 502, undefined, `Rejected tar entry: ${line}`);
-    }
-    if (modeChar === 'l') {
-      const arrow = line.indexOf(' -> ');
-      const target = arrow >= 0 ? line.slice(arrow + 4) : '';
-      if (hasUnsafeLinkTarget(target)) {
-        throw new PhoneDockError('Archive contains an unsafe symlink target', 'unsafe_archive', 502, undefined, `Rejected symlink tar entry: ${line}`);
-      }
-    } else if (modeChar === 'h') {
-      const linkIdx = line.indexOf(' link to ');
-      const target = linkIdx >= 0 ? line.slice(linkIdx + 9) : '';
-      if (hasUnsafeLinkTarget(target)) {
-        throw new PhoneDockError('Archive contains an unsafe hardlink target', 'unsafe_archive', 502, undefined, `Rejected hardlink tar entry: ${line}`);
-      }
-    }
-  }
-  return entries;
+  const entries = await inspectTarGzHeaders(tarballPath, targetDir);
+  return entries.map((e) => e.name);
 }
 
 /** Verify every extracted entry and symlink chain resolves via realpath strictly inside rootDir. */
@@ -204,7 +152,7 @@ export function verifyExtractedSymlinks(rootDir: string): void {
       const st = lstatSync(full);
       if (st.isSymbolicLink()) {
         const target = readlinkSync(full);
-        if (hasUnsafeLinkTarget(target)) {
+        if (hasUnsafeTarPath(target)) {
           throw new PhoneDockError('Archive contains an unsafe symlink', 'unsafe_archive', 502, undefined, `Symlink ${relative(rootReal, full)} -> ${target}`);
         }
       }
@@ -1170,38 +1118,55 @@ export class ComponentManager {
 
       // Lock exists: inspect owner.json safely without spinning on malformed metadata.
       // Never steal from a live PID based on heartbeat age alone.
-      let stale = false;
+      type StaleReason =
+        | { kind: 'dead-token'; deadToken: string }
+        | { kind: 'malformed'; mtimeKey: string };
+      let stale: StaleReason | undefined;
       let vanished = false;
-      if (existsSync(ownerFile)) {
-        let parsed: Partial<LockOwner> | undefined;
-        try {
-          parsed = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') vanished = true;
-          else parsed = undefined; // malformed JSON (e.g. truncated "{")
-        }
-        if (!vanished) {
-          if (parsed && typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) && parsed.pid > 0) {
-            // Reclaim ONLY when the owning PID is dead.
-            if (!this.pidAlive(parsed.pid)) stale = true;
-          } else {
-            // Unreadable/malformed metadata: reclaim only after it stays unreadable past missingGraceMs (5s).
-            try {
-              const st = statSync(ownerFile);
-              if (this.now() - st.mtimeMs > missingGraceMs) stale = true;
-            } catch (err) {
-              if ((err as NodeJS.ErrnoException).code === 'ENOENT') vanished = true;
-            }
+
+      const inspectExistingLock = (): { stale?: StaleReason; vanished: boolean } => {
+        if (existsSync(ownerFile)) {
+          let parsed: Partial<LockOwner> | undefined;
+          try {
+            parsed = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { vanished: true };
+            parsed = undefined;
           }
+          if (parsed && typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) && parsed.pid > 0) {
+            if (!this.pidAlive(parsed.pid)) {
+              const safeTok = typeof parsed.token === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(parsed.token)
+                ? parsed.token
+                : `pid-${parsed.pid}`;
+              return { stale: { kind: 'dead-token', deadToken: safeTok }, vanished: false };
+            }
+            return { vanished: false };
+          }
+          // Malformed or incomplete owner.json: stale only after missingGraceMs (5s).
+          try {
+            const st = statSync(ownerFile);
+            if (this.now() - st.mtimeMs > missingGraceMs) {
+              return { stale: { kind: 'malformed', mtimeKey: `malformed-${Math.floor(st.mtimeMs)}` }, vanished: false };
+            }
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { vanished: true };
+          }
+          return { vanished: false };
         }
-      } else {
         try {
           const st = statSync(lockDir);
-          if (this.now() - st.mtimeMs > missingGraceMs) stale = true;
+          if (this.now() - st.mtimeMs > missingGraceMs) {
+            return { stale: { kind: 'malformed', mtimeKey: `missing-${Math.floor(st.mtimeMs)}` }, vanished: false };
+          }
         } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') vanished = true;
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { vanished: true };
         }
-      }
+        return { vanished: false };
+      };
+
+      const inspected = inspectExistingLock();
+      stale = inspected.stale;
+      vanished = inspected.vanished;
 
       if (vanished) {
         await sleep(Math.min(pollMs, 10));
@@ -1209,13 +1174,55 @@ export class ComponentManager {
       }
 
       if (stale) {
-        const trash = join(dir, `.lock.stale-${process.pid}-${randomBytes(4).toString('hex')}`);
+        // Gate stale reclamation per dead owner's token via an atomic reclaim marker so two reclaimers
+        // can never race to remove a new live owner's lock (ABA protection).
+        const reclaimKey = stale.kind === 'dead-token' ? stale.deadToken : stale.mtimeKey;
+        if (this.opts.onBeforeReclaim) await this.opts.onBeforeReclaim(reclaimKey);
+        const markerDir = join(dir, `${LOCK_DIR_NAME}.reclaim-${reclaimKey}`);
+        const markerOwner = join(markerDir, LOCK_OWNER_FILE);
+        let acquiredMarker = false;
         try {
-          renameSync(lockDir, trash);
-          rmSync(trash, { recursive: true, force: true });
+          mkdirSync(markerDir);
+          atomicWriteJson(markerOwner, { pid: process.pid, startedAt: new Date(this.now()).toISOString() });
+          acquiredMarker = true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+            // Reclaim marker already held by another process; clean up only if that reclaimer's PID is dead.
+            try {
+              if (existsSync(markerOwner)) {
+                const mo = JSON.parse(readFileSync(markerOwner, 'utf8')) as { pid?: number };
+                if (typeof mo.pid === 'number' && !this.pidAlive(mo.pid)) {
+                  rmSync(markerDir, { recursive: true, force: true });
+                }
+              } else {
+                const mst = statSync(markerDir);
+                if (this.now() - mst.mtimeMs > missingGraceMs) {
+                  rmSync(markerDir, { recursive: true, force: true });
+                }
+              }
+            } catch { /* ignore race */ }
+          }
+        }
+
+        if (acquiredMarker) {
+          try {
+            // Re-verify .lock STILL holds the exact same dead token (or still malformed) while holding the marker.
+            const recheck = inspectExistingLock();
+            const stillSameDead =
+              recheck.stale !== undefined &&
+              ((stale.kind === 'dead-token' && recheck.stale.kind === 'dead-token' && recheck.stale.deadToken === stale.deadToken) ||
+                (stale.kind === 'malformed' && recheck.stale.kind === 'malformed'));
+            if (stillSameDead) {
+              const trash = join(dir, `.lock.stale-${process.pid}-${randomBytes(4).toString('hex')}`);
+              try {
+                renameSync(lockDir, trash);
+                rmSync(trash, { recursive: true, force: true });
+              } catch { /* vanished concurrently */ }
+            }
+          } finally {
+            try { rmSync(markerDir, { recursive: true, force: true }); } catch { /* ignore */ }
+          }
           continue;
-        } catch {
-          // Another process raced us to reclaim or released it; yield before retrying.
         }
       }
 

@@ -180,7 +180,7 @@ private struct IosControlSetupCapsule: View {
     let status: ComponentStatus
 
     var body: some View {
-        HStack(spacing: Theme.Space.s) {
+        HStack(spacing: Theme.Space.xs) {
             switch status.state {
             case "installing":
                 ProgressView().controlSize(.mini).id(scheme)
@@ -214,10 +214,12 @@ private struct IosControlSetupCapsule: View {
                     .testAnchor("Install iPhone control")
             }
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
         .padding(.horizontal, Theme.Space.m)
         .padding(.vertical, Theme.Space.xs + 1)
-        .background(Theme.Surface.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.Line.card, lineWidth: 1))
+        .background(Theme.Surface.card, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.Line.card, lineWidth: 1))
         .padding(.horizontal, Theme.Space.s)
         .accessibilityElement(children: .contain)
         .testAnchor("ios-control-setup")

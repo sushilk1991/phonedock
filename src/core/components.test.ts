@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   ComponentManager, isolatedPythonEnv, safeExtractTarGz, setComponentManager, getComponentManager, verifyExtractedSymlinks,
 } from './components.ts';
+import { inspectTarGzHeaders } from './tar-inspect.ts';
 import {
   assertAllowedUrl, componentKey, loadManifest, sha256Hex, validateLockContent, validateManifest,
   type ComponentManifest,
@@ -887,6 +888,211 @@ test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid ov
     assert.equal(extSt.source, 'external');
     assert.equal(extSt.updateAvailable, false);
     assert.match(extSt.detail ?? '', /installed on this Mac/i);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('Round 2 #1 (P1): exact A/B/D ABA interleaving — A never steals B live lock after observing dead D', async () => {
+  const work = makeTempDir('pd-comp-r2-aba-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    let releaseBDownload!: () => void;
+    const bDownloadGate = new Promise<void>((r) => { releaseBDownload = r; });
+
+    await withServer(async (_req, res) => {
+      await bDownloadGate;
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
+      const lockDir = join(rootDir, 'axe', '.lock');
+      const ownerFile = join(lockDir, 'owner.json');
+
+      // Dead owner D holds .lock
+      mkdirSync(lockDir, { recursive: true });
+      const nowIso = new Date().toISOString();
+      writeFileSync(ownerFile, JSON.stringify({ pid: 999_991, token: 'dead-D', startedAt: nowIso, heartbeatAt: nowIso, key }));
+
+      let aPausedAtReclaim!: () => void;
+      const aPaused = new Promise<void>((r) => { aPausedAtReclaim = r; });
+      let letAResume!: () => void;
+      const aResumeGate = new Promise<void>((r) => { letAResume = r; });
+
+      // Installer A observes dead D, then pauses right before reclaiming
+      const mgrA = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        pidAlive: (pid) => pid === process.pid,
+        lockPollMs: 15, lockWaitTimeoutMs: 150,
+        onBeforeReclaim: async (reclaimKey) => {
+          assert.equal(reclaimKey, 'dead-D');
+          aPausedAtReclaim();
+          await aResumeGate;
+        },
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+
+      // Installer B reclaims D and acquires a live lock (blocked on download gate)
+      const mgrB = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        pidAlive: (pid) => pid === process.pid,
+        lockPollMs: 15,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+
+      const aPromise = mgrA.install('axe');
+      await aPaused;
+
+      // B runs while A is paused: reclaims D and acquires .lock with its own fresh live token
+      const bPromise = mgrB.install('axe');
+      let bToken = '';
+      for (let i = 0; i < 60; i++) {
+        try {
+          const cur = JSON.parse(readFileSync(ownerFile, 'utf8'));
+          if (cur.token && cur.token !== 'dead-D') { bToken = cur.token; break; }
+        } catch { /* reclaiming */ }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(bToken && bToken !== 'dead-D', 'B must have reclaimed dead D and acquired a new live token');
+
+      // Resume A: A must see B's new live token, NOT remove B's .lock, and time out cleanly
+      letAResume();
+      await assert.rejects(() => aPromise, (e: any) => e.code === 'lock_timeout');
+
+      // B's live lock MUST still exist untouched with bToken!
+      assert.ok(existsSync(ownerFile), 'A must never delete B live lock');
+      assert.equal(JSON.parse(readFileSync(ownerFile, 'utf8')).token, bToken);
+
+      // Now let B finish its download and activate cleanly
+      releaseBDownload();
+      const stB = await bPromise;
+      assert.equal(stB.state, 'ready');
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('Round 2 #1 (P1): stale reclaim marker from a dead reclaimer PID is cleaned up', async () => {
+  const work = makeTempDir('pd-comp-r2-marker-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    await withServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
+      const lockDir = join(rootDir, 'axe', '.lock');
+      const deadMarker = join(rootDir, 'axe', '.lock.reclaim-dead-D2');
+      mkdirSync(lockDir, { recursive: true });
+      mkdirSync(deadMarker, { recursive: true });
+      const nowIso = new Date().toISOString();
+      writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({ pid: 999_992, token: 'dead-D2', startedAt: nowIso, heartbeatAt: nowIso, key }));
+      writeFileSync(join(deadMarker, 'owner.json'), JSON.stringify({ pid: 999_993, startedAt: nowIso }));
+
+      const mgr = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        pidAlive: (pid) => pid === process.pid, lockPollMs: 15,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      const st = await mgr.install('axe');
+      assert.equal(st.state, 'ready');
+      assert.equal(existsSync(deadMarker), false);
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('Round 2 #2 (P2): binary tar header parser catches tricky filenames with " -> " / " link to ", PAX/GNU links, bad hardlinks, and FIFOs', async () => {
+  const work = makeTempDir('pd-comp-r2-tar-');
+  try {
+    const buildTar = (kind: string, outPath: string) => {
+      execFileSync('python3', ['-c', `
+import io, tarfile, sys
+kind, out = sys.argv[1], sys.argv[2]
+fmt = tarfile.PAX_FORMAT if kind.startswith('pax-') else (tarfile.GNU_FORMAT if kind.startswith('gnu-') else tarfile.USTAR_FORMAT)
+with tarfile.open(out, 'w:gz', format=fmt) as tf:
+    if kind == 'arrow-symlink-dotdot':
+        ti = tarfile.TarInfo('foo -> safe')
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = '../outside'
+        tf.addfile(ti)
+    elif kind == 'arrow-symlink-abs':
+        ti = tarfile.TarInfo('foo -> safe')
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = '/etc/passwd'
+        tf.addfile(ti)
+    elif kind == 'linkto-hardlink-dotdot':
+        ti = tarfile.TarInfo('foo link to safe')
+        ti.type = tarfile.LNKTYPE
+        ti.linkname = '../outside'
+        tf.addfile(ti)
+    elif kind == 'linkto-hardlink-abs':
+        ti = tarfile.TarInfo('foo link to safe')
+        ti.type = tarfile.LNKTYPE
+        ti.linkname = '/etc/passwd'
+        tf.addfile(ti)
+    elif kind == 'hardlink-unseen':
+        ti = tarfile.TarInfo('alias')
+        ti.type = tarfile.LNKTYPE
+        ti.linkname = 'not-yet-created.txt'
+        tf.addfile(ti)
+    elif kind == 'pax-linkpath-dotdot':
+        ti = tarfile.TarInfo('a' * 120)
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = '../' + 'b' * 120
+        tf.addfile(ti)
+    elif kind == 'gnu-longlink-dotdot':
+        ti = tarfile.TarInfo('a' * 120)
+        ti.type = tarfile.SYMTYPE
+        ti.linkname = '../' + 'b' * 120
+        tf.addfile(ti)
+    elif kind == 'fifo':
+        ti = tarfile.TarInfo('pipe')
+        ti.type = tarfile.FIFOTYPE
+        tf.addfile(ti)
+    elif kind == 'valid-hardlink':
+        f = tarfile.TarInfo('orig.txt')
+        data = b'hello'
+        f.size = len(data)
+        f.mode = 0o644
+        tf.addfile(f, io.BytesIO(data))
+        h = tarfile.TarInfo('copy.txt')
+        h.type = tarfile.LNKTYPE
+        h.linkname = 'orig.txt'
+        tf.addfile(h)
+`, kind, outPath]);
+    };
+
+    for (const bad of [
+      'arrow-symlink-dotdot',
+      'arrow-symlink-abs',
+      'linkto-hardlink-dotdot',
+      'linkto-hardlink-abs',
+      'hardlink-unseen',
+      'pax-linkpath-dotdot',
+      'gnu-longlink-dotdot',
+      'fifo',
+    ]) {
+      const p = join(work, `${bad}.tar.gz`);
+      buildTar(bad, p);
+      await assert.rejects(() => inspectTarGzHeaders(p, join(work, `dest-${bad}`)), (e: any) => e.code === 'unsafe_archive', `expected ${bad} to be rejected`);
+    }
+
+    // Valid hardlink targeting an earlier entry inside root passes both preflight and extraction
+    const okPath = join(work, 'valid-hardlink.tar.gz');
+    buildTar('valid-hardlink', okPath);
+    const entries = await inspectTarGzHeaders(okPath, join(work, 'dest-ok'));
+    assert.equal(entries.length, 2);
+    await safeExtractTarGz(okPath, join(work, 'dest-ok'));
+    assert.equal(readFileSync(join(work, 'dest-ok', 'copy.txt'), 'utf8'), 'hello');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

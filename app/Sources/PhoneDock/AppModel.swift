@@ -108,6 +108,7 @@ final class AppModel {
     private var eventsTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var componentPollTask: Task<Void, Never>?
+    private var componentPollGeneration = 0
     private var started = false
 
     var selectedDevice: Device? { devices.first { $0.id == selection } }
@@ -197,7 +198,7 @@ final class AppModel {
             if await DaemonLocator.health(port: c.base.port ?? 0) == nil {
                 connection = .failed("Daemon stopped responding")
                 client = nil
-                eventsTask?.cancel(); pollTask?.cancel(); componentPollTask?.cancel(); componentPollTask = nil
+                eventsTask?.cancel(); pollTask?.cancel(); cancelComponentPolling()
                 Task { await connect() }
             }   // background polling never alerts; the connection pill shows trouble
         }
@@ -221,7 +222,7 @@ final class AppModel {
         Task {
             defer { restartingDaemon = false }
             let pid = daemonPid
-            eventsTask?.cancel(); pollTask?.cancel(); componentPollTask?.cancel(); componentPollTask = nil
+            eventsTask?.cancel(); pollTask?.cancel(); cancelComponentPolling()
             client = nil; liveUpdates = false
             connection = .connecting("Stopping daemon…")
             if let pid, !(await DaemonLocator.stop(pid: pid)) {
@@ -274,21 +275,34 @@ final class AppModel {
         return true
     }
 
+    private func cancelComponentPolling() {
+        componentPollGeneration += 1
+        componentPollTask?.cancel()
+        componentPollTask = nil
+    }
+
     /// While any component is installing, poll every 3 s so a missed SSE terminal event can never leave the UI stuck.
+    /// Guarded by `componentPollGeneration` so a cancelled poller's `defer` can never clear a replacement's handle.
     private func ensureComponentPolling() {
-        guard !componentsPinnedBySelfTest else { componentPollTask?.cancel(); componentPollTask = nil; return }
+        guard !componentsPinnedBySelfTest else { cancelComponentPolling(); return }
         let anyInstalling = components.contains { $0.state == "installing" }
         if !anyInstalling {
-            componentPollTask?.cancel()
-            componentPollTask = nil
+            cancelComponentPolling()
             return
         }
         guard componentPollTask == nil else { return }
+        componentPollGeneration += 1
+        let gen = componentPollGeneration
         componentPollTask = Task { [weak self] in
-            defer { self?.componentPollTask = nil }
+            defer {
+                if let self, self.componentPollGeneration == gen {
+                    self.componentPollTask = nil
+                }
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
-                guard !Task.isCancelled, let self, self.client != nil, !self.componentsPinnedBySelfTest else { return }
+                guard !Task.isCancelled, let self, self.componentPollGeneration == gen,
+                      self.client != nil, !self.componentsPinnedBySelfTest else { return }
                 _ = await self.loadComponents()
                 if !self.components.contains(where: { $0.state == "installing" }) { return }
             }
