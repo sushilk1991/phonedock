@@ -715,7 +715,7 @@ running); ask the Mac again (window, scrcpy, adb). Then the last look, with noth
 a use elsewhere, a lease, a viewer, the filter, the setting (Never wins); only then do its live views end, and `emu kill`
 stops it the ordinary way, bound to the emulator process it verified. A console command that changes an emulator (a
 snapshot save, load or delete; a stop) goes only to the one whose `emu avd path` is this AVD: with a same-named one
-whose console doesn't say, it is `ambiguous_device` 409 and nothing is sent. It is asleep only with proof that process exited, else `device.sleep_failed` (the marker stays while it
+whose console doesn't say (or this one's, while it starts), it is `ambiguous_device` 409, retryable, and nothing is sent; an emulator with no AVD of its name in either folder is matched by name, as before. It is asleep only with proof that process exited, else `device.sleep_failed` (the marker stays while it
 reads stopped). The exit save is proven when a new `snapshot.pb` and RAM image were written; then the disk images'
 mtimes are recorded (`phonedock-exit-save.json` in the AVD). A sleeping phone keeps one RAM image on disk.
 

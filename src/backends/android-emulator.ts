@@ -284,13 +284,16 @@ async function managedSerial(name: string): Promise<string | undefined> {
  *  load or delete; the stop): never a same-named one whose path can't be read, which may be the person's own (and a
  *  sleeping phone's id names no running emulator at all). undefined: none runs. */
 async function consoleSerial(name: string): Promise<string | undefined> {
-  const a = requireAvd(name);
+  const a = findAvd(name);
   const running = await runningEmulators('fresh');
+  if (!a) return running.find((e) => e.name === name)?.serial;   // no AVD of that name anywhere: nothing to mistake it for
   const r = runningFor(running, a, true);
   if (r) return r.serial;
   if (runningFor(running, a)) {
-    throw new PhoneDockError(`PhoneDock can’t tell whether the running emulator named "${name}" is this phone`, 'ambiguous_device', 409,
-      ['Nothing was sent. Try again in a few seconds; if it lasts, quit the other emulator of that name.'], `An emulator named ${name} runs, and its console doesn't say which AVD it runs`, 'not_sent');
+    // Its console answers its name but not its path (it may still be starting; `emu kill` needs that console too).
+    throw new PhoneDockError(`PhoneDock can’t tell whether the emulator running as "${name}" is this phone`, 'ambiguous_device', 409,
+      ['Nothing was sent. Its console didn’t say which AVD it runs: try again in a few seconds (if another emulator has this name, quit it).'],
+      `An emulator named ${name} runs, and its console doesn't say which AVD it runs`, 'not_sent');
   }
   return undefined;
 }
@@ -1192,9 +1195,19 @@ function descendsFrom(p: Proc, root: number, all: Proc[]): boolean {
 /** Where the tool `name` is the program a process runs: its first word, or its second behind an interpreter (a script, or
  *  node running one). Only then: the word anywhere else (`grep adb`, a shell whose script mentions it) is not it. -1: not. */
 function programAt(w: string[], name: string): number {
-  const is = (x: string | undefined) => x === name || !!x?.endsWith(`/${name}`);
-  if (is(w[0])) return 0;
-  return /(^|\/)(sh|bash|zsh|dash|node|python3?|perl|env)$/.test(w[0] ?? '') && is(w[1]) ? 1 : -1;
+  const is = (x: string) => x === name || x.endsWith(`/${name}`);
+  // Its word, or an absolute path with spaces (…/Application Support/…): its words up to an option or another path.
+  const end = (k: number): number => {
+    if (k >= w.length) return -1;
+    if (is(w[k])) return k;
+    if (!w[k].startsWith('/')) return -1;
+    let p = w[k];
+    for (let j = k + 1; j < w.length && !w[j].startsWith('-') && !w[j].startsWith('/'); j++) { p += ` ${w[j]}`; if (is(p)) return j; }
+    return -1;
+  };
+  const i = end(0);
+  if (i >= 0) return i;
+  return /(^|\/)(sh|bash|zsh|dash|node|python3?|perl|env)$/.test(w[0] ?? '') ? end(1) : -1;
 }
 /** adb commands aimed at no device (the adb server among them), and the read-only probes PhoneDock's inventory makes. */
 const ADB_NOT_USE = /^(devices|start-server|kill-server|version|help|connect|disconnect|pair|mdns|keygen|track-devices|fork-server|server|nodaemon|get-state|get-serialno|get-devpath)$/;

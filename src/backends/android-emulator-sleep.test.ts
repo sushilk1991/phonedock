@@ -227,7 +227,8 @@ test('who may be on this emulator: adb with -e, -t or no selector; scrcpy with -
     ['adb -s emulator-5554 emu avd name', undefined], ['adb -s emulator-5554 get-state', undefined], ['adb -s emulator-5556 push a b', undefined],
     // only a process that runs adb: a script or node running it, not the word elsewhere (grep, a shell whose script says it)
     ['/bin/sh /tmp/x/adb -s emulator-5554 push a b', 'push'], ['node /tmp/sdk/platform-tools/adb -s emulator-5554 shell', 'shell'],
-    ['grep adb shell.log', undefined], ['/bin/zsh -c echo an adb command aimed at it', undefined], ['vim adb', undefined]] as const) {
+    ['grep adb shell.log', undefined], ['/bin/zsh -c echo an adb command aimed at it', undefined], ['vim adb', undefined],
+    ['/Users/x/Library/Application Support/PhoneDock/tools/platform-tools/adb -s emulator-5554 shell', 'shell'], ['/usr/bin/grep -r adb .', undefined]] as const) {
     assert.equal(m.adbSessionOn(args, S), want, args);
   }
   for (const [args, want] of [['scrcpy --serial emulator-5554', true], ['scrcpy --serial=emulator-5554', true], ['/opt/homebrew/bin/scrcpy', true],
@@ -264,6 +265,24 @@ test('a console command (snapshot delete, the stop) never goes to a same-named e
   await assert.rejects(backend.shutdown!(NAME), (e: PhoneDockError) => e.code === 'ambiguous_device');
   assert.deepEqual(sdk.log().filter((l) => / -s emulator-5572 emu (avd snapshot|kill)/.test(l)), [], 'nothing was sent to the other emulator');
   assert.ok(snaps().includes('baseline'), 'and nothing deleted');
+});
+
+test('its own emulator whose console doesn’t say its path: a stop waits for it (ambiguous_device, retryable), nothing sent; an emulator with no AVD anywhere stops by name, as before', async () => {
+  await backend.boot!(NAME, { headless: true });
+  const s = serialOf()!;
+  sdk.set({ pathKO: [s] }); sdk.clearLog();
+  await assert.rejects(backend.shutdown!(NAME), (e: PhoneDockError) => e.code === 'ambiguous_device' && /try again/i.test(e.hints?.[0] ?? '') && !/the other emulator/.test(e.hints?.[0] ?? ''));
+  assert.ok(!sdk.log().some((l) => l.includes(`-s ${s} emu kill`)), 'not stopped by name');
+  sdk.set({ pathKO: [] });
+  await backend.shutdown!(NAME);                            // once its console says, the stop goes ahead
+  assert.equal(serialOf(), undefined);
+  sdk.set({ avdPaths: { 'pdtest-noavd': '/opt/elsewhere/pdtest-noavd.avd' } });   // in neither AVD folder
+  const c = spawn(join(sdk.root, 'emulator', 'emulator'), ['-avd', 'pdtest-noavd', '-port', '5576', '-no-window'], { stdio: 'ignore', env: { ...process.env, ANDROID_AVD_HOME: AVD_HOME } });
+  others.push(c);
+  await until(() => !!sdk.state().emulators['emulator-5576']);
+  sdk.clearLog();
+  await backend.shutdown!('pdtest-noavd');
+  assert.ok(sdk.log().some((l) => l.includes('-s emulator-5576 emu kill')), 'stopped by its name');
 });
 
 test('only an AVD PhoneDock created in its own folder sleeps: an .ini there pointing at another AVD (Android Studio’s) never does', async () => {

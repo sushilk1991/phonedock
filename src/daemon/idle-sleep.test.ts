@@ -773,7 +773,7 @@ test('a live view that opens while the phone’s own idle clock is read keeps it
 test('a shell command that wakes a phone which starts fresh is handed back unsent: it may be written for the screen it had', async () => {
   await putToSleep();
   hooks.wakeReport = { resumed: false, via: 'cold', note: 'Its saved state didn’t load.' };
-  await assert.rejects(S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell'), (e: PhoneDockError) => e.code === 'woke_fresh' && e.delivery === 'not_sent');
+  await assert.rejects(S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell'), (e: PhoneDockError) => e.code === 'woke_fresh' && e.delivery === 'not_sent' && /run the command again/.test(e.hints?.[0] ?? ''));
   assert.deepEqual(calls, ['wake:pdtest-a']);
 });
 

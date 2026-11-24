@@ -277,12 +277,12 @@ export async function enterRequest(c: Pick<Ctx, 'params' | 'req' | 'res'> & { ow
     touchUse(id);
   };
   const met = readMarker(id)?.since;   // the sleep this request met on arrival: its gate may run later (a receipt's body first)
-  const gate = () => wakeGate(c, id, (receipt && !NOT_SCREEN_INPUT.has(`${method} ${route}`)) || SCREEN_JOBS.has(`${method} ${route}`), met);
+  const gate = () => wakeGate(c, id, (receipt && !NOT_SCREEN_INPUT.has(`${method} ${route}`)) || SCREEN_JOBS.has(`${method} ${route}`), met, route === '/v1/devices/:id/shell');
   if (receipt) { c.beforeRun = gate; return leave; }
   try { await gate(); } catch (e) { leave(); throw e; }
   return leave;
 }
-async function wakeGate(c: Pick<Ctx, 'req' | 'res'>, id: string, screenInput: boolean, met?: string): Promise<void> {
+async function wakeGate(c: Pick<Ctx, 'req' | 'res'>, id: string, screenInput: boolean, met?: string, command = false): Promise<void> {
   try {
     // This request's wake, or (another request woke it since this one arrived) how the sleep it met came back.
     const woke = await ensureAwake(id, 'daemon') ?? (met && woken.get(id)?.since === met ? woken.get(id)!.w : undefined);
@@ -294,7 +294,8 @@ async function wakeGate(c: Pick<Ctx, 'req' | 'res'>, id: string, screenInput: bo
     // A tap or a swipe was aimed at a screen that is gone after a fresh start: hand it back unsent, so the caller looks again.
     if (woke && screenInput && !woke.report.resumed) {
       throw new PhoneDockError(`${woke.name} started fresh, so its previous screen is gone`, 'woke_fresh', 409,
-        ['Nothing was sent. Read the screen again, then send the input for what is on it now.'], woke.report.note, 'not_sent');
+        [command ? 'Nothing was run. If the command depends on the screen, read it again; then run the command again.' : 'Nothing was sent. Read the screen again, then send the input for what is on it now.'],
+        woke.report.note, 'not_sent');
     }
   } catch (e) {
     if (e instanceof PhoneDockError && !e.delivery) e.delivery = 'not_sent';   // nothing reached the device
