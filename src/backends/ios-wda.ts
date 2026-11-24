@@ -93,7 +93,7 @@ export function noAccountError(udid = '<udid>'): PhoneDockError {
 }
 
 /** Which team signs WebDriverAgent: the one asked for, else the only one Xcode is signed in to. */
-export function chooseTeam(teams: XcodeTeam[], opts: { team?: string; apiKey?: WdaApiKey; udid?: string }): { id: string; free: boolean; name?: string } {
+export function chooseTeam(teams: XcodeTeam[], opts: { team?: string; apiKey?: WdaApiKey; udid?: string; remembered?: string }): { id: string; free: boolean; name?: string } {
   const listed = teams.map((t) => `${t.name} (${t.id}${t.free ? ', personal' : t.type ? `, ${t.type}` : ''})`).join('; ');
   if (opts.team !== undefined) {
     const id = opts.team.trim();
@@ -106,6 +106,9 @@ export function chooseTeam(teams: XcodeTeam[], opts: { team?: string; apiKey?: W
       ['Add that team’s Apple ID in Xcode › Settings › Accounts, or pick one of the teams below.'], `Xcode is signed in to: ${listed}`);
   }
   if (teams.length === 1) return { id: teams[0].id, free: teams[0].free, name: teams[0].name };
+  // The team this phone used last (set up before, or stopped): its build is still there, so no new choice is needed.
+  const last = opts.remembered ? teams.find((t) => t.id === opts.remembered) : undefined;
+  if (last) return { id: last.id, free: last.free, name: last.name };
   if (!teams.length) {
     if (opts.apiKey) {
       throw new PhoneDockError('Choose the team your App Store Connect key belongs to', 'team_required', 409,
@@ -421,9 +424,10 @@ export async function runBuild(spawn: Spawn, plan: BuildPlan, env: NodeJS.Proces
   timer.unref?.();
   const onAbort = () => stop('cancelled');
   ctx.signal?.addEventListener('abort', onAbort, { once: true });
+  const seen = new Set<string>();
   const exited = lines(child, (l) => {
     tail.push(l); if (tail.length > 400) tail.shift();
-    const p = progressFor(l, st); if (p) onProgress(p);
+    const p = progressFor(l, st); if (p && !seen.has(p)) { seen.add(p); onProgress(p); }   // each target signs: say it once
   }).then((c) => { alive = false; return c; });
   const code = await Promise.race([exited, gaveUp]).finally(() => { clearTimeout(timer); ctx.signal?.removeEventListener('abort', onAbort); });
   if (stopped === 'cancelled') throw cancelledError();
@@ -442,6 +446,10 @@ export function startRunner(spawn: Spawn,
   const child = spawn('xcodebuild', launchArgv(o.xctestrun, o.destination), { env: o.env });
   let alive = true;
   const tail: string[] = []; const st = { compiled: 0 };
+  // Each progress line once per launch (xcodebuild reports several test suites starting).
+  const starting = 'Starting WebDriverAgent on the iPhone…';
+  const seen = new Set<string>([starting]);
+  onProgress(starting);
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = () => { settled = true; clearTimeout(timer); o.signal?.removeEventListener('abort', onAbort); };
@@ -459,7 +467,7 @@ export function startRunner(spawn: Spawn,
           resolve({ runner, url });
           return;
         }
-        if (!settled) { const p = progressFor(l, st); if (p) onProgress(p); }
+        if (!settled) { const p = progressFor(l, st); if (p && !seen.has(p)) { seen.add(p); onProgress(p); } }
       }).then((code) => {
         alive = false;
         if (!settled) { finish(); reject(classifyXcodebuild(tail.join('\n'), 'launch', { team: o.team, udid: o.udid })); }
@@ -593,7 +601,6 @@ export async function launchWda(d: WdaBuildDeps, udid: string, cfg: WdaConfig, o
   let b = await ensureBuild(d, udid, cfg, onProgress, { signal: opts.signal });
   await opts.beforeStart?.();
   const start = () => {
-    onProgress('Starting WebDriverAgent on the iPhone…');
     return startRunner(d.spawn, { xctestrun: b.xctestrun, destination: destinationFor(udid, cfg), env: d.env, now: () => d.now(), timeoutMs: opts.timeoutMs, udid, team: cfg.team, signal: opts.signal }, onProgress);
   };
   try { return { ...(await start()), built: b.built }; }

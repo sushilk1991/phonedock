@@ -142,7 +142,13 @@ function videoDeps(nid: string): VideoDeps {
 
 /** `wda`: PhoneDock manages this phone's WebDriverAgent (set by wda-setup, removed by disconnect). The API key is
  *  stored as its file path and ids, never its contents. */
-export interface DevCfg { name?: string; address?: string; wdaUrl?: string; udid?: string; savedAt?: string; wda?: WdaConfig & { since: string } }
+export interface DevCfg {
+  name?: string; address?: string; wdaUrl?: string; udid?: string; savedAt?: string;
+  /** PhoneDock runs and supervises WebDriverAgent for this phone. */
+  wda?: WdaConfig & { since: string };
+  /** The setup Stop Control ended: Set Up Control reuses its team (and so its build). */
+  wdaStopped?: WdaConfig & { stoppedAt: string };
+}
 const cfgState = new JsonState<Record<string, DevCfg>>('ios-device.json');
 
 /** The ios-device.json key holding a phone's entry (keyed by udid, or a manual entry carrying it). */
@@ -833,8 +839,15 @@ async function wdaSetup(udid: string, opts: WdaSetupOptions, onProgress: (l: str
   try { return await wdaSetupOnce(udid, opts, onProgress); } finally { setupsRunning.delete(udid); }
 }
 
-async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, onProgress: (l: string) => void): Promise<WdaSetupResult> {
-  const apiKey: WdaApiKey | undefined = parseApiKey({ path: opts.apiKeyPath, keyId: opts.apiKeyId, issuerId: opts.apiKeyIssuerId });
+async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, progress: (l: string) => void): Promise<WdaSetupResult> {
+  let lastLine = '';
+  const onProgress = (l: string) => { if (l !== lastLine) { lastLine = l; progress(l); } };
+  const given: WdaApiKey | undefined = parseApiKey({ path: opts.apiKeyPath, keyId: opts.apiKeyId, issuerId: opts.apiKeyIssuerId });
+  // Nothing asked for: reuse this phone's last setup (running, or stopped with Stop Control), so its build is reused.
+  const priorCfg = cfgFor(udid);
+  const prior = opts.team === undefined && !given ? priorCfg?.wda ?? priorCfg?.wdaStopped : undefined;
+  const priorKey = prior?.apiKey && existsSync(prior.apiKey.path) ? prior.apiKey : undefined;
+  const apiKey = given ?? priorKey;
   onProgress('Checking Xcode and the iPhone…');
   const exec = (c: string, a: string[], o?: RunOptions) => run(c, a, { env: toolEnv(), ...o });
   const [xcode, teams] = await Promise.all([xcodeInfo(), readXcodeTeams(exec)]);
@@ -851,7 +864,7 @@ async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, onProgress: (l:
     const err = preflight(xcode, facts, udid);
     if (err) throw err;
   } else if (!xcode) throw preflight(undefined, undefined, udid)!;
-  const team = chooseTeam(teams, { team: opts.team, apiKey, udid });
+  const team = chooseTeam(teams, { team: opts.team ?? (priorKey ? prior?.team : undefined), apiKey, udid, remembered: prior?.team });
   onProgress(`Signing with team ${team.id}${team.free ? ' (a personal team: its signing lasts 7 days, and PhoneDock renews it)' : ''}`);
   const cfg: WdaConfig = { team: team.id, free: team.free, bundleId: runnerBundleId(team.id, team.free), ...(apiKey ? { apiKey } : {}), ...(opts.destination ? { destination: opts.destination } : {}) };
   let previous: DevCfg['wda'];
@@ -862,6 +875,7 @@ async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, onProgress: (l:
   });
   try {
     const r = await wdaSup.setup(udid, onProgress);
+    cfgState.update((all) => { const k = cfgKey(all, udid); if (all[k]?.wda) delete all[k].wdaStopped; });
     wdaChanged();
     return { udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true };
   } catch (e) {
@@ -881,6 +895,31 @@ async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, onProgress: (l:
     wdaChanged();
     throw e;
   }
+}
+
+/** Stop Control: stop WebDriverAgent and stop keeping it running. The phone stays paired and listed (screenshots, apps
+ *  and installs work as before), and its setup is remembered, so Set Up Control starts it again with the same build.
+ *  Also cancels a setup in flight. Idempotent: `stopped` is false when nothing was running. */
+function wdaStop(udid: string): { udid: string; stopped: boolean } {
+  if (!/^[A-Za-z0-9-]+$/.test(udid)) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400);
+  let stopped = false;
+  let url: string | undefined;
+  cfgState.update((all) => {
+    const k = cfgKey(all, udid);
+    const e = all[k];
+    if (!e?.wda) return;
+    const { since: _since, ...cfg } = e.wda;
+    url = e.wdaUrl?.replace(/\/+$/, '');
+    const next: DevCfg = { ...e, wdaStopped: { ...cfg, stoppedAt: new Date().toISOString() } };
+    delete next.wda; delete next.wdaUrl;   // the address was the runner's; nothing answers there now
+    all[k] = next;
+    stopped = true;
+  });
+  if (url) { sessions.delete(url); statusCache.delete(url); }
+  scaleCache.delete(udid);
+  wdaSup.unmanage(udid);
+  wdaChanged();
+  return { udid, stopped };
 }
 
 /** The teams Xcode is signed in to, for the app's team picker and `phonedock ios wda-teams`. */
@@ -918,6 +957,7 @@ export const backend: Backend & {
   disconnect(nativeId: string): Promise<boolean>;
   wdaSetup(udid: string, opts: WdaSetupOptions, onProgress?: (l: string) => void): Promise<WdaSetupResult>;
   wdaTeams(): Promise<{ teams: XcodeTeam[]; xcode: boolean; xcodeVersion?: string; minIos?: string }>;
+  wdaStop(udid: string): Promise<{ udid: string; stopped: boolean }>;
   /** Daemon lifecycle (main.ts): relaunch managed WebDriverAgents and keep them running. */
   startWdaSupervisor(onChange?: () => void): void;
   stopWdaSupervisor(): void;
@@ -992,6 +1032,7 @@ export const backend: Backend & {
           coreDeviceId: d.identifier, productType: h.productType, transport: transportOf(d), pairingState: c.pairingState ?? d.connectionProperties?.pairingState,
           tunnelState: readiness.tunnel, developerMode: readiness.developerMode, wdaUrl: url ?? null, wdaReady: ws?.ok ?? null,
           wdaControl: control ?? null,
+          wdaStopped: !cf?.wda && cf?.wdaStopped ? { team: cf.wdaStopped.team, stoppedAt: cf.wdaStopped.stoppedAt } : null,
           readiness, experimental: false,
         },
       });
@@ -1066,6 +1107,7 @@ export const backend: Backend & {
   },
 
   async wdaTeams() { return wdaTeams(); },
+  async wdaStop(udid: string) { return wdaStop(udid); },
   startWdaSupervisor(onChange?: () => void) { startWdaSupervisor(onChange); },
   stopWdaSupervisor() { stopWdaSupervisor(); },
 

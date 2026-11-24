@@ -1011,6 +1011,11 @@ export class PhoneDockClient {
     const r = await this.request<{ job: Job }>('POST', '/v1/ios/wda-setup', { body: { udid, ...body } });
     return wait === false ? r.job : this.waitJob(r.job.id, { timeoutMs: timeoutMs ?? 30 * 60_000, onProgress });
   }
+  /** Stop Control for an older iPhone: stop WebDriverAgent and stop keeping it running. The phone stays paired and
+   *  listed; wdaSetup starts it again with the same team and build. `stopped` is false when nothing was running. */
+  wdaStop(udid: string): Promise<{ ok: boolean; udid: string; stopped: boolean }> {
+    return this.request('POST', '/v1/ios/wda-stop', { body: { udid } });
+  }
   /** The signing teams Xcode is signed in to on the daemon's Mac (for wdaSetup's `team`). */
   wdaTeams(): Promise<{ teams: { id: string; name: string; type?: string; free: boolean }[]; xcode: boolean; xcodeVersion?: string; minIos?: string }> {
     return this.request('GET', '/v1/ios/wda-teams');

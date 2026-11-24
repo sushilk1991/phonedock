@@ -811,6 +811,7 @@ type IosConnector = {
   discover: () => Promise<unknown[]>;
   wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string }, p?: (l: string) => void) => Promise<unknown>;
   wdaTeams: () => Promise<unknown>;
+  wdaStop: (udid: string) => Promise<{ udid: string; stopped: boolean }>;
 };
 function iosBackend(): Backend & IosConnector {
   const b = backends.find((x) => x.id === 'ios-device') as (Backend & Partial<IosConnector>) | undefined;
@@ -868,6 +869,15 @@ r.post('/v1/ios/wda-setup', async (c) => {
     return res;
   }, `ios-device:${udid}`);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
+});
+// Stop Control: stop WebDriverAgent and its supervision; the phone stays paired and listed.
+r.post('/v1/ios/wda-stop', async (c) => {
+  assertPhysicalAllowed('wda-stop');
+  const body = await c.body(); if (!body.udid) throw badRequest('udid required');
+  const res = await iosBackend().wdaStop(String(body.udid));
+  uiCache.delete(`ios-device:${res.udid}`);
+  invalidateDevices();
+  return { ok: true, ...res };
 });
 // Reads Xcode's signed-in teams only (no phone), so a filtered test service answers it too.
 r.get('/v1/ios/wda-teams', async () => iosBackend().wdaTeams());

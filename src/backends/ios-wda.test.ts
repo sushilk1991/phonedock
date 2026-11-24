@@ -81,6 +81,10 @@ test('chooseTeam: none → sign in (naming the API key), one → it, several →
   assert.match(several.detail!, new RegExp(`${TEAM_A}.*${TEAM_B}|${TEAM_B}.*${TEAM_A}`));
   assert.deepEqual(chooseTeam([a, b], { team: TEAM_B }), { id: TEAM_B, free: false, name: 'Beta Labs' });
 
+  // The team this phone used last (set up before, or stopped) needs no new choice; one Xcode no longer has does.
+  assert.deepEqual(chooseTeam([a, b], { remembered: TEAM_B }), { id: TEAM_B, free: false, name: 'Beta Labs' });
+  assert.throws(() => chooseTeam([a, b], { remembered: 'ZZZZZZZZZZ' }), (e: PhoneDockError) => e.code === 'team_required');
+  assert.deepEqual(chooseTeam([a, b], { team: TEAM_A, remembered: TEAM_B }).id, TEAM_A, 'an explicit team wins');
   assert.throws(() => chooseTeam([a], { team: 'nope' }), (e: PhoneDockError) => e.code === 'bad_request');
   assert.throws(() => chooseTeam([a], { team: TEAM_B }), (e: PhoneDockError) => e.code === 'team_unknown');
   assert.throws(() => chooseTeam([], { team: TEAM_B }), (e: PhoneDockError) => e.code === 'xcode_account_missing');
@@ -242,6 +246,28 @@ class FakeChild extends EventEmitter implements ChildLike {
     setImmediate(() => this.emit('close', code));
   }
 }
+
+test('progress says each step once: signing several targets, several test suites starting', async () => {
+  const kids: FakeChild[] = [];
+  const spawn = () => { const k = new FakeChild(); kids.push(k); return k; };
+  const progress: string[] = [];
+  const plan = { project: '/b/src/WebDriverAgent.xcodeproj', derivedData: '/b/DD', destination: `id=${UDID}`, team: TEAM_A, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
+  const b = runBuild(spawn, plan, {}, (l) => progress.push(l));
+  for (let i = 0; i < 3; i++) { kids[0].say('Signing Identity:     "Apple Development: Example (XXXXXXXXXX)"'); kids[0].say('Provisioning Profile: "iOS Team Provisioning Profile: *"'); }
+  kids[0].say('** TEST BUILD SUCCEEDED **');
+  kids[0].exit(0);
+  await b;
+  assert.deepEqual(progress, ['Signing WebDriverAgent…', 'Provisioning profile ready', 'WebDriverAgent built']);
+
+  progress.length = 0;
+  const r = startRunner(spawn, { xctestrun: '/b/x.xctestrun', destination: `id=${UDID}`, env: {}, now: () => 1 }, (l) => progress.push(l));
+  for (let i = 0; i < 4; i++) kids[1].say(`Test Suite 'Suite ${i}' started at 2026-11-24`);
+  kids[1].say('Testing started');
+  kids[1].say('ServerURLHere->http://192.0.2.10:8100<-ServerURLHere');
+  const { runner } = await r;
+  assert.deepEqual(progress, ['Starting WebDriverAgent on the iPhone…', 'WebDriverAgent is running at http://192.0.2.10:8100']);
+  runner.kill();
+});
 
 test('startRunner resolves at ServerURLHere and keeps xcodebuild running; an early exit is classified', async () => {
   const kids: FakeChild[] = [];

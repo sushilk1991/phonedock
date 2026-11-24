@@ -67,6 +67,7 @@ Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <co
             connect --ios <ip|wda-url> [--name N] [--udid U] | discover --ios
             ios wda-setup --udid <id> [--team TEAMID] [--name N]   (older iPhones: set up control once; see docs/IPHONE-WIFI.md)
               [--api-key-path AuthKey.p8 --api-key-id KEYID --api-key-issuer ISSUER]   (instead of an Apple ID in Xcode)
+            ios wda-stop --udid <id>   (stop control; the iPhone stays paired and listed, wda-setup starts it again)
             ios wda-teams   (the signing teams Xcode is signed in to)
 Human:      handoff request <id> <reason…> [--timeout S] [--wait] | handoff ls [--state S|--all] | handoff show|wait <hid>
             handoff resolve <hid> done|cancelled [--note N]   (also: handoff done|cancel <hid>)
@@ -991,14 +992,22 @@ export async function run(argv: string[]): Promise<number> {
           : 'Xcode isn’t signed in to any team. Add your Apple ID in Xcode › Settings › Accounts, or pass an App Store Connect API key to `ios wda-setup`.');
         return 0;
       }
-      if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--name N] [--api-key-path P --api-key-id K --api-key-issuer I] | phonedock ios wda-teams');
+      if (p[1] === 'wda-stop') {
+        const udid = str(a.flags, 'udid') ?? p[2]; if (!udid) usage('Missing --udid <id>');
+        const r = await c.wdaStop(udid);
+        out(r, () => r.stopped
+          ? `Stopped control on ${udid}. The iPhone stays paired and listed (screenshots, apps, installs). \`phonedock ios wda-setup --udid ${udid}\` starts it again with the same build.`
+          : `PhoneDock wasn’t running control on ${udid}; nothing to stop.`);
+        return 0;
+      }
+      if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--name N] [--api-key-path P --api-key-id K --api-key-issuer I] | phonedock ios wda-stop --udid <id> | phonedock ios wda-teams');
       const udid = str(a.flags, 'udid') ?? p[2]; if (!udid) usage('Missing --udid <id>');
       const job = await c.wdaSetup(udid, {
         team: str(a.flags, 'team'), destination: str(a.flags, 'destination'), name: str(a.flags, 'name'),
         apiKeyPath: str(a.flags, 'apiKeyPath'), apiKeyId: str(a.flags, 'apiKeyId'), apiKeyIssuerId: str(a.flags, 'apiKeyIssuer') ?? str(a.flags, 'apiKeyIssuerId'),
         wait: wantWait(a), onProgress: progressPrinter(quiet),
       });
-      out(job, () => job.state === 'done' ? `WebDriverAgent running at ${(job.result as { wdaUrl?: string })?.wdaUrl}. PhoneDock keeps it running (after reboots and restarts too); \`phonedock disconnect ios-device:${udid}\` stops that.` : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
+      out(job, () => job.state === 'done' ? `WebDriverAgent running at ${(job.result as { wdaUrl?: string })?.wdaUrl}. PhoneDock keeps it running (after reboots and restarts too); \`phonedock ios wda-stop --udid ${udid}\` stops it.` : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
       return job.state === 'failed' ? 1 : 0;
     }
     case 'pair': {
