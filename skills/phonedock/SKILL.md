@@ -35,6 +35,11 @@ may show them as `mcp__phonedock__get_ui` or similar). No MCP tools? Use the CLI
    `create_device backend="ios-simulator" name="pdtest-agent" profile="<id from list_profiles>" boot=true`
    (Android: `backend="android-emulator"`, e.g. `profile="pixel_9"`; `list_os_images` shows installed images).
    A stopped one: `boot_device`. Long operations return a job id when they outlast `wait_seconds`: poll `get_job`.
+   A **sleeping** one (`list_devices` says `sleeping: memory freed…`): PhoneDock stopped it after it sat idle to free
+   its memory. Just use it: your first call wakes it, usually where it left off (about 5 s; the result ends with
+   `Woke <name> (5.1 s).`). If it says `started fresh; its previous screen is gone`, its apps and data are there but
+   not what was open, and a tap or swipe that woke it came back unsent: read the screen again before any input.
+   Never create another device because one is sleeping.
 2. **Read the screen:** `get_ui`. One line per element: `e12 Button "Sign in" @(270,605) 120x40 [clickable]`.
    A `SYSTEM PROMPT:` line means a dialog is up (answer with `handle_alert action="accept"|"dismiss"|"button=Allow Once"`);
    `NEEDS A HUMAN?` means call `request_human`. On Android an `Over the screen:` line names what covers the app
@@ -123,6 +128,8 @@ Inspect first (`get_ui`) when the flow is unfamiliar or branches. `batch` can't 
 - **Timeout**: stop and tell the user what you need them for.
 
 ## Leases
+
+A lease you hold keeps the device awake (idle sleep never stops a phone someone holds); release it when you are done.
 
 `acquire_device` gives you exclusive input on a device; others get `lease_conflict` naming who holds it. If it's
 another agent: wait, or use another device. If it's "the person at the Mac": they took over; wait, or

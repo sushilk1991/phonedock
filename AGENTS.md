@@ -15,4 +15,6 @@
 - Run your own daemon on a spare port with a filter, so it only sees your test devices:
   `PHONEDOCK_PORT=<port> PHONEDOCK_DEVICE_FILTER=pdtest- ./bin/phonedock daemon start`. Pass the same `PHONEDOCK_PORT`
   to every CLI, SDK and MCP call. Leave the default daemon on 47420 alone, because the Mac app uses it.
+- Idle sleep: only the app's daemon (47420) puts phones to sleep and wakes them. Yours does only with
+  `PHONEDOCK_IDLE_SLEEP=<duration>` (then the app's may too: it sees every device, your use counts there).
 - Always pass `-s <serial>` to adb, and never `adb connect` to network addresses.

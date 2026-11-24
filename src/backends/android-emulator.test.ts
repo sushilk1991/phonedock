@@ -177,3 +177,21 @@ test('resolveDisguiseBoot: cold miss boots transient stock patcher, warm boot sk
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('resumedFrom: the same guest at least as old as at the save; not a cold boot or an older quick-boot state', async () => {
+  const { resumedFrom } = await import('./android-emulator.ts');
+  const saved = { bootId: 'ec09a1c4-9305-482d-9159-ecd5c7d1b1bb', uptimeSec: 121.7 };
+  assert.equal(resumedFrom({ bootId: saved.bootId, uptimeSec: 136.2 }, saved), true);
+  assert.equal(resumedFrom({ bootId: saved.bootId, uptimeSec: 121.1 }, saved), true, 'within a second');
+  assert.equal(resumedFrom({ bootId: saved.bootId, uptimeSec: 88 }, saved), false, 'an older quick-boot state');
+  assert.equal(resumedFrom({ bootId: '00000000-0000-0000-0000-000000000000', uptimeSec: 9 }, saved), false, 'a cold boot');
+  assert.equal(resumedFrom({}, saved), false, 'unreadable');
+});
+
+test('stream: the wrapper passes on whether the display is off (idle sleep reads it)', async () => {
+  const { backend } = await import('./android-emulator.ts');
+  const s = backend.stream!('pdtest-nonexistent-avd', { maxSize: 720 });
+  assert.equal(typeof s.asleep, 'function');
+  assert.equal(s.asleep!(), false);
+  s.stop();
+});

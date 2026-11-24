@@ -593,7 +593,7 @@ final class SharedDate: @unchecked Sendable {
 extension DaemonClient {
     /// `GET /v1/devices/:id/video` (streamed; no overall timeout).
     func videoRequest(_ id: String, maxSize: Int) throws -> URLRequest {
-        var r = try request("GET", dev(id, "/video"), query: ["maxSize": String(maxSize)], timeout: 8)
+        var r = try request("GET", dev(id, "/video"), query: ["maxSize": String(maxSize)], timeout: 8, observe: true)
         r.setValue(VideoWire.contentType, forHTTPHeaderField: "Accept")
         return r
     }

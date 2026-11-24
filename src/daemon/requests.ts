@@ -79,7 +79,7 @@ function replay(r: RequestReceipt): unknown {
 /** Run once when a client supplied an ID. Duplicate calls join; after restart the write-ahead receipt wins. */
 export async function withRequestReceipt(c: Ctx, run: () => Promise<unknown>): Promise<unknown> {
   const raw = c.req?.headers?.['x-phonedock-request-id'];
-  if (raw === undefined) return run(); // old clients retain their response shape
+  if (raw === undefined) { await c.beforeRun?.(); return run(); } // old clients retain their response shape
   if (typeof raw !== 'string') throw new PhoneDockError('Invalid request ID', 'bad_request', 400, undefined, undefined, 'not_sent');
   const requestId = checkRequestId(raw);
   const body = c.body ? await c.body() : {};
@@ -91,13 +91,17 @@ export async function withRequestReceipt(c: Ctx, run: () => Promise<unknown>): P
     return pending.get(path) ?? replay(prior);
   }
   prune();
+  // A new execution: wake a sleeping phone first. Before the receipt, so a wake that fails (nothing sent) isn't what
+  // this request ID answers for the next 24 h.
+  await c.beforeRun?.();
   const receipt: RequestReceipt = { requestId, fingerprint, status: 'running', delivery: 'unknown', startedAt: new Date().toISOString(), recorderPid: process.pid };
   try { writeFileSync(path, JSON.stringify(receipt), { flag: 'wx', mode: 0o600 }); }
   catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
       const winner = read(path);
       if (winner && winner.fingerprint !== fingerprint) throw new PhoneDockError('This request ID was used with different input', 'request_id_conflict', 409, undefined, undefined, 'not_sent');
-      return replay(winner ?? receipt);
+      // A duplicate that got this far alongside it (both passed the first lookup while the wake gate ran) joins it.
+      return pending.get(path) ?? replay(winner ?? receipt);
     }
     throw new PhoneDockError('Could not record input delivery before sending', 'request_store_failed', 503, undefined, undefined, 'not_sent');
   }

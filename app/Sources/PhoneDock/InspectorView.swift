@@ -425,9 +425,18 @@ struct InfoTab: View {
                         ProgressView().controlSize(.mini)
                         Text(operation)
                     } else {
-                        StatusDot(status: PDStatus(deviceState: device.state))
-                        Text(PDStatus(deviceState: device.state).label)
+                        StatusDot(status: PDStatus(device: device))
+                        Text(PDStatus(device: device).label)
                     }
+                }
+            }
+            if device.isRunning, let failure = device.sleepFailure {
+                GridRow {
+                    label("Idle sleep")
+                    Text("Couldn’t go to sleep, so it keeps running: \(failure.message ?? "the save failed")")
+                        .foregroundStyle(Theme.Ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .testAnchor("sleep-failure")
                 }
             }
             if let who = device.controllerName {
@@ -647,7 +656,7 @@ struct InfoTab: View {
         guard device.can("snapshot"), let c = model.client else { return }
         if snapState != .loaded { snapState = .loading }
         do {
-            let list = try await c.get([Snapshot].self, c.dev(device.id, "/snapshots"))
+            let list = try await c.get([Snapshot].self, c.dev(device.id, "/snapshots"), observe: true)
             snaps = list.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") }
             snapState = .loaded
         } catch let e as APIError where e.status == 501 || e.code == "not_supported" {
@@ -714,7 +723,7 @@ struct InfoTab: View {
         Task {
             var obj: [String: JSONValue] = [:]
             if let data = try? JSONEncoder().encode(d), let v = try? JSONDecoder().decode(JSONValue.self, from: data) { obj["device"] = v }
-            if let c = client, let info = try? await c.get(JSONValue.self, c.dev(d.id, "/info"), timeout: 15) { obj["info"] = info }
+            if let c = client, let info = try? await c.get(JSONValue.self, c.dev(d.id, "/info"), timeout: 15, observe: true) { obj["info"] = info }
             let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             if let data = try? enc.encode(JSONValue.object(obj)) { Pasteboard.copy(String(decoding: data, as: UTF8.self)) }
             copiedDiag = true
@@ -887,7 +896,7 @@ struct AppsTab: View {
         guard available, device.isRunning, let c = model.client else { apps = []; state = .idle; return }
         if state != .loaded { state = .loading }
         do {
-            apps = try await c.get([AppInfo].self, c.dev(device.id, "/apps"), query: showSystem ? ["system": "1"] : [:])
+            apps = try await c.get([AppInfo].self, c.dev(device.id, "/apps"), query: showSystem ? ["system": "1"] : [:], observe: true)
                 .sorted { Self.name($0).lowercased() < Self.name($1).lowercased() }
             state = .loaded
         } catch {
@@ -1070,7 +1079,7 @@ struct ElementsTab: View {
         guard available, device.isRunning, let c = model.client else { lines = []; state = .idle; return }
         state = .loading
         do {
-            let t = try await c.text(c.dev(device.id, "/ui"), query: ["format": "text"])
+            let t = try await c.text(c.dev(device.id, "/ui"), query: ["format": "text"], observe: true)
             lines = t.split(separator: "\n", omittingEmptySubsequences: true).map(String.init).filter { !$0.hasPrefix("#") }
             rows = lines.map(ElementRow.init)
             Self.lastTree[device.id] = lines
@@ -1458,11 +1467,11 @@ struct LogsTab: View {
             case .app(let id, let name): scopedApp = AppInfo(id: id, name: name)
             case .front:
                 struct Front: Decodable { var app: AppInfo? }
-                scopedApp = try? await c.get(Front.self, c.dev(device.id, "/foreground"), timeout: 15).app
+                scopedApp = try? await c.get(Front.self, c.dev(device.id, "/foreground"), timeout: 15, observe: true).app
                 guard scopedApp != nil else { text = ""; appliedFilter = f; state = .loaded; return }
             }
             if let a = scopedApp { q["app"] = a.id }
-            let t = try await c.text(c.dev(device.id, "/logs"), query: q)
+            let t = try await c.text(c.dev(device.id, "/logs"), query: q, observe: true)
             text = t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : t
             appliedFilter = f
             state = .loaded
@@ -1473,7 +1482,7 @@ struct LogsTab: View {
 
     private func loadApps() async {
         guard device.can("logs"), device.isRunning, let c = model.client else { return }
-        let list = (try? await c.get([AppInfo].self, c.dev(device.id, "/apps"), timeout: 30)) ?? []
+        let list = (try? await c.get([AppInfo].self, c.dev(device.id, "/apps"), timeout: 30, observe: true)) ?? []
         apps = list.filter { $0.system != true }.sorted { ($0.name ?? $0.id).localizedStandardCompare($1.name ?? $1.id) == .orderedAscending }
     }
 }
@@ -1616,7 +1625,7 @@ enum ActivitySentence {
         switch kind {
         case "snapshot.save": return Mark(symbol: "square.and.arrow.down", tint: quiet)
         case "snapshot.restore": return Mark(symbol: "clock.arrow.circlepath", tint: quiet)
-        case "device.start", "device.shutdown": return Mark(symbol: "power", tint: quiet)
+        case "device.start", "device.shutdown", "device.sleep", "device.wake": return Mark(symbol: "power", tint: quiet)
         case "device.restart": return Mark(symbol: "arrow.clockwise", tint: quiet)
         case "device.crashed", "device.disconnected": return Mark(symbol: "exclamationmark.triangle.fill", tint: Theme.Status.error)
         default: return nil
@@ -1694,6 +1703,10 @@ enum ActivitySentence {
         case "device.restart": return "Restarted the device"
         case "device.restart_failed": return "Couldn’t restart the device: \(a["error"]?.stringValue ?? "it failed")"
         case "device.crashed": return a["summary"]?.stringValue ?? "The device stopped unexpectedly"
+        case "device.sleep": return a["summary"]?.stringValue ?? "Went to sleep after sitting unused (memory freed)"
+        case "device.wake": return a["summary"]?.stringValue ?? "Woke from sleep"
+        case "device.sleep_failed": return a["summary"]?.stringValue ?? "Couldn’t go to sleep, so it keeps running"
+        case "device.wake_failed": return "Couldn’t wake the device: \(a["error"]?.stringValue ?? "it failed")"
         case "device.disconnected": return a["summary"]?.stringValue ?? "The device disconnected"
         case "appData.export": return "Saved app data for \(app)"
         case "appData.import": return "Restored app data for \(app)"
@@ -1803,7 +1816,7 @@ struct ActivityTab: View {
     private func load() async {
         guard let c = model.client else { return }
         do {
-            let entries = try await c.get([JSONValue].self, c.dev(device.id, "/actions"), query: ["limit": "200"])
+            let entries = try await c.get([JSONValue].self, c.dev(device.id, "/actions"), query: ["limit": "200"], observe: true)
             let next = Self.group(entries)
             if next != groups { groups = next }
             state = .loaded

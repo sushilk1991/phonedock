@@ -93,12 +93,18 @@ function write(file: string, text: string) {
   writeFileSync(file, text);
 }
 
-/** The device to test on: --device, $PHONEDOCK_DEVICE, else the only running device (of --platform). */
-async function testDevice(c: PhoneDockClient, q: string | undefined, platform: string | undefined): Promise<Device> {
+/** The device to test on: --device, $PHONEDOCK_DEVICE, else the only running device (of --platform), else the only
+ *  sleeping one (idle sleep: using it wakes it). */
+export async function testDevice(c: PhoneDockClient, q: string | undefined, platform: string | undefined): Promise<Device> {
   const want = q ?? process.env.PHONEDOCK_DEVICE;
   if (want) return c.resolveDevice(want);
   const running = (await c.devices({ state: 'running', ...(platform ? { platform } : {}) }));
   if (running.length === 1) return running[0];
+  if (!running.length) {
+    const sleeping = (await c.devices(platform ? { platform } : {})).filter((d) => d.sleep);
+    if (sleeping.length === 1) return sleeping[0];
+    if (sleeping.length > 1) throw new FlowError(`Several phones are sleeping (${sleeping.map((d) => d.name).join(', ')}): pass --device <id>`);
+  }
   throw new FlowError(running.length
     ? `Several devices are running (${running.map((d) => d.name).join(', ')}): pass --device <id>`
     : `No ${platform ? `${platform} ` : ''}device is running: boot one (phonedock boot <id>) or pass --device <id>`);

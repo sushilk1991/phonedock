@@ -760,6 +760,44 @@ test('MCP list_runs and get_run support summary, public-safe md, and json format
   } finally { await s.close(); }
 });
 
+test('a wake notice is its own content item, on the call that woke the phone only (#16)', async () => {
+  const fake = androidFake({ width: 100, height: 200 }, { width: 100, height: 200 }, []);
+  let releaseDoctor!: () => void;
+  const gate = new Promise<void>((r) => { releaseDoctor = r; });
+  fake.environment = async () => { (fake as { onWake?: (w: unknown) => void }).onWake?.({ ms: 100, name: 'pdtest-x' }); return { platform: 'android', controls: [] }; };
+  fake.doctor = async () => { await gate; return { ok: true, checks: [] }; };
+  const { client, close } = await connect(fake);
+  try {
+    const raw = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args }) as Promise<{ content: { type: string; text?: string }[] }>;
+    const doctor = raw('doctor', {});
+    const env = await raw('device_environment', { device: 'pdtest-x' });
+    releaseDoctor();
+    const doc = await doctor;
+    assert.doesNotThrow(() => JSON.parse(env.content[0].text!), 'the JSON result is untouched');
+    assert.ok(env.content.some((x) => x.text === 'Woke pdtest-x (0.1 s).'), JSON.stringify(env.content));
+    assert.doesNotThrow(() => JSON.parse(doc.content[0].text!));
+    assert.ok(!doc.content.some((x) => /Woke/.test(x.text ?? '')), 'not on a call that never touched the phone');
+  } finally { await close(); }
+});
+
+test('implicit device: the only running phone, as before idle sleep; a sleeping one only when none runs', async () => {
+  const mk = (n: string, state: string, sleep: unknown) => ({ id: `android-emulator:${n}`, nativeId: n, name: n, backend: 'android-emulator', platform: 'android',
+    kind: 'virtual', state, managed: true, capabilities: [], sleep, screen: { width: 1080, height: 2400, scale: 1 } }) as unknown as Device;
+  for (const [list, want] of [[[mk('pdtest-run', 'running', null), mk('pdtest-zzz', 'stopped', { since: '', reason: 'idle' })], 'android-emulator:pdtest-run'],
+    [[mk('pdtest-zzz', 'stopped', { since: '', reason: 'idle' })], 'android-emulator:pdtest-zzz']] as const) {
+    const calls: unknown[][] = [];
+    const fake: Fake = { calls, owner: 'test', devices: async () => list, resolveDevice: async () => list[0],
+      screen: async () => ({ width: 1080, height: 2400, scale: 1 }),
+      ui: async (id: string): Promise<UiTree> => { calls.push(['ui', id]); return { source: 'accessibility', screen: { width: 1080, height: 2400, scale: 1 }, root: [], capturedAt: '' }; } };
+    const s = await connect(fake);
+    try {
+      const r = await s.call('get_ui');
+      assert.equal(r.isError, false, r.text);
+      assert.deepEqual(calls.find((c) => c[0] === 'ui'), ['ui', want]);
+    } finally { await s.close(); }
+  }
+});
+
 test('iphone_control: set_up and stop act on the named real iPhone by UDID; a failed setup shows its cause; simulators are refused', async () => {
   const phone = { id: 'ios-device:00008020-0000AAAA0000BBBB', nativeId: '00008020-0000AAAA0000BBBB', backend: 'ios-device', name: 'Old iPhone', platform: 'ios', state: 'running' };
   const sim = { ...phone, id: 'ios-simulator:X', nativeId: 'X', backend: 'ios-simulator', name: 'Sim' };

@@ -48,7 +48,9 @@ struct DaemonClient: Sendable {
         id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? id
     }
 
-    func request(_ method: String, _ path: String, query: [String: String] = [:], body: Encodable? = nil, json: [String: Any]? = nil, timeout: TimeInterval = 60) throws -> URLRequest {
+    /// `observe`: a background read the person didn’t ask for (polling, the inspector, live views). It never keeps a
+    /// phone awake or wakes a sleeping one (idle sleep). A read the person asked for (Save Screenshot) is not one.
+    func request(_ method: String, _ path: String, query: [String: String] = [:], body: Encodable? = nil, json: [String: Any]? = nil, timeout: TimeInterval = 60, observe: Bool = false) throws -> URLRequest {
         guard var comps = URLComponents(string: base.absoluteString + path) else {
             throw APIError(status: 0, code: "bad_url", message: "Bad path \(path)")
         }
@@ -58,6 +60,7 @@ struct DaemonClient: Sendable {
         req.timeoutInterval = timeout
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue(AppIdentity.owner, forHTTPHeaderField: "X-PhoneDock-Owner")
+        if observe && method == "GET" { req.setValue("1", forHTTPHeaderField: "X-PhoneDock-Observe") }
         if let body {
             req.httpBody = try JSONEncoder().encode(AnyEncodable(body))
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -71,8 +74,8 @@ struct DaemonClient: Sendable {
         return req
     }
 
-    func raw(_ method: String, _ path: String, query: [String: String] = [:], body: Encodable? = nil, json: [String: Any]? = nil, timeout: TimeInterval = 60) async throws -> (Data, HTTPURLResponse) {
-        let req = try request(method, path, query: query, body: body, json: json, timeout: timeout)
+    func raw(_ method: String, _ path: String, query: [String: String] = [:], body: Encodable? = nil, json: [String: Any]? = nil, timeout: TimeInterval = 60, observe: Bool = false) async throws -> (Data, HTTPURLResponse) {
+        let req = try request(method, path, query: query, body: body, json: json, timeout: timeout, observe: observe)
         let (data, resp) = try await Self.session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw APIError(status: 0, code: "bad_response", message: "No HTTP response") }
         if !(200..<300).contains(http.statusCode) {
@@ -84,8 +87,8 @@ struct DaemonClient: Sendable {
         return (data, http)
     }
 
-    func get<T: Decodable>(_ type: T.Type, _ path: String, query: [String: String] = [:], timeout: TimeInterval = 60) async throws -> T {
-        let (data, _) = try await raw("GET", path, query: query, timeout: timeout)
+    func get<T: Decodable>(_ type: T.Type, _ path: String, query: [String: String] = [:], timeout: TimeInterval = 60, observe: Bool = false) async throws -> T {
+        let (data, _) = try await raw("GET", path, query: query, timeout: timeout, observe: observe)
         return try JSONDecoder().decode(T.self, from: data)
     }
 
@@ -127,8 +130,8 @@ struct DaemonClient: Sendable {
         return cur
     }
 
-    func text(_ path: String, query: [String: String] = [:]) async throws -> String {
-        let (data, _) = try await raw("GET", path, query: query)
+    func text(_ path: String, query: [String: String] = [:], observe: Bool = false) async throws -> String {
+        let (data, _) = try await raw("GET", path, query: query, observe: observe)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -149,7 +152,7 @@ struct DaemonClient: Sendable {
         let data: Data
         let http: HTTPURLResponse
         do {
-            var req = try request("GET", dev(id, "/frame"), query: ["maxSize": String(maxSize)], timeout: 15)
+            var req = try request("GET", dev(id, "/frame"), query: ["maxSize": String(maxSize)], timeout: 15, observe: true)
             if let etag { req.setValue(etag, forHTTPHeaderField: "If-None-Match") }
             let (body, response) = try await Self.session.data(for: req)
             guard let response = response as? HTTPURLResponse else { throw APIError(status: 0, code: "bad_response", message: "No HTTP response") }

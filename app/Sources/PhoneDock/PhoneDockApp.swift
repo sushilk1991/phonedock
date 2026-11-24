@@ -918,7 +918,7 @@ struct DeviceRow: View {
             }
             Spacer(minLength: Theme.Space.xs)
             trailing
-            StatusDot(status: PDStatus(deviceState: device.state))
+            StatusDot(status: PDStatus(device: device))
         }
         .padding(.vertical, Theme.Space.xxs)
         .accessibilityElement(children: .combine)
@@ -957,6 +957,13 @@ struct DeviceRow: View {
             OnSelection(plain: Theme.Status.errorText, selected: nil) { Text("Needs attention") }
         case "unauthorized": Text("Allow USB debugging").foregroundStyle(.secondary)
         case "offline": Text("Not connected").foregroundStyle(.secondary)
+        case "stopped" where device.isSleeping:
+            ViewThatFits(in: .horizontal) {
+                Text(SleepWords.state)
+                Text(SleepWords.short)
+            }
+            .foregroundStyle(.secondary)
+            .help(SleepWords.state)
         default:
             let os = device.pdFriendlyOS ?? device.pdFriendlyModel ?? device.platformName
             Text(device.pdIsBeta ? os + " · Beta" : os).foregroundStyle(.secondary)

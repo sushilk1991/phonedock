@@ -10,6 +10,9 @@ export interface Ctx {
   owner: string;
   body: (limit?: number) => Promise<any>;
   q: (k: string) => string | undefined;
+  /** Idle sleep's wake for an input route with a request receipt: run only for a new execution, before its receipt is
+   *  written (src/daemon/idle-sleep.ts, requests.ts). A resent request answered from its receipt needs no wake. */
+  beforeRun?: () => Promise<void>;
 }
 export type Handler = (c: Ctx) => Promise<unknown> | unknown;
 

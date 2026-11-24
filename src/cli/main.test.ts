@@ -124,6 +124,15 @@ test('parseLaunchFlags: --arg (including leading dash), --extra, --args-json, --
   }
 });
 
+test('devices: a sleeping phone says so, and that using it wakes it', () => {
+  const d = { id: 'android-emulator:pdtest-s24', backend: 'android-emulator', nativeId: 'pdtest-s24', name: 'pdtest-s24', platform: 'android', kind: 'virtual',
+    state: 'stopped', managed: true, capabilities: [], sleep: { since: '2026-11-24T10:00:00.000Z', reason: 'idle' } } as Device;
+  const out = devicesTable([d]);
+  assert.match(out, /stopped \(sleeping\)/);
+  assert.match(out, /pdtest-s24 is sleeping: memory freed; any use wakes it, usually where it left off \(no need to start or create another\)\./);
+  assert.doesNotMatch(devicesTable([{ ...d, sleep: null }]), /sleeping/);
+});
+
 test('devices: an older iPhone shared on the Wi-Fi (or not checkable) is said under the table, every time', () => {
   const phone = { ...base, nativeId: '00008020-0000AAAA0000BBBB', name: 'pdtest-old' };
   const shared = devicesTable([{ ...phone, meta: { wdaSharing: 'shared', wdaSharedUrl: 'http://192.0.2.10:8100' } }]);

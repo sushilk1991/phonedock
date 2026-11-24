@@ -203,7 +203,10 @@ enum Theme {
 
 /// What a dot/badge means. Colour is never the only signal: each case has a shape or symbol and a label.
 enum PDStatus: Equatable {
-    case running, booting, stopping, stopped, error, agent, human, handoff, recording
+    case running, booting, stopping, stopped, sleeping, error, agent, human, handoff, recording
+
+    /// A stopped phone PhoneDock put to sleep reads "Sleeping", not "Off".
+    init(device: Device) { self = device.isSleeping ? .sleeping : PDStatus(deviceState: device.state) }
 
     init(deviceState: String) {
         switch deviceState {
@@ -219,7 +222,7 @@ enum PDStatus: Equatable {
         switch self {
         case .running: return Theme.Status.running
         case .booting, .stopping: return Theme.Status.booting
-        case .stopped: return Theme.Ink.secondary
+        case .stopped, .sleeping: return Theme.Ink.secondary
         case .error: return Theme.Status.error
         case .agent: return Theme.Status.agent
         case .human: return Theme.Status.human
@@ -235,7 +238,7 @@ enum PDStatus: Equatable {
         case .human: return Theme.Accent.text
         case .handoff: return Theme.Status.handoffText
         case .recording: return Theme.Ink.primary
-        case .running, .booting, .stopping, .stopped: return Theme.Ink.secondary
+        case .running, .booting, .stopping, .stopped, .sleeping: return Theme.Ink.secondary
         }
     }
 
@@ -254,6 +257,7 @@ enum PDStatus: Equatable {
         case .booting: return "Starting…"
         case .stopping: return "Shutting down…"
         case .stopped: return "Off"
+        case .sleeping: return SleepWords.state
         case .error: return "Needs attention"
         case .agent: return "Agent in control"
         case .human: return "You’re in control"
@@ -273,7 +277,7 @@ struct StatusDot: View {
 
     var body: some View {
         ZStack {
-            if status == .stopped {
+            if status == .stopped || status == .sleeping {
                 Circle().strokeBorder(status.fill, lineWidth: 1.5)
             } else {
                 Circle().fill(status.fill)

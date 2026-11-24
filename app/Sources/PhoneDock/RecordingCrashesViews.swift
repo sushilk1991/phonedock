@@ -197,7 +197,7 @@ struct CrashesTab: View {
         guard let c = model.client else { return }
         state = .loading
         do {
-            let list = try await c.get([CrashReport].self, c.dev(device.id, "/crashes"), query: ["limit": "20"], timeout: 60)
+            let list = try await c.get([CrashReport].self, c.dev(device.id, "/crashes"), query: ["limit": "20"], timeout: 60, observe: true)
             rows = list.map { CrashRow(report: $0, date: $0.time.flatMap(ISO8601DateFormatter.flexible)) }
             state = .loaded
         } catch let e as APIError where e.status == 501 || e.code == "not_supported" {
@@ -298,7 +298,7 @@ struct CrashReportSheet: View {
         }
         loadingFull = full; defer { loadingFull = false }
         do {
-            let raw = try await c.text(c.dev(device.id, "/crashes/\(DaemonClient.enc(crash.id))"), query: full ? ["full": "1"] : [:])
+            let raw = try await c.text(c.dev(device.id, "/crashes/\(DaemonClient.enc(crash.id))"), query: full ? ["full": "1"] : [:], observe: true)
             if let obj = try? JSONDecoder().decode(JSONValue.self, from: Data(raw.utf8)), let t = obj["text"]?.stringValue {
                 text = t
                 if case .bool(let b)? = obj["truncated"] { truncated = b } else { truncated = false }

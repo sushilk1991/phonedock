@@ -14,6 +14,8 @@ import './routes-trace.ts'; // performance traces (same)
 import './routes-notes.ts'; // app notes (same)
 import './routes-environment.ts';
 import './routes-diagnostics.ts';
+import './routes-idle.ts'; // GET/POST /v1/idle-sleep
+import { enterRequest, isSleeping, startIdleSleep } from './idle-sleep.ts';
 import { initComponents, stopComponents } from './routes-components.ts';
 import { refreshAgentSkills } from './skills.ts';
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
@@ -51,8 +53,13 @@ const server = createServer(async (req, res) => {
     };
     const started = performance.now();
     let out: unknown;
-    try { out = await m.h(ctx); }
-    finally {
+    let leave: (() => void) | undefined;
+    try {
+      // Idle sleep: a request that uses a device counts as use, and wakes it first if it is asleep (idle-sleep.ts).
+      leave = await enterRequest(ctx, method, m.path, (m.h as { receipt?: boolean }).receipt === true);
+      out = await m.h(ctx);
+    } finally {
+      leave?.();
       const elapsed = performance.now() - started;
       metrics.record('routes', `${method} ${m.path}`, elapsed);
       if (!res.headersSent && /\/(frame|screenshot|input)$/.test(m.path)) res.setHeader('Server-Timing', `route;dur=${elapsed.toFixed(2)}`);
@@ -78,6 +85,7 @@ server.on('error', (e) => { console.error(`[phonedockd] listen failed: ${(e as E
 server.listen(port, '127.0.0.1', () => {
   console.log(`[phonedockd] v${VERSION} listening on http://127.0.0.1:${port} (pid ${process.pid}); backends: ${backends.map((b) => b.id).join(', ')}`);
   void autoStart();
+  startIdleSleep();
   refreshAgentSkills(port).catch((e) => console.error(`[phonedockd] skill refresh failed: ${(e as Error).message}`));
 });
 
@@ -87,7 +95,7 @@ async function autoStart() {
   const devs = await listDevices(true);
   for (const r of recs) {
     const d = devs.find((x) => x.id === r.id);
-    if (!d || d.state !== 'stopped') continue;
+    if (!d || d.state !== 'stopped' || isSleeping(r.id)) continue;   // a sleeping phone wakes when it is used
     let b; try { b = getBackend(r.backend); } catch { continue; }
     if (!b.boot) continue;
     console.log(`[phonedockd] autoStart: booting ${r.id}`);

@@ -4,7 +4,7 @@ import { createServer, type RequestListener } from 'node:http';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PhoneDockApiError, PhoneDockClient } from './client.ts';
+import { PhoneDockApiError, PhoneDockClient, parseWokeHeader, wakeNoticeText } from './client.ts';
 
 test('canonical device resolution bypasses aggregate discovery; names wait for initial inventory', async () => {
   const c = new PhoneDockClient({ autoStart: false });
@@ -258,4 +258,14 @@ test('components: lists status and installs component job', async () => {
     assert.equal(job.state, 'done');
     assert.deepEqual(seen, ['GET /v1/components', 'POST /v1/components/ios-tools/install', 'GET /v1/jobs/job-comp-1']);
   });
+});
+
+test('wake notice: a phone that started fresh says its previous screen is gone (idle sleep)', () => {
+  const resumed = parseWokeHeader('7213; name=Pixel%208', '/v1/devices/android-emulator%3Apdtest-a/input');
+  assert.deepEqual(resumed, { ms: 7213, name: 'Pixel 8', deviceId: 'android-emulator:pdtest-a' });
+  assert.equal(wakeNoticeText(resumed!), 'Woke Pixel 8 (7.2 s)');
+  const fresh = parseWokeHeader('21000; name=Pixel%208; fresh=1');
+  assert.equal(fresh?.name, 'Pixel 8');
+  assert.equal(fresh?.fresh, true);
+  assert.equal(wakeNoticeText(fresh!), 'Woke Pixel 8 (21.0 s), started fresh; its previous screen is gone');
 });

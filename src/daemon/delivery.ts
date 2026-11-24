@@ -139,5 +139,6 @@ export function inputRoute(h: Handler): Handler {
       throw new PhoneDockError('Something went wrong', 'internal', 500, undefined, redactInputValue(err?.stack ?? err?.message ?? String(e), secrets), d);
     } finally { if (!released) claim?.release(); }
   };
-  return (c: Ctx) => withRequestReceipt(c, () => execute(c));
+  // Marked, so the request entry (src/daemon/main.ts) knows its idle-sleep wake runs inside the receipt (Ctx.beforeRun).
+  return Object.assign((c: Ctx) => withRequestReceipt(c, () => execute(c)), { receipt: true as const });
 }

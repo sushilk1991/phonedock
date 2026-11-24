@@ -41,6 +41,8 @@ export interface FlowResult {
 }
 export interface RunOptions {
   deviceId: string;
+  /** How often the run renews its lease (ms; default a third of the lease). Tests make it short. */
+  leaseRenewMs?: number;
   /** Default wait for elements and assertions (ms; default 10000, iOS 15000). A step's `timeout:` overrides it. */
   timeoutMs?: number;
   /** Run a failed flow again up to this many times (default 0). */
@@ -385,7 +387,8 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   if (flowIn.platform && device.platform !== flowIn.platform) return { result: { ...base, status: 'skip', message: `for ${flowIn.platform}; ${device.name} is ${device.platform}`, ms: 0 }, device };
   const os = osVersionNumber(device.osVersion);
   if (flowIn.minOS && os && compareVersions(os, flowIn.minOS) < 0) return { result: { ...base, status: 'skip', message: `needs ${device.platform} ${flowIn.minOS} or later; ${device.name} has ${os}`, ms: 0 }, device };
-  if (device.state !== 'running') return { result: { ...base, status: 'fail', message: `${device.name} is ${device.state}; boot it first (phonedock boot ${device.id})`, ms: 0 }, device };
+  // A sleeping phone (idle sleep) is usable: taking its lease below wakes it.
+  if (device.state !== 'running' && !device.sleep) return { result: { ...base, status: 'fail', message: `${device.name} is ${device.state}; boot it first (phonedock boot ${device.id})`, ms: 0 }, device };
 
   if (attempt === 1) log(`Flow: ${name} on ${device.name} (${device.osVersion ?? device.platform})`);
   const env = { ...flowIn.env, ...process.env, ...(o.env ?? {}) };
@@ -397,6 +400,7 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   const held = device.lease?.owner === c.owner;
   try { await c.lease(device.id); }
   catch (e) { return { result: { ...base, status: 'fail', message: `Could not lease ${device.name}: ${errInfo(e).message}${errInfo(e).detail ? ` (${errInfo(e).detail!.split('\n')[0]})` : ''}`, ms: Date.now() - t0 }, device }; }
+  if (device.sleep) device = await c.device(device.id).catch(() => device!);   // the lease woke it: its screen, state
 
   const ctx = new Ctx(c, device, flowIn, o);
   ctx.artifactDir = join(o.artifactsDir, `${slug(flowIn.name)}${attempts > 1 ? `-attempt${attempt}` : ''}`);
@@ -411,11 +415,26 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   };
   const results: StepResult[] = [];
   let failed: StepResult | undefined;
+  // Keep the lease for the whole run: a long `sleep` step or a slow app must not let it lapse (and an idle phone go to
+  // sleep under the flow). One renewal at a time; a failed one is tried again next time (the lease outlasts a few), but
+  // a phone someone else now holds fails the flow: what it did after that may not have been on this run's phone state.
+  const renewEvery = o.leaseRenewMs ?? 200_000;
+  let renewing: Promise<unknown> | undefined;
+  let leaseLost: string | undefined;
+  const renewTimer = setInterval(() => {
+    if (renewing || leaseLost) return;
+    renewing = c.lease(device!.id).then(() => undefined, (e) => {
+      if (errInfo(e).code === 'lease_conflict') leaseLost = errInfo(e).message ?? 'someone else holds it';
+    }).finally(() => { renewing = undefined; });
+  }, renewEvery);
+  renewTimer.unref?.();
+  const lostStep = (i: number, s: Step): StepResult => ({ index: i + 1, step: redactLaunchStep(s), description: describeStep(s), status: 'fail', ms: 0, message: `lost the lease on ${device!.name}: ${leaseLost}` });
   try {
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i]; const safeStep = redactLaunchStep(s); const desc = describeStep(s); const st = Date.now();
       if (o.signal?.aborted) { results.push({ index: i + 1, step: safeStep, description: desc, status: 'skip', ms: 0, message: 'cancelled' }); continue; }
       if (failed) { results.push({ index: i + 1, step: safeStep, description: desc, status: 'skip', ms: 0 }); continue; }
+      if (leaseLost) { failed = lostStep(i, s); results.push(failed); log(stepLine(failed, steps.length)); continue; }
       let r: StepResult;
       const record = o.captureSteps && !['assert_visible', 'assert_not_visible', 'assert_text', 'sleep', 'wait_for', 'screenshot'].includes(s.kind);
       const beforeScreenshot = record ? await capture(i + 1, 'before') : undefined;
@@ -434,6 +453,8 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
       results.push(r);
       log(stepLine(r, steps.length));
     }
+    await renewing;
+    if (leaseLost && !failed && steps.length) { failed = lostStep(steps.length - 1, steps[steps.length - 1]); failed.message = `${failed.message} (during or after the last step)`; }
     const res: FlowResult = { ...base, steps: results, ms: Date.now() - t0, status: failed ? 'fail' : 'pass', ...(failed ? { message: `step ${failed.index} (${failed.description}): ${failed.message}` } : {}) };
     if (failed) {
       const notRun = results.filter((r) => r.status === 'skip').length;
@@ -453,6 +474,7 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
     return { result: res, device, app, targetAppId };
   } finally {
     // Keep the lease through evidence capture and app provenance lookup; a different owner must not alter the device first.
+    clearInterval(renewTimer); await renewing;
     if (!held) await c.releaseLease(device.id).catch(() => {});
   }
 }

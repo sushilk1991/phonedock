@@ -86,6 +86,37 @@ export interface Device {
   handoff?: Handoff | null;      // pending human handoff (request_human); filled in by the daemon, not backends
   error?: string;
   meta?: Record<string, unknown>; // backend extras (adb serial, console port, pid, …)
+  /** Idle sleep (added in 0.7.0; docs/API.md "Idle sleep"): set while PhoneDock has put this phone to sleep after it
+   *  sat unused. `state` is then `stopped` and the phone's memory is freed; the next request that needs it running
+   *  wakes it, usually where it left off. Absent or null: not sleeping (a stopped phone without it was stopped on purpose).
+   *  Filled in by the daemon, not backends. */
+  sleep?: DeviceSleep | null;
+  /** The last time PhoneDock tried to put this phone to sleep and couldn't (it kept running, nothing was lost). Cleared
+   *  when the phone is next used, stopped or started. Filled in by the daemon. */
+  sleepFailure?: { at: string; code: string; message: string } | null;
+}
+
+/** Why and since when a phone is sleeping (Device.sleep). */
+export interface DeviceSleep { since: string; reason: 'idle' }
+
+/** What a backend saved to put a device to sleep, kept by the daemon (on disk) until the device wakes. */
+export interface SleepState {
+  at: string;                    // ISO: when it was put to sleep
+  bootId?: string;               // the guest kernel's boot id then (a cold boot gets a new one)
+  uptimeSec?: number;            // the guest's uptime then (a resumed guest is at least this old)
+  /** Which device went to sleep (Android: its AVD's path): a wake, lifecycle or snapshot call acts on no other. */
+  avdPath?: string;
+  /** Its exit save, once proven (Android: snapshot.pb's mtime). The wake resumes it only if nothing wrote the disk since. */
+  exitSave?: { mtimeMs: number };
+}
+
+/** How a device came back from sleep. `resumed: false` means it started fresh (`note` says why). */
+export interface WakeReport {
+  resumed: boolean;
+  via: 'quickboot' | 'cold';
+  note?: string;
+  /** Guest clock against the Mac's when it woke, and whether PhoneDock set it. */
+  clock?: { skewSec: number; set: boolean; error?: string };
 }
 
 export interface OsImage {
@@ -521,6 +552,8 @@ export interface FrameStream {
   stop(): void;
   /** Start capturing again at the screen's current size (after a rotation). Without it the daemon stops the stream. */
   restart?(): void;
+  /** True while the device's display is off (nothing to watch until it wakes), when the stream knows. */
+  asleep?(): boolean;
 }
 
 /** Codec of a live video stream. */
@@ -582,6 +615,21 @@ export interface Backend {
   restoreSnapshot?(nativeId: string, name: string): Promise<void>;
   deleteSnapshot?(nativeId: string, name: string): Promise<void>;
   openWindow?(nativeId: string): Promise<void>;                     // native low-latency viewer (Simulator.app / scrcpy / emulator window)
+
+  // ── idle sleep (optional, added in 0.7.0; the daemon only sleeps devices whose backend has all three) ──
+  /** Check a running device can sleep (else throw: `disk_full`, `not_found`…) and note who it is now. Changes nothing. */
+  prepareSleep?(nativeId: string): Promise<SleepState>;
+  /** Stop it the ordinary way; `saved` plus `exitSave` when that save is proven. Throws without proof it exited, and
+   *  `sleep_called_off` (still running) when `confirm`, asked just before the stop, gives a reason not to. */
+  stopForSleep?(nativeId: string, saved: SleepState, opts?: { timeoutMs?: number; confirm?: () => string | undefined }): Promise<SleepState>;
+  /** Boot it the ordinary way, with the caller's options: from its exit save only if nothing wrote the disk since, else
+   *  fresh (apps and data kept). Resolves once it has booted. */
+  wakeFromSleep?(nativeId: string, saved: SleepState, opts?: BootOptions & { onProgress?: (line: string) => void }): Promise<WakeReport>;
+  /** Throws `not_found` unless this id still names the device that went to sleep (never a same-named other). */
+  checkSleeping?(nativeId: string, saved: SleepState): Promise<void>;
+  /** Why a running device must stay awake now (its window, an adb session), if anything; `guest`: also ask the device
+   *  (input within `timeoutSec`, a test run; slower, only when otherwise due). Unknown is a reason, not an error. */
+  keepAwake?(nativeId: string, opts?: { timeoutSec?: number | null; guest?: boolean }): Promise<string | undefined>;
 
   // ── observation ────────────────────────────────────────────────────────
   screenshot(nativeId: string): Promise<Buffer>;                    // PNG, full resolution

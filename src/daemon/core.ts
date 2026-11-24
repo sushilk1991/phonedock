@@ -32,10 +32,13 @@ export function getBackend(id: string): Backend {
 // listed and can't be controlled, new devices must use the prefix, and physical phones can't be connected or
 // discovered. For test runs and CI that share a Mac with devices they must never touch.
 export const deviceFilter = process.env.PHONEDOCK_DEVICE_FILTER?.trim() || undefined;
-const filteredIds = new Set<string>();   // ids this service has listed under the filter
+/** What the latest complete scan of each backend listed under the filter (a failed or stale scan keeps what it had). */
+const filteredIds = new Set<string>();
 export function assertDeviceAllowed(id: string) {
   if (deviceFilter && !filteredIds.has(id)) throw filteredOut(id);
 }
+/** assertDeviceAllowed without the throw. */
+export function isDeviceAllowed(id: string): boolean { return !deviceFilter || filteredIds.has(id); }
 export function assertNameAllowed(name: string | undefined) {
   if (deviceFilter && !name?.startsWith(deviceFilter)) {
     throw new PhoneDockError(`Device names must start with “${deviceFilter}”`, 'bad_request', 400,
@@ -52,10 +55,16 @@ function filteredOut(id: string) {
   return new PhoneDockError("Couldn’t find the device", 'not_found', 404, ["Check the list of available devices."],
     `No device ${id} (this service only shows devices named ${deviceFilter}…)`);
 }
-function applyFilter(list: Device[]): Device[] {
+function applyFilter(list: Device[], backend?: string): Device[] {
   if (!deviceFilter) return list;
-  const out = list.filter((d) => d.name.startsWith(deviceFilter) && d.kind !== 'physical');
-  for (const d of out) filteredIds.add(d.id);
+  const prefix = deviceFilter;
+  const out = list.filter((d) => d.name.startsWith(prefix) && d.kind !== 'physical');
+  const listed = new Set(out.map((d) => d.id));
+  for (const b of backend ? [backend] : backends.map((x) => x.id)) {
+    if (!inventory.isFresh(b)) continue;
+    for (const id of [...filteredIds]) if (id.startsWith(`${b}:`) && !listed.has(id)) filteredIds.delete(id);
+  }
+  for (const d of list) if (listed.has(d.id)) filteredIds.add(d.id); else filteredIds.delete(d.id);
   return out;
 }
 
@@ -70,13 +79,19 @@ export interface ManagedRecord { id: string; backend: string; nativeId: string; 
 interface StateFile { devices: ManagedRecord[] }
 const STATE_FILE = () => join(stateDir(), 'state.json');
 export let state: StateFile = { devices: [] };
+let stateMtimeMs = -1;
+const stateFileMtime = () => { try { return statSync(STATE_FILE()).mtimeMs; } catch { return -1; } };
 export function loadState() {
+  stateMtimeMs = stateFileMtime();
   try { state = JSON.parse(readFileSync(STATE_FILE(), 'utf8')); if (!Array.isArray(state.devices)) state.devices = []; } catch { state = { devices: [] }; }
 }
+/** Another daemon on this state dir (the app's, a test one) may have renamed a device: names follow its file. */
+function followState() { if (stateFileMtime() !== stateMtimeMs) loadState(); }
 export function saveState() {
   const tmp = STATE_FILE() + '.tmp';
   writeFileSync(tmp, JSON.stringify(state, null, 2));
   renameSync(tmp, STATE_FILE());
+  stateMtimeMs = stateFileMtime();
 }
 export function record(id: string): ManagedRecord | undefined { return state.devices.find((d) => d.id === id); }
 export function upsertRecord(r: ManagedRecord) {
@@ -373,6 +388,7 @@ export function noteScreen(id: string, width?: number, height?: number) {
   if (d?.screen?.width && (d.screen.width !== width || d.screen.height !== height)) invalidateDevices();
 }
 export async function listDevices(fresh = false, backend?: string): Promise<Device[]> {
+  followState();
   if (!backend && !fresh && devCache && Date.now() - devCache.at < 2000) return applyFilter(decorate(devCache.list));
   let raw = await inventory.list(backends, { fresh, backend, ...(backend && fresh ? { waitMs: 30_000 } : {}) });
   // A read invalidated while in flight is discarded. An explicit target waits for its replacement, without
@@ -383,7 +399,7 @@ export async function listDevices(fresh = false, backend?: string): Promise<Devi
   }
   if (!backend) devCache = { at: Date.now(), list: raw };
   pruneLaunchSecrets(raw, backend);
-  const list = applyFilter(decorate(raw));
+  const list = applyFilter(decorate(raw), backend);
   refreshScreens(list);
   return list;
 }
@@ -408,8 +424,15 @@ function refreshScreens(list: Device[]) {
     }, () => undefined);
   }
 }
+/** Called for every device the daemon hands out, after its own fields (src/daemon/idle-sleep.ts adds `sleep`). */
+export const deviceDecorators: ((d: Device) => void)[] = [];
+/** What the backend itself said about `managed` (created by PhoneDock), before a record (a rename, autoStart) makes
+ *  any device read `managed: true`. */
+const backendManaged = new Map<string, boolean>();
+export function createdByPhoneDock(id: string): boolean { return backendManaged.get(id) === true; }
 function decorate(list: Device[]): Device[] {
   return list.map((d) => {
+    backendManaged.set(d.id, d.managed);
     const r = record(d.id);
     const out: Device = { ...d, lease: leaseView(d.id), handoff: pendingHandoff(d.id) };
     if (d.screen?.width && d.screen.height) out.orientation = d.screen.width > d.screen.height ? 'landscape' : 'portrait';
@@ -421,6 +444,7 @@ function decorate(list: Device[]): Device[] {
     if (out.lease && (out.state === 'stopped' || out.state === 'stopping') && out.lease.owner === HUMAN_OWNER) out.lease = null;
     const job = activeDeviceJob(d.id);
     if (job && (d.state === 'stopped' || d.state === 'offline')) out.state = job.kind === 'create' ? 'creating' : job.kind === 'boot' ? 'booting' : out.state;
+    for (const f of deviceDecorators) { try { f(out); } catch { /* best effort */ } }
     return out;
   });
 }
@@ -447,6 +471,8 @@ export function getJob(id: string): Job {
   const j = jobs.get(id); if (!j) throw new PhoneDockError("Couldn’t find the job", 'not_found', 404, undefined, `No job ${id}`); return j;
 }
 export function listJobs(): Job[] { return [...jobs.values()].reverse(); }
+/** A job (boot, create, replay, clone…) is running on the device. */
+export function deviceJobRunning(deviceId: string): boolean { return !!activeDeviceJob(deviceId); }
 function activeDeviceJob(deviceId: string): Job | undefined {
   for (const j of jobs.values()) if (j.deviceId === deviceId && j.state === 'running') return j;
   return undefined;
@@ -485,6 +511,9 @@ export function emit(event: string, data: unknown) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const c of sseClients) { try { c.write(msg); } catch { sseClients.delete(c); } }
 }
+/** Stops that are no crash although this daemon didn't make them (idle sleep: another daemon sharing the state dir
+ *  may have put the phone to sleep; src/daemon/idle-sleep.ts). */
+export const expectedStops: ((id: string) => boolean)[] = [];
 let lastSeen = new Map<string, string>();
 let lastDevices = new Map<string, Device>();
 let polling = false;
@@ -495,12 +524,12 @@ export async function pollDevices(fresh = true) {
     const seen = new Map<string, string>();
     for (const d of list) {
       const was = lastDevices.get(d.id);
-      if (was?.state === 'running' && (d.state === 'stopped' || d.state === 'offline') && !transitions.has(d.id) && Date.now() - (recentlyStopped.get(d.id) ?? 0) > 15_000 && !(d.meta as { stale?: boolean } | undefined)?.stale) {
+      if (was?.state === 'running' && (d.state === 'stopped' || d.state === 'offline') && !transitions.has(d.id) && Date.now() - (recentlyStopped.get(d.id) ?? 0) > 15_000 && !(d.meta as { stale?: boolean } | undefined)?.stale && !expectedStops.some((f) => f(d.id))) {
         const virtual = d.kind === 'virtual';
         logAction(d.id, 'daemon', { action: virtual ? 'device.crashed' : 'device.disconnected', summary: virtual ? `${d.name} stopped unexpectedly` : `${d.name} disconnected` });
         dropLeaseOnStop(d.id);
       }
-      const key = JSON.stringify([d.state, d.name, d.lease, d.error, d.managed, d.handoff?.id ?? null, d.screen?.width ?? null, d.screen?.height ?? null, d.capabilities]);
+      const key = JSON.stringify([d.state, d.name, d.lease, d.error, d.managed, d.handoff?.id ?? null, d.screen?.width ?? null, d.screen?.height ?? null, d.capabilities, d.sleep ?? null, d.sleepFailure ?? null]);
       seen.set(d.id, key);
       if (lastSeen.get(d.id) !== key) emit('device', d);
     }
@@ -634,6 +663,13 @@ setInterval(() => {
     if (v.viewers <= 0 && Date.now() - v.lastAccess > STREAM_LINGER_MS) endVideo(k, v);
   }
 }, 1000).unref();
+/** Someone is watching the device right now: a live video or MJPEG viewer while its display is on, or /frame polls in
+ *  the last few seconds. Idle sleep counts it as use (src/daemon/idle-sleep.ts). */
+export function watched(deviceId: string, now = Date.now()): boolean {
+  for (const [k, s] of streams) if (k.startsWith(deviceId + '|') && !s.ended && (s.viewers > 0 || now - s.lastAccess < 5_000) && !s.stream.asleep?.()) return true;
+  for (const [k, v] of videos) if (k.startsWith(deviceId + '|') && !v.ended && v.viewers > 0 && !v.displayAsleep) return true;
+  return false;
+}
 function isStreaming(deviceId: string): boolean {
   for (const [k, s] of streams) if (k.startsWith(deviceId + '|') && !s.ended) return true;
   for (const [k, v] of videos) if (k.startsWith(deviceId + '|') && !v.ended) return true;
@@ -673,6 +709,8 @@ export interface SharedVideo {
   key: string; deviceId: string; stream: VideoStream; fanout: VideoFanout;
   viewers: number; lastAccess: number; ended: boolean; err?: Error;
   startedAt: number; firstFrameAt?: number; lastFrameAt?: number; frames: number;
+  /** The source last said the display is off (`state: asleep`): its viewers see nothing. */
+  displayAsleep?: boolean;
   /** Called when the stream ends (its viewers' responses are closed). */
   endListeners: Set<(err?: Error) => void>;
   /** A screenshot for viewers that join before the first frame (shared by them, at most one in flight). */
@@ -701,6 +739,7 @@ export function sharedVideo(deviceId: string, maxSize: number): SharedVideo {
     if (v.ended) return;
     if (p.type === 'frame') { v.frames++; v.lastFrameAt = Date.now(); v.firstFrameAt ??= v.lastFrameAt; }
     else if (p.type === 'screen') noteScreen(deviceId, p.screen.width, p.screen.height);
+    else if (p.type === 'state') v.displayAsleep = p.state === 'asleep';
     fanout.packet(p);
   });
   stream.onEnd((e) => endVideo(key, v, e));

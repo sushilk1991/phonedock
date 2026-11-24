@@ -68,6 +68,14 @@ struct DeviceDetailView: View {
     @Binding var highlight: CGRect?
     @State private var frames = FrameLoop()
     @State private var dropTargeted = false
+    /// The window can be seen (not on another Space, minimized, covered or behind a locked screen). While it can't,
+    /// the live view stops: nobody is watching, and a stream nobody sees must not keep a phone awake (idle sleep).
+    @State private var windowVisible = true
+
+    private func runFrames() {
+        guard windowVisible || !FrameLoop.pauseWhenHidden else { frames.pause(); return }
+        frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video"))
+    }
 
     /// Device pixels, from the stream first (each frame says the size it shows), then the device record, then a
     /// typical phone. A frame turned the other way than that size wins: the screen has just rotated.
@@ -123,20 +131,25 @@ struct DeviceDetailView: View {
             }
         }
         .background(Theme.Surface.stage)
+        .background(WindowVisibility(visible: $windowVisible))
         .onAppear {
-            frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video"))
+            runFrames()
             if SelfTest.enabled { SelfTest.frameLoop = frames }
         }
-        .onChange(of: device.id) { frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
-        .onChange(of: device.state) { frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
+        .onChange(of: windowVisible) { _, v in
+            if SelfTest.enabled { SelfTest.log("WINDOW visible=\(v) live=\(v || !FrameLoop.pauseWhenHidden)") }
+            runFrames()
+        }
+        .onChange(of: device.id) { runFrames() }
+        .onChange(of: device.state) { runFrames() }
         .onChange(of: frames.asleep) { _, a in
             if a { model.asleep.insert(device.id) } else { model.asleep.remove(device.id) }
         }
         .onChange(of: device.isRunning) { _, r in if !r { model.asleep.remove(device.id) } }
-        .onChange(of: model.connection) { frames.stop(); frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
+        .onChange(of: model.connection) { frames.stop(); runFrames() }
         // Video can arrive while the phone is on screen (pymobiledevice3 installed for an iPhone): switch from polled
         // screenshots to the stream. `run` keeps a running loop as it is, so stop it first.
-        .onChange(of: device.can("video")) { frames.stop(); frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
+        .onChange(of: device.can("video")) { frames.stop(); runFrames() }
         .onDisappear { frames.stop(); model.asleep.remove(device.id) }
     }
 }
@@ -466,6 +479,7 @@ private struct OffScreen: View {
                     Text(operation ?? stateLine(busy: busy))
                         .font(Theme.Fonts.callout)
                         .foregroundStyle(Theme.Ink.secondary)
+                        .multilineTextAlignment(.center)
                 }
                 if busy {
                     progress(operation == nil ? job : nil, slowHint: operation == nil && device.state != "stopping")
@@ -488,7 +502,7 @@ private struct OffScreen: View {
         case "offline": return "Not connected"
         case "unauthorized": return "Waiting for permission"
         case "error": return "Needs attention"
-        default: return busy ? "Starting…" : "Off"
+        default: return busy ? "Starting…" : device.isSleeping ? SleepWords.state : "Off"
         }
     }
 
@@ -511,7 +525,7 @@ private struct OffScreen: View {
 
     private var startControls: some View {
         HStack(spacing: Theme.Space.s) {
-            Button { model.boot(device) } label: { Text("Start").frame(minWidth: 64) }
+            Button { model.boot(device) } label: { Text(device.isSleeping ? SleepWords.resume : "Start").frame(minWidth: 64) }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .testAnchor("Start")
@@ -700,5 +714,38 @@ struct ScreenFailureView: View {
             .environment(\.colorScheme, .dark)
         }
         .testAnchor("screen-failure")
+    }
+}
+
+/// Whether the view's window can be seen right now (`NSWindow.occlusionState`): false on another Space, minimized,
+/// fully covered, in a hidden app or behind a locked screen.
+private struct WindowVisibility: NSViewRepresentable {
+    @Binding var visible: Bool
+
+    func makeNSView(context: Context) -> Probe { Probe { v in if visible != v { visible = v } } }
+    func updateNSView(_ v: Probe, context: Context) { v.onChange = { n in if visible != n { visible = n } } }
+
+    final class Probe: NSView {
+        var onChange: (Bool) -> Void
+        private var token: NSObjectProtocol?
+        init(_ onChange: @escaping (Bool) -> Void) { self.onChange = onChange; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError() }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let token { NotificationCenter.default.removeObserver(token) }
+            token = nil
+            guard let w = window else { return }
+            token = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: w, queue: .main) { [weak self] _ in
+                self?.report()
+            }
+            report()
+        }
+        private func report() {
+            guard let w = window else { return }
+            let v = w.occlusionState.contains(.visible)
+            DispatchQueue.main.async { self.onChange(v) }
+        }
+        deinit { if let token { NotificationCenter.default.removeObserver(token) } }
     }
 }

@@ -15,6 +15,7 @@ import type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
+  DeviceSleep,
 } from '../core/types.ts';
 import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
@@ -31,7 +32,34 @@ export type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
+  DeviceSleep,
 };
+
+/** GET /v1/idle-sleep (docs/API.md "Idle sleep"). `timeoutSec` null: never. */
+export interface IdleSleepStatus {
+  timeoutSec: number | null;
+  source: 'env' | 'setting' | 'default';
+  /** Whether this service puts phones to sleep (only the app's does, or one a test opts in with PHONEDOCK_IDLE_SLEEP). */
+  sleeper?: boolean;
+  saved?: number | null;
+  choices: (number | null)[];
+  devices: { id: string; name: string; state: DeviceState; eligible: boolean; why?: string; sleep?: DeviceSleep; idleSec?: number;
+    sleepsInSec?: number | null; keptAwakeBy?: string[]; sleepFailure?: { at: string; code: string; message: string } }[];
+}
+/** A request woke a sleeping phone before it ran (the `X-PhoneDock-Woke` response header). `fresh`: it started fresh
+ *  rather than where it left off (its apps and data are kept; what was on its screen is not). */
+export interface WakeNotice { deviceId?: string; name: string; ms: number; fresh?: boolean }
+/** "Woke Pixel 8 (7.2 s)": the same words in the CLI and MCP. */
+export const wakeNoticeText = (w: WakeNotice) => `Woke ${w.name} (${(w.ms / 1000).toFixed(1)} s)${w.fresh ? ', started fresh; its previous screen is gone' : ''}`;
+/** A sleeping phone in one line, for agents (list_devices, `phonedock devices`). */
+export const SLEEPING_NOTE = 'sleeping: memory freed; any use wakes it, usually where it left off (no need to start or create another)';
+export function parseWokeHeader(v: string | null | undefined, path?: string): WakeNotice | undefined {
+  const m = /^(\d+);\s*name=([^;]*)(;\s*fresh=1)?$/.exec(v ?? '');
+  if (!m) return undefined;
+  let name = m[2]; try { name = decodeURIComponent(m[2]); } catch { /* as sent */ }
+  const id = /^\/v1\/devices\/([^/?]+)/.exec(path ?? '')?.[1];
+  return { ms: Number(m[1]), name, ...(m[3] ? { fresh: true } : {}), ...(id ? { deviceId: decodeURIComponent(id) } : {}) };
+}
 
 /** Every input result: how far it got (`delivery`: sent / not_sent), whether sending it again is safe (`retrySafe`:
  *  only when nothing was sent), and with `expect` the check of what the screen showed afterwards. */
@@ -225,6 +253,8 @@ export interface ClientOptions {
   autoStart?: boolean;
   /** Override the state dir (default $PHONEDOCK_HOME or ~/Library/Application Support/PhoneDock). */
   home?: string;
+  /** Called when a request had to wake a sleeping phone first (idle sleep). */
+  onWake?: (w: WakeNotice) => void;
 }
 
 /** A matched element's visible name (text, else accessibility label), for activity-log labels. */
@@ -346,8 +376,11 @@ export class PhoneDockClient {
   private explicitToken?: string;
   private daemonInfo?: DaemonInfo;
   private starting?: Promise<void>;
+  /** Called when a request had to wake a sleeping phone first (idle sleep): the CLI and MCP say so. */
+  onWake?: (w: WakeNotice) => void;
 
   constructor(opts: ClientOptions = {}) {
+    this.onWake = opts.onWake;
     this.home = opts.home ?? phonedockHome();
     this.explicitBaseUrl = (opts.baseUrl ?? process.env.PHONEDOCK_URL)?.replace(/\/+$/, '');
     this.explicitToken = opts.token ?? process.env.PHONEDOCK_TOKEN;
@@ -483,6 +516,8 @@ export class PhoneDockClient {
         try { res = await doFetch(); } catch (e) { throw failure(e, opts.input ? (neverConnected(e) ? 'not_sent' : 'unknown') : undefined); }
       }
     }
+    const woke = parseWokeHeader(res.headers.get('x-phonedock-woke'), path);
+    if (woke) { try { this.onWake?.(woke); } catch { /* a listener's problem */ } }
     if (!res.ok) {
       let err: PhoneDockApiError;
       try { err = await this.toError(res); } catch (e) { throw failure(e, opts.input ? 'unknown' : undefined); }
@@ -693,6 +728,12 @@ export class PhoneDockClient {
     return this.waitJob(r.job.id, { timeoutMs: timeoutMs ?? 10 * 60_000, onProgress });
   }
   shutdown(id: string): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/shutdown'), { body: {} }); }
+  /** Idle sleep: when idle Android emulators PhoneDock created go to sleep (freeing their memory), and where each one is. */
+  idleSleep(): Promise<IdleSleepStatus> { return this.request('GET', '/v1/idle-sleep'); }
+  /** Set it: null (never) or 600, 900, 1800, 3600 seconds; or "off", "10m", "15m", "30m", "1h". */
+  setIdleSleep(after: number | null | string): Promise<IdleSleepStatus> {
+    return this.request('POST', '/v1/idle-sleep', { body: typeof after === 'string' ? { after } : { timeoutSec: after } });
+  }
   async clone(id: string, name: string, opts: WaitOptions = {}): Promise<Device> {
     const r = await this.request<{ job: Job }>('POST', this.dev(id, '/clone'), { body: { name } });
     if (opts.wait === false) return { id: '', name, state: 'creating', job: r.job } as unknown as Device;

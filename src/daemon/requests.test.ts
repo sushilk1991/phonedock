@@ -37,6 +37,17 @@ test('concurrent identical requests join one execution and failures stay recover
   assert.ok(out.every((r) => r.status === 'rejected' && r.reason.delivery === 'unknown'));
 });
 
+test('concurrent identical requests that both pass the first lookup still join one successful execution (as before idle sleep)', async () => {
+  let calls = 0; let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+  const run = async () => { calls++; await gate; return { ok: true, delivery: 'sent' }; };
+  const a = withRequestReceipt(ctx({ kind: 'tap' }, 'dup-ok'), run);
+  const b = withRequestReceipt(ctx({ kind: 'tap' }, 'dup-ok'), run);
+  await new Promise((r) => setTimeout(r, 20)); release();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(calls, 1);
+  assert.deepEqual(rb, ra);
+});
+
 test('secret request values are absent from durable results and errors', async () => {
   const secret = 'pdtest-secret-é-7391';
   const route = inputRoute(async () => ({ ok: true, finalValue: secret, element: { text: secret }, warnings: [`Echo ${secret}`] }));

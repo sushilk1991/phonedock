@@ -5,6 +5,7 @@
 // convert, and the next coordinate action warns. The server converts to device pixels.
 // Leases: the server releases every lease it acquired (and cancels its pending handoffs) when its stdio closes or it
 // gets SIGTERM/SIGINT; the daemon also reclaims leases whose owner process (mcp:<client>:<pid>) has exited.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -15,7 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { PhoneDockClient, PhoneDockApiError, jobErrorText, matchName, tapMeta } from '../sdk/client.ts';
+import { PhoneDockClient, PhoneDockApiError, jobErrorText, matchName, tapMeta, wakeNoticeText, SLEEPING_NOTE } from '../sdk/client.ts';
 import type { Device, ElementMatch, ExpectReport, Job, SystemPrompt, UiTree } from '../sdk/client.ts';
 import { launchSummarySuffix } from '../core/launch-options.ts';
 import { expectLine, expectParam, normalizeArgs, toExpect } from './args.ts';
@@ -85,7 +86,8 @@ export function errorResult(e: unknown): ToolResult {
     if (e.code === 'not_found' && /^No device\b|device .*not found/i.test(e.message)) hints.push('Call list_devices to see valid device ids/names.');
     const detail = agentDetail(e.detail);
     // input calls: whether resending is safe (only when nothing reached the device)
-    const dl = e.delivery === 'not_sent' ? '\nNot sent: nothing reached the device, so retrying is safe.'
+    const dl = e.code === 'woke_fresh' ? '\nNot sent: the phone woke and started fresh, so the screen this was aimed at is gone. Call get_ui or take a screenshot first.'
+      : e.delivery === 'not_sent' ? '\nNot sent: nothing reached the device, so retrying is safe.'
       : e.delivery === 'unknown' ? '\nDelivery unknown: it may have reached the device. Check get_ui or a screenshot before retrying.'
       : e.delivery === 'sent' ? '\nPart of it was sent: check the screen before retrying.' : '';
     const receipt = e.requestId ? `\nRequest ID: ${e.requestId}. Recover with get_request_result(request_id=${JSON.stringify(e.requestId)}).` : '';
@@ -96,6 +98,7 @@ export function errorResult(e: unknown): ToolResult {
 
 function fmtDevice(d: Device): string {
   const bits = [`${d.name}`, `id=${d.id}`, d.platform, d.kind, `state=${d.state}`];
+  if (d.sleep) bits.push(SLEEPING_NOTE);
   if (d.osVersion) bits.push(`os=${d.osVersion}`);
   if (d.screen) bits.push(`screen=${d.screen.width}x${d.screen.height}`);
   if (d.lease) bits.push(`leased-by=${d.lease.owner}${d.lease.stale ? ' (stale: that process has exited; using the device reclaims it)' : ''}`);
@@ -237,8 +240,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
     if (ctx.lastDevice) { const d = list.find((x) => x.id === ctx.lastDevice); if (d) return d; }
     // Implicit selection only ever picks a PhoneDock-managed device: pre-existing simulators/AVDs and
     // physical phones may be in use by a human, so agents must name them explicitly.
+    // The only running one; when none runs, the only one PhoneDock put to sleep (using it wakes it).
     const running = list.filter((d) => d.state === 'running' && d.managed);
-    if (running.length === 1) { ctx.lastDevice = running[0].id; return running[0]; }
+    const sleeping = running.length ? [] : list.filter((d) => !!d.sleep && d.managed);
+    const only = running.length === 1 ? running[0] : sleeping.length === 1 ? sleeping[0] : undefined;
+    if (only) { ctx.lastDevice = only.id; return only; }
     throw new PhoneDockApiError(running.length ? `${running.length} devices are running; pass "device"` : 'No running device; pass "device" or boot one first', 'device_required', 400,
       [running.length ? 'Running: ' + running.map((d) => `${d.name} [${d.id}]`).join(', ') : 'Use list_devices, boot_device, or acquire_device.']);
   }
@@ -372,6 +378,17 @@ export function createMcpServer(ctx: McpContext): McpServer {
     return ex.failed ? { content, isError: true } : { content };
   }
 
+  // Idle sleep: a tool call that had to wake a sleeping phone first says so, with the time it took ("Woke Pixel 8
+  // (7.2 s)."). The notice is its own content item, last, so a JSON result stays JSON; and it belongs to the call whose
+  // requests woke the phone (each call runs in its own scope), never to another call that overlapped it.
+  const wakeScope = new AsyncLocalStorage<string[]>();
+  const prevOnWake = c.onWake;
+  c.onWake = (w) => { prevOnWake?.(w); wakeScope.getStore()?.push(wakeNoticeText(w)); };
+  function withWakeNotes(r: ToolResult, notes: string[]): ToolResult {
+    if (!notes.length) return r;
+    return { ...r, content: [...(r.content ?? []), text([...new Set(notes)].join('\n') + '.')] };
+  }
+
   /** Every registered handler by name (used by `batch` to dispatch steps). Args are validated like a real call. */
   const handlers = new Map<string, ToolFn>();
   function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, fn: (args: z.infer<z.ZodObject<S>>, extra?: ToolExtra) => Promise<ToolResult>): void {
@@ -385,7 +402,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
     }) as ToolFn);
     const meta = toolMeta(name);
     server.registerTool(name, { title: meta.title, description, inputSchema: shape, annotations: meta }, (async (args: z.infer<z.ZodObject<S>>, extra: ToolExtra) => {
-      try { return await fn(args, extra); } catch (e) { return errorResult(e); }
+      const notes: string[] = [];
+      let r: ToolResult;
+      try { r = await wakeScope.run(notes, () => fn(args, extra)); } catch (e) { r = errorResult(e); }
+      return withWakeNotes(r, notes);
     }) as never);
   }
 
@@ -422,7 +442,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const d = await target(a.device);
     return { content: [text(JSON.stringify(await c.requestResult(d.id, a.request_id)))] };
   });
-  tool('list_devices', 'List all phones/VMs PhoneDock knows about (virtual + physical, all backends) with id, platform, state (running/stopped/…), OS, screen size and lease holder. Start here. Devices must be state=running before you can screenshot/tap; use boot_device for stopped ones.', {
+  tool('list_devices', 'List all phones/VMs PhoneDock knows about (virtual + physical, all backends) with id, platform, state (running/stopped/…), OS, screen size and lease holder. Start here. Devices must be state=running before you can screenshot/tap; use boot_device for stopped ones. A phone marked "sleeping" was put to sleep by PhoneDock after sitting idle (its memory is freed): use it as usual, the first call wakes it in a few seconds, usually where it left off (when it starts fresh instead, the result says so, and a tap or swipe aimed at the old screen comes back unsent). Never create another device because one is sleeping.', {
     platform: z.enum(['android', 'ios', 'linux', 'other']).optional().describe('Filter by platform'),
     state: z.string().optional().describe('Filter by state, e.g. "running"'),
     backend: z.string().optional().describe('Filter by backend id, e.g. android-emulator, ios-simulator'),
@@ -541,11 +561,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
   }, async (a) => {
     const d = await target(a.device);
     if (d.state === 'running' && !a.window) return { content: [text(`${d.name} is already running.`)] };
+    const asleep = !!d.sleep && !a.cold && !a.window;
     const job = await c.boot(d.id, { coldBoot: a.cold, window: a.window, headless: a.window ? false : undefined, wait: false });
     ctx.scales.delete(d.id); ctx.deviceCache = undefined;
     if (!job?.id) return { content: [text(`${d.name}: boot requested.`)] };
     const j = await waitJobUpTo(c, job, a.wait_seconds ?? 180);
-    return { content: [text(j.state === 'done' ? `${d.name} booted and ready.` : j.state === 'running' ? `Still booting. Poll with get_job job_id=${j.id}.` : jobText(j))], isError: j.state === 'failed' };
+    const woke = asleep ? /woke in ([\d.]+)s(.*)$/.exec(j.progress?.findLast((l) => /woke in/.test(l)) ?? '') : null;
+    return { content: [text(j.state === 'done' ? (woke ? `Woke ${d.name} (${woke[1]} s)${woke[2]}.` : `${d.name} booted and ready.`) : j.state === 'running' ? `Still booting. Poll with get_job job_id=${j.id}.` : jobText(j))], isError: j.state === 'failed' };
   });
 
   tool('shutdown_device', 'Shut down a running device (state is kept on disk).', { device: deviceParam }, async (a) => {

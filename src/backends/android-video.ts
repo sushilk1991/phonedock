@@ -74,6 +74,9 @@ interface Pipe {
 interface Sub { maxSize: number; onFail: (e: Error) => void }
 
 const sources = new Map<string, ScreenSource>();
+// The adb children (screenrecord, the logcat watcher) must not outlive the daemon: an orphaned `adb -s <serial> logcat`
+// follows forever, and would look like someone else's adb session to idle sleep.
+process.once('exit', () => { for (const s of [...sources.values()]) s.close(); });
 /** The serial's shared source (created on first use; it closes when its last subscriber leaves). */
 export function screenSource(serial: string): ScreenSource {
   let s = sources.get(serial);
@@ -110,6 +113,7 @@ export class ScreenSource {
   }
 
   get subscribers(): number { return this.subs.size; }
+  get isAsleep(): boolean { return this.asleep; }
 
   /** `sink` gets what a decoder needs to start, then every packet. `onFail`: the device can't stream (no frames). */
   subscribe(sink: VideoSink, maxSize: number | undefined, onFail: (e: Error) => void): void {
@@ -389,7 +393,7 @@ export function adbVideoStream(serial: SerialRef, opts: { maxSize?: number } = {
 
 /** Backend.stream: JPEG frames decoded from the shared source by ffmpeg (started only for this), at most `fps` a
  *  second. Falls back to screenshots when there's no ffmpeg or the source can't stream. */
-export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?: number; capture?: () => Promise<Buffer> } = {}): FrameStream {
+export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?: number; capture?: () => Promise<Buffer>; ffmpeg?: string | null } = {}): FrameStream {
   const frameCbs: ((j: Buffer, s?: ScreenInfo) => void)[] = []; const endCbs: ((e?: Error) => void)[] = [];
   const fps = Math.max(1, Math.min(opts.fps ?? 15, 60));
   const maxSize = clampSize(opts.maxSize);
@@ -407,7 +411,17 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
     emitTimer ??= setTimeout(() => { emitTimer = undefined; const p = pending; pending = undefined; if (p && !stopped) deliver(p[0], p[1]); }, Math.max(0, wait));
   };
   const killFf = () => { try { ff?.kill('SIGKILL'); } catch { /* */ } ff = undefined; ffConfig = undefined; };
-  const ffmpeg = ffmpegPath();
+  const ffmpeg = opts.ffmpeg === null ? undefined : opts.ffmpeg ?? ffmpegPath();   // null: none (tests)
+  // Polling screenshots: ask the phone every few seconds whether its display is on. Off only on a recent reading.
+  let displayOff = false; let powerAskedAt = 0; let offReadAt = 0;
+  const readDisplayPower = async () => {
+    if (Date.now() - powerAskedAt < 3000) return;
+    powerAskedAt = Date.now();
+    const r = await adb(await resolveSerial(serial), ['shell', 'dumpsys power | grep -m1 mWakefulness='], { allowFail: true, timeoutMs: 5000 }).catch(() => undefined);
+    const w = r?.code === 0 ? /mWakefulness=(\w+)/.exec(r.stdout)?.[1] : undefined;
+    displayOff = w === 'Asleep' || w === 'Dozing';
+    if (displayOff) offReadAt = Date.now();
+  };
   let src: ScreenSource | undefined;
 
   const startFf = (config: Buffer) => {
@@ -469,6 +483,7 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
       } catch {
         if (!stopped) await sleep(1000);
       }
+      await readDisplayPower();
       await sleep(Math.max(0, 1000 / fps - (Date.now() - t0)));
     }
   };
@@ -494,5 +509,6 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
       for (const cb of endCbs) cb();
     },
     restart() { if (!pollMode) src?.restart(); },
+    asleep() { return pollMode ? displayOff && Date.now() - offReadAt < 10_000 : !!src?.isAsleep; },
   };
 }

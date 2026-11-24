@@ -283,6 +283,7 @@ private struct GeneralSettings: View {
             SettingsSection("Startup") {
                 SettingsCard { OpenAtLoginRow() }
             }
+            IdleSleepSection()
             UpdatesSettingsSection()   // UpdatesSettingsSection.swift
         }
         .onChange(of: notify) { _, on in
@@ -335,6 +336,88 @@ private struct OpenAtLoginRow: View {
             SMAppService.openSystemSettingsLoginItems()
         }
         on = app.status == .enabled || app.status == .requiresApproval
+    }
+}
+
+/// General › Memory: when idle virtual phones (Android emulators PhoneDock made) go to sleep. The setting is the
+/// background service's (GET/POST /v1/idle-sleep), not a copy in this app's preferences, so the app, the CLI and
+/// agents all see the same one.
+struct IdleSleepSection: View {
+    @Environment(AppModel.self) private var model
+    /// Seconds, -1 for never; nil until the service answers.
+    @State private var timeout: Int?
+    @State private var source = "setting"
+    @State private var problem: String?
+    @State private var saving = false
+    static let choices: [(Int, String)] = [(-1, "Never"), (600, "10 minutes"), (900, "15 minutes"), (1800, "30 minutes"), (3600, "1 hour")]
+    static let help = "A sleeping phone frees its memory. When you or an agent use it, it wakes in a few seconds, usually right where it left off; otherwise it restarts with its apps and data."
+
+    var body: some View {
+        SettingsSection("Memory", note: Self.help) {
+            SettingsCard {
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                        SettingsRowText(title: "Put idle virtual phones to sleep after")
+                        if source == "env" {
+                            Text("Set by PHONEDOCK_IDLE_SLEEP for this background service.")
+                                .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                        }
+                        if let problem {
+                            Text(problem).font(Theme.Fonts.callout).foregroundStyle(Theme.Status.errorText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                } trailing: {
+                    Picker("Put idle virtual phones to sleep after", selection: Binding(get: { timeout ?? 900 }, set: { save($0) })) {
+                        ForEach(options, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .disabled(timeout == nil || source == "env" || saving || !model.connection.isConnected)
+                    .testAnchor("idle-sleep-picker")
+                }
+            }
+        }
+        .task(id: model.connection.isConnected) { await load() }
+        .onAppear { if SelfTest.enabled { SelfTest.setIdleSleep = { save($0) } } }
+        .onDisappear { if SelfTest.enabled { SelfTest.setIdleSleep = nil } }
+    }
+
+    /// The five choices, plus the service's value when it is something else (set through the environment).
+    private var options: [(Int, String)] {
+        guard let t = timeout, !Self.choices.contains(where: { $0.0 == t }) else { return Self.choices }
+        return Self.choices + [(t, t % 60 == 0 ? "\(t / 60) minute\(t == 60 ? "" : "s")" : "\(t) seconds")]
+    }
+
+    private struct Status: Decodable { var timeoutSec: Int?; var source: String? }
+
+    private func load() async {
+        guard let c = model.client else { timeout = nil; return }
+        do {
+            let s = try await c.get(Status.self, "/v1/idle-sleep", timeout: 15)
+            timeout = s.timeoutSec ?? -1; source = s.source ?? "setting"; problem = nil
+        } catch {
+            timeout = nil
+            problem = (error as? APIError)?.status == 404 ? "This background service is too old for this setting: restart it from Advanced." : "Couldn’t read this from PhoneDock’s background service."
+        }
+    }
+
+    private func save(_ value: Int) {
+        guard let c = model.client, value != timeout else { return }
+        let before = timeout
+        timeout = value; saving = true
+        Task {
+            defer { saving = false }
+            do {
+                let data = try await c.send("POST", "/v1/idle-sleep", json: ["timeoutSec": value < 0 ? NSNull() : value as Any], timeout: 15)
+                if let s = try? JSONDecoder().decode(Status.self, from: data) { timeout = s.timeoutSec ?? -1; source = s.source ?? source }
+                problem = nil
+            } catch {
+                timeout = before
+                problem = "Couldn’t change it: \((error as? APIError)?.message ?? error.localizedDescription)"
+            }
+        }
     }
 }
 

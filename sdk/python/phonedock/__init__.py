@@ -424,6 +424,16 @@ class PhoneDock:
     def shutdown(self, device_id: str) -> Dict[str, Any]:
         return self._request("POST", self._dev(device_id, "/shutdown"), {})
 
+    def idle_sleep(self) -> Dict[str, Any]:
+        """When idle Android emulators PhoneDock created go to sleep (their memory is freed; any use wakes them where
+        they left off), and where each one is: ``{timeoutSec, source, choices, devices}``. ``timeoutSec`` None: never."""
+        return self._request("GET", "/v1/idle-sleep")
+
+    def set_idle_sleep(self, after: Union[int, str, None]) -> Dict[str, Any]:
+        """Set it: None (never) or 600, 900, 1800, 3600 seconds; or "off", "10m", "15m", "30m", "1h"."""
+        body = {"after": after} if isinstance(after, str) else {"timeoutSec": after}
+        return self._request("POST", "/v1/idle-sleep", body)
+
     def clone(self, device_id: str, name: str, wait: bool = True) -> Dict[str, Any]:
         r = self._request("POST", self._dev(device_id, "/clone"), {"name": name})
         return self.wait_job(r["job"]["id"], timeout=1800).get("result") if wait else r
