@@ -161,6 +161,14 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
 - **Same flow on Android and iOS.** One device per platform (`acquire_device platform="android"` /
   `platform="ios"`, or create both), then run the same steps on each, passing `device` explicitly. Report results
   per platform; selectors may differ (`element_id` is a resource-id on Android, an accessibility id on iOS).
+- **An older iPhone (iOS 26 or earlier).** Screenshots, apps and crash logs work at once; taps, typing and
+  `get_ui` need a one-time setup (an input error says "Set up control for this iPhone first"). Setup installs a test
+  runner signed with the person's Apple ID and builds for a few minutes, so run it only for a phone the user asked you
+  to use: `phonedock ios wda-setup --udid <nativeId>` (HTTP `POST /v1/ios/wda-setup`; the app's button is Set Up
+  Control). `team_required`: ask which team (`phonedock ios wda-teams`), then pass `--team`. `xcode_account_missing`,
+  `developer_mode_off`, `not_paired` and `wda_untrusted` are the person's to fix: `request_human` with the error's
+  hint. After that PhoneDock keeps it running across reboots; `wda_not_ready` means it is restarting or waiting (its
+  message says on what, such as an unlock), so wait or ask, don't run setup again.
 - **App Store screenshots.** Create the required model (`list_profiles backend="ios-simulator" filter="Pro Max"`),
   set the scene (`set_appearance`, sample data, `open_url` deep links), then `screenshot save_to=… format="png"`
   at full resolution (no `max_size`). On a simulator/emulator, `device_environment` can override the status bar;
@@ -207,7 +215,7 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   See [the performance loop](references/recipes.md#performance-loop).
 
 Errors come back as results with a code and hints (`no_match` lists what is on screen; `not_supported` means this
-device can't do that, or that a managed component like `ios-tools` or `axe` is still setting up — check
+device can't do that, or that a managed component like `ios-tools`, `axe` or `wda` is still setting up — check
 `phonedock components` or retry with `phonedock components install`). Report them rather than retrying blindly. Native
 iOS 27+ appearance, pinch, exact-PID foreground detection, logs and transactional Unicode paste have fake/contract tests
 but no physical-iPhone validation in this change. Native sidecars require Python 3.11+ (managed automatically via
