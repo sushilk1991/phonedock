@@ -6,16 +6,18 @@ import { createServer } from 'node:http';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fakeDevicectl } from './fake-devicectl.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'pd-ios-connect-'));
 process.env.PHONEDOCK_HOME = home;
-process.env.PHONEDOCK_WDA_CLAIMS_DIR = join(home, 'claims');   // never the real per-user claims
-const { backend, publicConfig, wdaPhoneOps } = await import('./ios-device.ts');
-const phoneStops: string[] = [];
-wdaPhoneOps.stopRunners = async (udid: string) => { phoneStops.push(udid); return 0; };   // no devicectl in unit tests
-after(() => rmSync(home, { recursive: true, force: true }));
-
+process.env.PHONEDOCK_WDA_CLAIMS_DIR = join(home, 'claims');   // never this Mac's real claims
+process.env.PHONEDOCK_COMPONENTS_AUTO = '0';
 const UDID = '00008020-0000FAKE0000FAKE';
+// devicectl answers from a fake: no unit test reaches a real phone.
+const fake = fakeDevicectl({ phones: [{ udid: UDID, coreDeviceId: '11111111-2222-3333-4444-555555555555', tunnelIp: 'fd00:0:0:1::1' }], runners: { [UDID]: [91] } });
+const { backend, publicConfig } = await import('./ios-device.ts');
+after(() => { fake.restore(); rmSync(home, { recursive: true, force: true }); });
+
 const cfgFile = join(home, 'ios-device.json');
 const wda = { team: 'TEAMAAAAAA', free: false, bundleId: 'com.facebook.WebDriverAgentRunner', since: '2026-11-01T00:00:00Z' };
 
@@ -48,7 +50,7 @@ test('Stop Control ends management but keeps the phone’s entry, name and setup
   writeFileSync(cfgFile, JSON.stringify({ [UDID]: { udid: UDID, name: 'Old iPhone', wdaUrl: 'http://192.0.2.10:8100', wda } }));
   const r = await backend.wdaStop(UDID);
   assert.deepEqual(r, { udid: UDID, stopped: true, confirmed: true });
-  assert.deepEqual(phoneStops, [UDID], 'the runner on the phone is ended (and confirmed)');
+  assert.deepEqual(fake.runners(UDID), [], 'the runner on the phone is ended (and confirmed)');
   const e = JSON.parse(readFileSync(cfgFile, 'utf8'))[UDID];
   assert.equal(e.name, 'Old iPhone', 'not forgotten (that is Disconnect)');
   assert.equal(e.wda, undefined, 'no longer managed');

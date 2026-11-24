@@ -413,8 +413,16 @@ function refreshScreens(list: Device[]) {
     }, () => undefined);
   }
 }
+/** Backends whose devices carry state that follows actions (iPhone control: setup, Stop, Disconnect) refresh it on
+ *  every read, so a list cached from before an action never shows the old state; undefined drops the device. */
+type LiveBackend = { liveDevice?: (d: Device) => Device | undefined };
+function live(list: Device[]): Device[] {
+  const fns = new Map(backends.map((b) => [b.id, (b as LiveBackend).liveDevice?.bind(b)]));
+  return list.flatMap((d) => { const f = fns.get(d.backend); if (!f) return [d]; const x = f(d); return x ? [x] : []; });
+}
+
 function decorate(list: Device[]): Device[] {
-  return list.map((d) => {
+  return live(list).map((d) => {
     const r = record(d.id);
     const out: Device = { ...d, lease: leaseView(d.id), handoff: pendingHandoff(d.id) };
     if (d.screen?.width && d.screen.height) out.orientation = d.screen.width > d.screen.height ? 'landscape' : 'portrait';
@@ -446,7 +454,7 @@ export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise
 }
 
 // ── jobs ────────────────────────────────────────────────────────────────────
-export interface Job { id: string; kind: string; state: 'running' | 'done' | 'failed'; progress: string[]; result?: unknown; error?: { code: string; message: string; hints?: string[]; detail?: string }; startedAt: string; endedAt?: string; deviceId?: string }
+export interface Job { id: string; kind: string; state: 'running' | 'done' | 'failed'; progress: string[]; result?: unknown; error?: { code: string; message: string; hints?: string[]; detail?: string; cause?: string }; startedAt: string; endedAt?: string; deviceId?: string }
 const jobs = new Map<string, Job>();
 export function getJob(id: string): Job {
   const j = jobs.get(id); if (!j) throw new PhoneDockError("Couldn’t find the job", 'not_found', 404, undefined, `No job ${id}`); return j;
@@ -473,7 +481,8 @@ export function startJob(kind: string, fn: (progress: (l: string) => void, job: 
     catch (e) {
       const pe = e as PhoneDockError;
       job.state = 'failed';
-      job.error = { code: pe.code ?? 'internal', message: pe.message ?? String(e), hints: pe.hints, detail: pe.detail ?? (e instanceof Error && !(e instanceof PhoneDockError) ? e.stack : undefined) };
+      job.error = { code: pe.code ?? 'internal', message: pe.message ?? String(e), hints: pe.hints, detail: pe.detail ?? (e instanceof Error && !(e instanceof PhoneDockError) ? e.stack : undefined),
+        ...(e instanceof PhoneDockError && typeof e.cause === 'string' ? { cause: e.cause } : {}) };
       progress(`failed: ${job.error.message}`);
     }
     job.endedAt = new Date().toISOString();

@@ -713,6 +713,9 @@ export class PhoneDockError extends Error {
   detail?: string;
   /** Input errors: how far the input got (the daemon fills it in for input routes when a backend leaves it out). */
   delivery?: Delivery;
+  /** The specific failure behind a catch-all code that is kept for compatibility (wda-setup: `wda_setup_failed` with
+   *  cause `signing_limit`). Sent as `error.cause`. */
+  declare cause?: string;
   constructor(message: string, code = 'error', status = 400, hints?: string[], detail?: string, delivery?: Delivery) {
     super(message);
     this.code = code;

@@ -861,6 +861,8 @@ r.post('/v1/ios/wda-setup', async (c) => {
   const opt = (k: string) => (body[k] !== undefined && body[k] !== null && body[k] !== '' ? String(body[k]) : undefined);
   const udid = String(body.udid);
   const job = startJob('wda-setup', async (p) => {
+    // A first read after a daemon start would otherwise find no iPhone scan yet: it runs while setup does.
+    void listDevices(true, 'ios-device').catch(() => undefined);
     const res = await b.wdaSetup(udid, {
       team: opt('team'), destination: opt('destination'), name: opt('name'),
       apiKeyPath: opt('apiKeyPath'), apiKeyId: opt('apiKeyId'), apiKeyIssuerId: opt('apiKeyIssuerId'),

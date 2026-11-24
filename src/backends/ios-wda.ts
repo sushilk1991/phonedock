@@ -5,15 +5,16 @@
 // `xcodebuild test-without-building -xctestrun <file>`. By default WebDriverAgent listens only on the phone's end of
 // this Mac's paired CoreDevice tunnel (TEST_RUNNER_USE_IP), so nothing else on the network can reach it; sharing it on
 // the Wi-Fi is a per-phone opt-in. WdaSupervisor keeps it running (daemon start, the phone reappearing, /status going
-// quiet, the tunnel address changing) with bounded backoff, one launcher per phone on this Mac (HostClaims), and ends
-// it on the phone too whenever it stops one (the runner app can outlive xcodebuild).
+// quiet, the tunnel address changing) with bounded backoff and from the existing build only (only a person's setup
+// signs), one owner per phone on this Mac (WdaLedger: a kernel lock), and ends it on the phone too whenever it stops
+// one (the runner app can outlive xcodebuild); a cleanup it couldn't confirm is recorded and finished later.
 //
 // Everything that touches the system arrives through injected functions, so this file is unit-tested with fakes
 // (ios-wda.test.ts). ios-device.ts wires in devicectl, the component manager, ios-device.json and real processes.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { RunOptions } from '../core/exec.ts';
 import { PhoneDockError, type ExecResult } from '../core/types.ts';
 
@@ -238,13 +239,15 @@ export function buildArgv(p: BuildPlan): string[] {
 /** Signing details never leave the process: an API key's path and IDs are replaced in anything stored or shown
  *  (progress lines, error tails). */
 export function redact(text: string, key?: WdaApiKey): string {
-  let t = text.replace(/(-authenticationKey(?:Path|ID|IssuerID))(\s+|=)("[^"]*"|\S+)/g, '$1$2<redacted>');
+  let t = text;
+  // The known values first, as they are and with spaces escaped: a flag pattern alone stops at a path's first space.
   if (key) {
     for (const [v, label] of [[key.path, '<api-key-path>'], [key.keyId, '<api-key-id>'], [key.issuerId, '<api-key-issuer>']] as const) {
-      if (v) t = t.split(v).join(label);
+      if (v) for (const form of new Set([v, v.replace(/ /g, '\\ ')])) t = t.split(form).join(label);
     }
   }
-  return t;
+  // Then any value after the flags (another key's): double- or single-quoted, or up to the first unescaped space.
+  return t.replace(/(-authenticationKey(?:Path|ID|IssuerID))(\s+|=)("(?:[^"\\]|\\.)*"|'[^']*'|(?:\\.|[^\s\\])+)/g, '$1$2<redacted>');
 }
 
 /** Start the built runner without building anything. */
@@ -296,11 +299,11 @@ export async function readProfile(appDir: string, exec: Exec): Promise<ProfileIn
 export const EXPIRY_MARGIN_MS = DAY_MS;
 
 /** Why the build in hand can't be launched on this phone, or undefined when it can. */
-export function rebuildReason(o: { xctestrun?: string; profile?: ProfileInfo; udid?: string; now: number; device: boolean }): string | undefined {
+export function rebuildReason(o: { xctestrun?: string; profile?: ProfileInfo; udid?: string; now: number; device: boolean; marginMs?: number }): string | undefined {
   if (!o.xctestrun) return 'not built for this team and Xcode yet';
   if (!o.device) return undefined;    // a simulator destination: no profile
   if (!o.profile) return 'the build has no provisioning profile';
-  if (o.profile.expiresAt !== undefined && o.profile.expiresAt - o.now < EXPIRY_MARGIN_MS) {
+  if (o.profile.expiresAt !== undefined && o.profile.expiresAt - o.now < (o.marginMs ?? EXPIRY_MARGIN_MS)) {
     return o.profile.expiresAt <= o.now ? 'its signing expired' : 'its signing expires within a day';
   }
   const want = o.udid?.toLowerCase().replace(/-/g, '');
@@ -321,13 +324,15 @@ export function classifyXcodebuild(text: string, phase: 'build' | 'launch', ctx:
   if (/No Accounts|No account for team|no accounts registered|not signed in to (an|any) (Apple ID|account)/i.test(text)) {
     const e = noAccountError(ctx.udid); e.detail = tail; return e;
   }
-  if (/Failed to register bundle identifier|bundle identifier .*(cannot be registered|is not available)/i.test(text)) {
-    return new PhoneDockError(`Team${team} can’t register WebDriverAgent’s app ID`, 'bundle_id_unavailable', 409,
-      ['Sign in with the Apple ID of a paid developer team in Xcode › Settings › Accounts, or try another team.'], tail);
-  }
+  // Apple's quota first: the same output also says the bundle id couldn't be registered, and taking that for an
+  // unavailable id would ask Apple again under another id.
   if (/maximum (number of )?App ID|App ID limit|maximum number of (registered|apps)/i.test(text)) {
     return new PhoneDockError(`Team${team} reached Apple’s limit for new apps this week`, 'signing_limit', 409,
       ['A free Apple ID can register 10 app IDs every 7 days: try again later, or use a paid team.'], tail);
+  }
+  if (/Failed to register bundle identifier|bundle identifier .*(cannot be registered|is not available)/i.test(text)) {
+    return new PhoneDockError(`Team${team} can’t register WebDriverAgent’s app ID`, 'bundle_id_unavailable', 409,
+      ['Sign in with the Apple ID of a paid developer team in Xcode › Settings › Accounts, or try another team.'], tail);
   }
   if (/doesn['’]t include the currently selected device|does not include the currently selected device|device .* is not registered/i.test(text)) {
     return new PhoneDockError(`This iPhone isn’t registered with team${team}`, 'device_not_registered', 409,
@@ -337,7 +342,7 @@ export function classifyXcodebuild(text: string, phase: 'build' | 'launch', ctx:
   // an untrusted developer ("invalid code signature, inadequate entitlements or its profile has not been explicitly
   // trusted"), so that sentence alone proves nothing.
   if (/profile has expired|certificate has expired|provisioning profile .*expired|signature .*expired|certificate (has been|was) revoked/i.test(text)) {
-    return new PhoneDockError('WebDriverAgent’s signing expired', 'signing_expired', 409, ['PhoneDock rebuilds it; try again if this persists.'], tail);
+    return new PhoneDockError('WebDriverAgent’s signing expired', 'signing_expired', 409, ['Press Set Up Control (or run `phonedock ios wda-setup`): PhoneDock signs it again. A personal team’s signing lasts 7 days.'], tail);
   }
   if (/Untrusted Developer|Verify the Developer App certificate|developer (app )?certificate is not trusted|has not been trusted by the user/i.test(text)) {
     return new PhoneDockError('Trust the developer on the iPhone', 'wda_untrusted', 409,
@@ -439,17 +444,20 @@ export interface Runner {
   /** When WebDriverAgent printed its address (ms): uptime counts from here. */
   readyAt?: number;
   alive(): boolean;
-  /** SIGINT, then SIGKILL after a grace period. */
-  kill(): void;
+  /** SIGINT, then SIGKILL after `graceMs`. */
+  kill(graceMs?: number): void;
   /** Resolves when xcodebuild exits. On a phone the runner app can outlive it: stop that with devicectl too. */
   exited: Promise<number | null>;
 }
 
-/** Stop a runner and wait (bounded) until it has exited, so its replacement never overlaps it. */
-export async function stopRunner(r: Runner, waitMs = 15_000): Promise<void> {
-  if (!r.alive()) return;
-  r.kill();
-  await Promise.race([r.exited, new Promise<void>((res) => { const t = setTimeout(res, waitMs); t.unref?.(); })]);
+/** Stop a runner (SIGINT, SIGKILL after `graceMs`) and wait until xcodebuild has exited; resolves with whether it has
+ *  (false only if even SIGKILL didn't end it within `waitMs`). */
+export async function stopRunner(r: Runner, graceMs = 3_000, waitMs = 15_000): Promise<boolean> {
+  if (r.alive()) r.kill(graceMs);
+  let t: NodeJS.Timeout | undefined;
+  await Promise.race([r.exited, new Promise<void>((res) => { t = setTimeout(res, waitMs); t.unref?.(); })]);
+  if (t) clearTimeout(t);
+  return !r.alive();
 }
 
 export function cancelledError(): PhoneDockError {
@@ -498,11 +506,12 @@ export async function runBuild(spawn: Spawn, plan: BuildPlan, env: NodeJS.Proces
 /** Start the runner and resolve once WebDriverAgent prints its address (`url` is what it printed; the caller decides
  *  how this Mac reaches it). xcodebuild keeps running to host it. */
 export function startRunner(spawn: Spawn,
-  o: { xctestrun: string; destination: string; env: NodeJS.ProcessEnv; now: () => number; timeoutMs?: number; udid?: string; team?: string; signal?: AbortSignal; graceMs?: number; apiKey?: WdaApiKey },
+  o: { xctestrun: string; destination: string; env: NodeJS.ProcessEnv; now: () => number; timeoutMs?: number; udid?: string; team?: string; signal?: AbortSignal; graceMs?: number; apiKey?: WdaApiKey; onSpawn?: (pid: number | undefined) => void },
   onProgress: (l: string) => void): Promise<{ runner: Runner; url: string }> {
   if (o.signal?.aborted) return Promise.reject(cancelledError());
   const child = spawn('xcodebuild', launchArgv(o.xctestrun, o.destination), { env: o.env });
   track(child);
+  o.onSpawn?.(child.pid);
   let alive = true;
   const tail: string[] = []; const st = { compiled: 0 };
   // Each progress line once per launch (xcodebuild reports several test suites starting).
@@ -514,7 +523,7 @@ export function startRunner(spawn: Spawn,
     const finish = () => { settled = true; clearTimeout(timer); o.signal?.removeEventListener('abort', onAbort); };
     const runner: Runner = {
       pid: child.pid, startedAt: o.now(), alive: () => alive,
-      kill: () => stopChild(child, () => alive, o.graceMs),
+      kill: (graceMs) => stopChild(child, () => alive, graceMs ?? o.graceMs),
       exited: lines(child, (raw) => {
         const l = redact(raw, o.apiKey);
         if (!settled) { tail.push(l); if (tail.length > 300) tail.shift(); }
@@ -577,8 +586,6 @@ export const hostOf = (url: string) => { try { return canonHost(new URL(url).hos
 export interface WdaEndpoint {
   /** The phone's tunnel address (a simulator: 127.0.0.1). */
   host: string;
-  /** The phone's name on the local network, for other Macs when sharing is on (devicectl's localHostnames). */
-  lanName?: string;
 }
 
 /** What a TCP connect found: something listens, the host said no, or nothing conclusive (unreachable, timed out,
@@ -613,62 +620,119 @@ export interface WdaBuildDeps {
   /** GET a WebDriverAgent JSON route with a short timeout; undefined when nothing answers. */
   getJson(url: string): Promise<any>;
   probe(host: string, port: number): Promise<ProbeResult>;
-  /** Cross-process build lock: this process's pid, and whether another one still runs. */
-  pid?: number;
-  alive?(pid: number): boolean;
+  /** How often a build waits for another PhoneDock's build of the same key to finish. */
   lockPollMs?: number;
 }
 
 const BUILD_KEEP_MS = 30 * DAY_MS;
-/** After Apple refuses a new app ID or certificate for quota, that team isn't asked again for this long. */
-export const SIGNING_COOLDOWN_MS = DAY_MS;
 
 export const destinationFor = (udid: string, cfg: WdaConfig) => cfg.destination ?? `id=${udid}`;
 
-export function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
-}
+// ── locks that can't go stale ──────────────────────────────────────────────
 
-/** One build at a time per build directory: two phones on one team share it, and two xcodebuilds in one
- *  DerivedData fight over its build database. In this process (a promise chain), and across processes that share
- *  the state directory (a lock file holding the builder's pid; a dead holder's lock is taken over). */
-const buildLocks = new Map<string, Promise<void>>();
-async function withBuildLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const before = buildLocks.get(key) ?? Promise.resolve();
-  const run = before.then(fn);
-  const settled = run.then(() => undefined, () => undefined);
-  buildLocks.set(key, settled);
-  try { return await run; } finally { if (buildLocks.get(key) === settled) buildLocks.delete(key); }
-}
-async function withFileLock<T>(d: Pick<WdaBuildDeps, 'pid' | 'alive' | 'lockPollMs' | 'now'>, path: string, signal: AbortSignal | undefined,
-  onWait: () => void, fn: () => Promise<T>): Promise<T> {
-  const pid = d.pid ?? process.pid;
-  const alive = d.alive ?? pidAlive;
-  let waited = false;
-  for (;;) {
-    try { writeFileSync(path, JSON.stringify({ pid, at: new Date(d.now()).toISOString() }), { flag: 'wx' }); break; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
-    let holder: number | undefined;
-    try { holder = Number(JSON.parse(readFileSync(path, 'utf8')).pid) || undefined; } catch { holder = undefined; }
-    if (holder === undefined || holder === pid || !alive(holder)) { rmSync(path, { force: true }); continue; }
-    if (signal?.aborted) throw cancelledError();
-    if (!waited) { waited = true; onWait(); }
-    await new Promise((r) => setTimeout(r, d.lockPollMs ?? 2_000));
-  }
-  try { return await fn(); }
-  finally {
-    try { if (Number(JSON.parse(readFileSync(path, 'utf8')).pid) === pid) rmSync(path, { force: true }); } catch { /* gone */ }
+/** macOS open(2) flag (<fcntl.h>): take a flock(2) lock as the file opens; with O_NONBLOCK, fail with EAGAIN while
+ *  another open file holds it (another process, or another open in this one). The kernel drops the lock when its
+ *  holder exits, however it exits, so nothing goes stale and lock files are never removed. Node opens with O_CLOEXEC:
+ *  xcodebuild never inherits a lock. */
+const O_EXLOCK = 0x20;
+
+/** The lock on `path` now (an fd to close), or undefined while someone else holds it. Read-only, so another user's
+ *  PhoneDock can lock a file this one created; a file it may not read counts as held. */
+export function tryLock(path: string): number | undefined {
+  try { return openSync(path, constants.O_RDONLY | constants.O_CREAT | O_EXLOCK | constants.O_NONBLOCK, 0o644); }
+  catch (e) {
+    const c = (e as NodeJS.ErrnoException).code;
+    if (c === 'EAGAIN' || c === 'EWOULDBLOCK' || c === 'EACCES' || c === 'EPERM') return undefined;
+    throw e;
   }
 }
 
-function readCooldowns(buildsDir: string): Record<string, number> {
-  try { const j = JSON.parse(readFileSync(join(buildsDir, '.signing-cooldown.json'), 'utf8')); return j && typeof j === 'object' ? j : {}; } catch { return {}; }
+async function withLock<T>(path: string, o: { signal?: AbortSignal; pollMs?: number; onWait(): void }, fn: () => Promise<T>): Promise<T> {
+  let fd = tryLock(path);
+  if (fd === undefined) {
+    o.onWait();
+    while ((fd = tryLock(path)) === undefined) {
+      if (o.signal?.aborted) throw cancelledError();
+      await new Promise((r) => setTimeout(r, o.pollMs ?? 2_000));
+    }
+  }
+  try { return await fn(); } finally { closeSync(fd); }
 }
 
-/** Make sure a signed build that this phone can run exists, building it when the key changed, the signing is about
- *  to expire, or the phone isn't in the profile yet. */
+/** Whether a runner PhoneDock started may still run on a phone: 'pending' from just before xcodebuild starts until
+ *  xcodebuild has exited and devicectl shows no runner on the phone; 'clean' after. No record: nobody knows (an
+ *  older PhoneDock, another tool), so look. */
+export interface CleanupRecord { udid: string; state: 'clean' | 'pending'; xcodebuild?: number; xctestrun?: string; simulator?: boolean }
+
+/** Per Mac, shared by every PhoneDock whatever its state directory: which one owns each phone (<udid>.lock, a kernel
+ *  lock held while it runs WebDriverAgent there) and the cleanup each one still owes (<udid>.<uid>.json). A cleanup
+ *  outlives a Disconnect and a crash: the next start, or the phone reconnecting, finishes it. */
+export class WdaLedger {
+  private readonly dir: string;
+  private readonly shared: boolean;
+  private readonly held = new Map<string, number>();
+  private readonly uid = process.getuid?.() ?? 0;
+
+  /** `shared`: a machine-wide directory every user's PhoneDock adds to, so the directories this creates are made
+   *  sticky and writable by all (like /tmp: nobody can remove another's files). */
+  constructor(dir: string, o: { shared?: boolean } = {}) { this.dir = dir; this.shared = !!o.shared; }
+
+  private file(udid: string, ext: string): string {
+    if (!existsSync(this.dir)) {
+      const first = mkdirSync(this.dir, { recursive: true });
+      if (first && this.shared) {
+        for (let d = this.dir; ; d = dirname(d)) { try { chmodSync(d, 0o1777); } catch { /* not ours */ } if (d === first || d === dirname(d)) break; }
+      }
+    }
+    return join(this.dir, `${udid.replace(/[^A-Za-z0-9-]/g, '_')}${ext}`);
+  }
+
+  /** Own the phone (re-entrant). False while another PhoneDock process on this Mac owns it. */
+  lock(udid: string): boolean {
+    if (this.held.has(udid)) return true;
+    const fd = tryLock(this.file(udid, '.lock'));
+    if (fd === undefined) return false;
+    this.held.set(udid, fd);
+    return true;
+  }
+
+  release(udid: string): void {
+    const fd = this.held.get(udid);
+    if (fd !== undefined) { this.held.delete(udid); closeSync(fd); }
+  }
+
+  mark(udid: string, r: Omit<CleanupRecord, 'udid' | 'state'> = {}): void {
+    writeFileSync(this.file(udid, `.${this.uid}.json`), JSON.stringify({ udid, state: 'pending', ...r }), { mode: 0o600 });
+  }
+
+  clean(udid: string): void {
+    writeFileSync(this.file(udid, `.${this.uid}.json`), JSON.stringify({ udid, state: 'clean' }), { mode: 0o600 });
+  }
+
+  record(udid: string): CleanupRecord | undefined {
+    try { return JSON.parse(readFileSync(this.file(udid, `.${this.uid}.json`), 'utf8')); } catch { return undefined; }
+  }
+
+  state(udid: string): CleanupRecord['state'] | undefined { return this.record(udid)?.state; }
+
+  pending(): CleanupRecord[] {
+    let names: string[] = [];
+    try { names = readdirSync(this.dir).filter((n) => n.endsWith(`.${this.uid}.json`)); } catch { return []; }
+    const out: CleanupRecord[] = [];
+    for (const n of names) {
+      try { const r = JSON.parse(readFileSync(join(this.dir, n), 'utf8')); if (r?.state === 'pending' && typeof r.udid === 'string') out.push(r); } catch { /* unreadable */ }
+    }
+    return out;
+  }
+}
+
+/** Make sure a signed build that this phone can run exists. `mayBuild` (a person's Set Up or Retry): build when the
+ *  key changed, the signing expires within a day, or the phone isn't in the profile yet. Without it (anything
+ *  automatic) only an existing build that still works is used; otherwise a person has to set up again, because only
+ *  they may ask Apple to sign anything. */
 export async function ensureBuild(d: WdaBuildDeps, udid: string, cfg: WdaConfig, onProgress: (l: string) => void,
-  opts: { force?: string; signal?: AbortSignal } = {}): Promise<{ dir: string; xctestrun: string; built: boolean; reason?: string; builtAt?: number }> {
+  opts: { force?: string; signal?: AbortSignal; mayBuild?: boolean } = {}): Promise<{ dir: string; xctestrun: string; built: boolean; reason?: string }> {
+  const mayBuild = opts.mayBuild ?? true;
   const xcode = await d.xcode();
   if (!xcode) throw preflight(undefined, undefined, udid)!;
   const src = await d.source(onProgress);
@@ -679,67 +743,58 @@ export async function ensureBuild(d: WdaBuildDeps, udid: string, cfg: WdaConfig,
   const dir = join(d.buildsDir, key);
   const derivedData = join(dir, 'DerivedData');
   d.mkdir(d.buildsDir);
-  return withBuildLock(key, () => withFileLock(d, join(d.buildsDir, `.${key}.lock`), opts.signal,
-    () => onProgress('Waiting for another PhoneDock build of WebDriverAgent to finish…'), async () => {
-      if (opts.signal?.aborted) throw cancelledError();
-      // Checked inside the lock: another phone's build may have just made what this one needs.
-      let xctestrun = findXctestrun(derivedData, platform);
-      const profile = xctestrun && device ? await readProfile(runnerApp(derivedData, platform), d.exec) : undefined;
-      const reason = opts.force ?? rebuildReason({ xctestrun, profile, udid, now: d.now(), device });
-      if (!reason && xctestrun) {
-        d.writeFile(join(dir, '.last-used'), new Date(d.now()).toISOString() + '\n');
-        return { dir, xctestrun, built: false, builtAt: builtAtOf(dir) };
-      }
-      // Apple refused this team a new app ID or certificate lately: don't ask again (and again) until it may work.
-      const until = readCooldowns(d.buildsDir)[cfg.team];
-      if (device && typeof until === 'number' && until > d.now()) {
-        throw new PhoneDockError(`Team ${cfg.team} reached Apple’s limit for new apps; PhoneDock waits before asking again`, 'signing_limit', 409,
-          [`Try again after ${new Date(until).toISOString().slice(0, 16).replace('T', ' ')} UTC, or use another team.`]);
-      }
-      onProgress(`Building WebDriverAgent ${src.version} ${device ? `for team ${cfg.team}` : 'for the simulator'} (${reason}). The first build takes a few minutes…`);
-      d.mkdir(dir);
-      const project = join(dir, 'src');
-      // Build a private copy: xcodebuild may write next to the project, and the verified component stays as downloaded.
-      if (!existsSync(join(project, 'WebDriverAgent.xcodeproj'))) {
-        d.remove(project);
-        await d.copyTree(src.path, project);
-      }
-      try {
-        await runBuild(d.spawn, { project: join(project, 'WebDriverAgent.xcodeproj'), derivedData, destination, team: cfg.team, bundleId: cfg.bundleId, apiKey: cfg.apiKey },
-          d.env, onProgress, { udid, signal: opts.signal });
-      } catch (e) {
-        if (e instanceof PhoneDockError && e.code === 'signing_limit') {
-          const all = readCooldowns(d.buildsDir);
-          all[cfg.team] = d.now() + SIGNING_COOLDOWN_MS;
-          d.writeFile(join(d.buildsDir, '.signing-cooldown.json'), JSON.stringify(all) + '\n');
-        }
-        throw e;
-      }
-      xctestrun = findXctestrun(derivedData, platform);
-      if (!xctestrun) throw new PhoneDockError('Couldn’t build WebDriverAgent', 'wda_setup_failed', 502, undefined, `xcodebuild build-for-testing wrote no ${platform} .xctestrun under ${derivedData}`);
-      const now = d.now(), at = new Date(now).toISOString();
-      d.writeFile(join(dir, 'build.json'), JSON.stringify({ key, wdaVersion: src.version, artifact: src.key, platform, team: cfg.team, bundleId: cfg.bundleId, xcode: xcode.build, builtAt: at, reason }, null, 2) + '\n');
-      d.writeFile(join(dir, '.last-used'), at + '\n');
-      pruneBuilds(d, key);
-      return { dir, xctestrun, built: true, reason, builtAt: now };
-    }));
+  // One build at a time per key: two phones on one team share it, and two xcodebuilds in one DerivedData fight over
+  // its build database (also across PhoneDock processes sharing this directory).
+  return withLock(join(d.buildsDir, `.${key}.lock`), { signal: opts.signal, pollMs: d.lockPollMs,
+    onWait: () => onProgress('Waiting for another PhoneDock build of WebDriverAgent to finish…') }, async () => {
+    if (opts.signal?.aborted) throw cancelledError();
+    // Checked inside the lock: another phone's build may have just made what this one needs.
+    let xctestrun = findXctestrun(derivedData, platform);
+    const profile = xctestrun && device ? await readProfile(runnerApp(derivedData, platform), d.exec) : undefined;
+    const facts = { xctestrun, profile, udid, now: d.now(), device };
+    const reason = opts.force ?? rebuildReason(mayBuild ? facts : { ...facts, marginMs: 0 });
+    if (!reason && xctestrun) {
+      d.writeFile(join(dir, '.last-used'), new Date(d.now()).toISOString() + '\n');
+      return { dir, xctestrun, built: false };
+    }
+    if (!mayBuild) {
+      throw new PhoneDockError('WebDriverAgent needs to be built and signed again', 'wda_rebuild_needed', 409,
+        [`PhoneDock only signs when you ask (${reason}). Press Set Up Control in PhoneDock, or run \`phonedock ios wda-setup --udid ${udid}\`.`]);
+    }
+    onProgress(`Building WebDriverAgent ${src.version} ${device ? `for team ${cfg.team}` : 'for the simulator'} (${reason}). The first build takes a few minutes…`);
+    d.mkdir(dir);
+    const project = join(dir, 'src');
+    // Build a private copy: xcodebuild may write next to the project, and the verified component stays as downloaded.
+    if (!existsSync(join(project, 'WebDriverAgent.xcodeproj'))) {
+      d.remove(project);
+      await d.copyTree(src.path, project);
+    }
+    await runBuild(d.spawn, { project: join(project, 'WebDriverAgent.xcodeproj'), derivedData, destination, team: cfg.team, bundleId: cfg.bundleId, apiKey: cfg.apiKey },
+      d.env, onProgress, { udid, signal: opts.signal });
+    xctestrun = findXctestrun(derivedData, platform);
+    if (!xctestrun) throw new PhoneDockError('Couldn’t build WebDriverAgent', 'wda_setup_failed', 502, undefined, `xcodebuild build-for-testing wrote no ${platform} .xctestrun under ${derivedData}`);
+    const at = new Date(d.now()).toISOString();
+    d.writeFile(join(dir, 'build.json'), JSON.stringify({ key, wdaVersion: src.version, artifact: src.key, platform, team: cfg.team, bundleId: cfg.bundleId, xcode: xcode.build, builtAt: at, reason }, null, 2) + '\n');
+    d.writeFile(join(dir, '.last-used'), at + '\n');
+    pruneBuilds(d, key);
+    return { dir, xctestrun, built: true, reason };
+  });
 }
 
-function builtAtOf(dir: string): number | undefined {
-  try { const t = Date.parse(JSON.parse(readText(join(dir, 'build.json')) ?? '{}').builtAt); return Number.isFinite(t) ? t : undefined; } catch { return undefined; }
-}
-
-/** Builds nobody launched for 30 days (an old Xcode, an old WebDriverAgent pin, another team) are deleted. */
+/** Builds nobody launched for 30 days (an old Xcode, an old WebDriverAgent pin, another team) are deleted, unless a
+ *  build of that key is running (its lock is held). */
 export function pruneBuilds(d: Pick<WdaBuildDeps, 'buildsDir' | 'now' | 'remove'>, keep: string, read: (p: string) => string | undefined = readText): string[] {
   const removed: string[] = [];
   let names: string[] = [];
   try { names = readdirSync(d.buildsDir); } catch { return removed; }
   for (const n of names) {
-    if (n === keep || n.startsWith('.') || buildLocks.has(n) || existsSync(join(d.buildsDir, `.${n}.lock`))) continue;
+    if (n === keep || n.startsWith('.')) continue;
     const used = Date.parse(read(join(d.buildsDir, n, '.last-used'))?.trim() ?? '');
     if (Number.isFinite(used) && d.now() - used < BUILD_KEEP_MS) continue;
     if (!Number.isFinite(used) && !existsSync(join(d.buildsDir, n, 'build.json'))) continue;   // not ours, or mid-build
-    d.remove(join(d.buildsDir, n)); removed.push(n);
+    const fd = tryLock(join(d.buildsDir, `.${n}.lock`));
+    if (fd === undefined) continue;
+    try { d.remove(join(d.buildsDir, n)); removed.push(n); } finally { closeSync(fd); }
   }
   return removed;
 }
@@ -748,42 +803,59 @@ function readText(p: string): string | undefined {
   try { return statSync(p).isFile() ? readFileSync(p, 'utf8') : undefined; } catch { return undefined; }
 }
 
-/** A build this recent that the phone refuses is refused for a reason a rebuild won't fix. */
-const FRESH_BUILD_MS = 3_600_000;
-
 export interface Launched {
   runner: Runner;
   /** How this Mac reaches it: the phone's tunnel address and the port it printed. */
   url: string;
-  /** Sharing on: what other Macs connect to (the phone's local hostname, else its Wi-Fi address). */
+  /** Sharing on: what other Macs connect to (the Wi-Fi address WebDriverAgent reports). */
   sharedUrl?: string;
-  /** Private mode: the phone's Wi-Fi address refused WebDriverAgent's ports ('refused'), couldn't be checked from
-   *  here ('unverified': the bind itself was confirmed), or the phone has no Wi-Fi address ('none'). */
-  lanCheck?: 'refused' | 'unverified' | 'none';
+  /** Private mode: the phone's Wi-Fi address refused WebDriverAgent's ports ('refused'), or the phone reports no
+   *  Wi-Fi address ('none': the bind to the tunnel address is the evidence). */
+  lanCheck?: 'refused' | 'none';
+  /** The Wi-Fi address WebDriverAgent reported (null: none). */
+  wifi?: string | null;
   built: boolean;
 }
 
-/** Build if needed, then start the runner bound to the phone's private address (or every address when sharing is
- *  on), and fail closed: a runner that didn't bind where it was told to, or that answers on the phone's Wi-Fi address
- *  while it shouldn't, is stopped and reported. `beforeStart` runs between build and start (the supervisor stops the
- *  old runner there, so a failed build leaves a working WebDriverAgent alone). A launch refused for expired signing,
- *  or with a signature an older build no longer passes, rebuilds once. */
+/** Private control needs positive evidence; without it the runner is stopped and the launch fails (retried later). */
+function unverified(why: string): PhoneDockError {
+  return new PhoneDockError('PhoneDock couldn’t confirm WebDriverAgent is reachable only from this Mac, so it stopped it', 'wda_unverified', 502,
+    [`Keep the iPhone connected and awake; PhoneDock tries again. ${LOCAL_NETWORK_HINT}`], why);
+}
+
+/** Build if needed (and allowed), then start the runner bound to the phone's private address (or every address when
+ *  sharing is on), and fail closed. A private launch passes only when WebDriverAgent printed the tunnel address,
+ *  answers /status through it, and, when it reports a Wi-Fi address, that address refuses both of its ports; one
+ *  that answers there is stopped and reported (`wda_exposed`), one that can't be checked is stopped and retried
+ *  (`wda_unverified`). `beforeStart` runs between build and start (the supervisor ends the old runner there, so a
+ *  failed build leaves a working one alone); `onSpawn` as soon as xcodebuild exists. Only `mayBuild` (a person's
+ *  setup) rebuilds, once, when the phone says the signing expired or refuses the signature of an older build. */
 export async function launchWda(d: WdaBuildDeps, udid: string, cfg: WdaConfig, onProgress: (l: string) => void,
-  opts: { timeoutMs?: number; signal?: AbortSignal; beforeStart?: () => Promise<void> } = {}): Promise<Launched> {
-  let b = await ensureBuild(d, udid, cfg, onProgress, { signal: opts.signal });
-  await opts.beforeStart?.();
+  opts: { timeoutMs?: number; signal?: AbortSignal; mayBuild?: boolean; beforeStart?: () => Promise<void>;
+    onSpawn?: (pid: number | undefined, xctestrun: string) => void; onStep?: (step: string, ms: number) => void } = {}): Promise<Launched> {
+  const mayBuild = opts.mayBuild ?? true;
   const destination = destinationFor(udid, cfg);
   const device = isDeviceDestination(destination);
+  const timed = async <T>(step: string, p: Promise<T>): Promise<T> => { const t = d.now(); try { return await p; } finally { opts.onStep?.(step, d.now() - t); } };
+  // The address lookup (devicectl) runs while the build is checked.
+  const endpoint = d.endpoint(udid, cfg);
+  endpoint.catch(() => undefined);
+  let b = await timed('build check', ensureBuild(d, udid, cfg, onProgress, { signal: opts.signal, mayBuild }));
+  await timed('ending the previous runner', opts.beforeStart?.() ?? Promise.resolve());
   const start = async (): Promise<Launched> => {
     if (opts.signal?.aborted) throw cancelledError();
-    const ep = await d.endpoint(udid, cfg);
+    const ep = await endpoint;
+    const t0 = d.now();
     const env: NodeJS.ProcessEnv = {
       ...d.env,
       // Passed to the runner without the prefix (man xcodebuild); FBWebServer binds HTTP and MJPEG to USE_IP.
       TEST_RUNNER_USE_PORT: String(WDA_PORT), TEST_RUNNER_MJPEG_SERVER_PORT: String(MJPEG_PORT),
       ...(cfg.share ? {} : { TEST_RUNNER_USE_IP: ep.host }),
     };
-    const r = await startRunner(d.spawn, { xctestrun: b.xctestrun, destination, env, now: () => d.now(), timeoutMs: opts.timeoutMs, udid, team: cfg.team, signal: opts.signal, apiKey: cfg.apiKey }, onProgress);
+    const r = await startRunner(d.spawn, { xctestrun: b.xctestrun, destination, env, now: () => d.now(), timeoutMs: opts.timeoutMs, udid, team: cfg.team,
+      signal: opts.signal, apiKey: cfg.apiKey, onSpawn: (pid) => opts.onSpawn?.(pid, b.xctestrun) }, onProgress);
+    opts.onStep?.('xcodebuild starting WebDriverAgent', d.now() - t0);
+    const t1 = d.now();
     try {
       const printed = parsePrinted(r.url);
       // FBWebServer prints the address it bound: proof the private binding took effect.
@@ -793,31 +865,28 @@ export async function launchWda(d: WdaBuildDeps, udid: string, cfg: WdaConfig, o
       }
       const port = printed?.port ?? WDA_PORT;
       const url = urlFor(ep.host, port);
+      const status = await d.getJson(`${url}/status`);
+      if (!status?.value) throw unverified(`WebDriverAgent didn’t answer ${url}/status`);
       const out: Launched = { runner: r.runner, url, built: b.built };
       if (device) {
-        const status = await d.getJson(`${url}/status`);
-        const ip = status?.value?.ios?.ip;
-        const wifi = typeof ip === 'string' && ip && !sameHost(ip, ep.host) ? ip : undefined;
-        if (!cfg.share) {
-          // No answer through the tunnel: the Wi-Fi address is unknown, so nothing was checked (the bind was).
-          if (!status) out.lanCheck = 'unverified';
-          else if (!wifi) out.lanCheck = 'none';
-          else {
-            const [http, mjpeg] = await Promise.all([d.probe(wifi, port), d.probe(wifi, MJPEG_PORT)]);
-            if (http === 'open' || mjpeg === 'open') {
-              throw new PhoneDockError('WebDriverAgent answered on the iPhone’s Wi-Fi address', 'wda_exposed', 502,
-                ['PhoneDock stopped it, so nobody on this network can control the iPhone. Set up control again; if it happens again, report it.'],
-                `${http === 'open' ? port : MJPEG_PORT} answered at the iPhone’s Wi-Fi address`);
-            }
-            out.lanCheck = http === 'refused' && mjpeg === 'refused' ? 'refused' : 'unverified';
+        const ios = status.value.ios;
+        if (!ios || typeof ios !== 'object') throw unverified('WebDriverAgent’s /status had no ios section');
+        const wifi = typeof ios.ip === 'string' && ios.ip && !sameHost(ios.ip, ep.host) ? ios.ip as string : null;
+        out.wifi = wifi;
+        if (cfg.share) out.sharedUrl = wifi ? urlFor(wifi, port) : undefined;
+        else if (!wifi) out.lanCheck = 'none';
+        else {
+          const [http, mjpeg] = await Promise.all([d.probe(wifi, port), d.probe(wifi, MJPEG_PORT)]);
+          if (http === 'open' || mjpeg === 'open') {
+            throw new PhoneDockError('WebDriverAgent answered on the iPhone’s Wi-Fi address', 'wda_exposed', 502,
+              ['PhoneDock stopped it, so nobody on this network can control the iPhone. Set up control again; if it happens again, report it.'],
+              `${http === 'open' ? port : MJPEG_PORT} answered at the iPhone’s Wi-Fi address`);
           }
-        } else {
-          // The Wi-Fi address WebDriverAgent itself reports is what other machines can reach; a local hostname is
-          // only a fallback (devicectl's names may be CoreDevice aliases only this Mac resolves).
-          const name = ep.lanName && /\.local$/i.test(ep.lanName) && !/coredevice/i.test(ep.lanName) ? ep.lanName : undefined;
-          out.sharedUrl = wifi ? urlFor(wifi, port) : name ? urlFor(name, port) : undefined;
+          if (http !== 'refused' || mjpeg !== 'refused') throw unverified(`the iPhone’s Wi-Fi address didn’t refuse ${http !== 'refused' ? port : MJPEG_PORT} (no answer either way)`);
+          out.lanCheck = 'refused';
         }
       }
+      opts.onStep?.(cfg.share ? 'checking it answers' : 'checking it is private', d.now() - t1);
       onProgress(cfg.share
         ? `WebDriverAgent is running; other Macs on this Wi-Fi can reach it${out.sharedUrl ? ` at ${out.sharedUrl}` : ''}`
         : 'WebDriverAgent is running, reachable only from this Mac');
@@ -826,63 +895,10 @@ export async function launchWda(d: WdaBuildDeps, udid: string, cfg: WdaConfig, o
   };
   try { return await start(); }
   catch (e) {
-    if (!(e instanceof PhoneDockError) || b.built) throw e;
-    const stale = e.code === 'signing_expired'
-      || (e.code === 'signature_invalid' && (b.builtAt === undefined || d.now() - b.builtAt > FRESH_BUILD_MS));
-    if (!stale) throw e;
+    if (!mayBuild || b.built || !(e instanceof PhoneDockError) || (e.code !== 'signing_expired' && e.code !== 'signature_invalid')) throw e;
     b = await ensureBuild(d, udid, cfg, onProgress, { force: e.code === 'signing_expired' ? 'its signing expired' : 'the iPhone refused its signature', signal: opts.signal });
+    await opts.beforeStart?.();
     return { ...(await start()), built: true };
-  }
-}
-
-// ── one PhoneDock per phone on this Mac ────────────────────────────────────
-
-export type ClaimResult = { ok: true } | { ok: false; pid: number };
-
-/** Host-wide: which PhoneDock process runs WebDriverAgent for a phone (two daemons, even with different state
- *  directories, would fight over the phone). A claim file per phone holds the owner's pid and its xcodebuild's; a
- *  dead owner's claim is taken over after its orphaned xcodebuild (if still alive) is stopped. */
-export class HostClaims {
-  private readonly dir: string;
-  private readonly pid: number;
-  private readonly alive: (pid: number) => boolean;
-  private readonly stopOrphan: (pid: number) => void;
-
-  constructor(dir: string, o: { pid?: number; alive?: (pid: number) => boolean; stopOrphan?: (pid: number) => void } = {}) {
-    this.dir = dir;
-    this.pid = o.pid ?? process.pid;
-    this.alive = o.alive ?? pidAlive;
-    this.stopOrphan = o.stopOrphan ?? (() => undefined);
-  }
-
-  private file(udid: string): string { return join(this.dir, `${udid.replace(/[^A-Za-z0-9-]/g, '_')}.json`); }
-  private read(udid: string): { pid?: number; child?: number } | undefined {
-    try { return JSON.parse(readFileSync(this.file(udid), 'utf8')); } catch { return undefined; }
-  }
-
-  acquire(udid: string): ClaimResult {
-    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    for (let i = 0; i < 3; i++) {
-      try { writeFileSync(this.file(udid), JSON.stringify({ pid: this.pid, at: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }); return { ok: true }; }
-      catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
-      const rec = this.read(udid);
-      if (rec?.pid === this.pid) return { ok: true };
-      if (rec?.pid && this.alive(rec.pid)) return { ok: false, pid: rec.pid };
-      if (rec?.child && this.alive(rec.child)) this.stopOrphan(rec.child);
-      rmSync(this.file(udid), { force: true });
-    }
-    return { ok: false, pid: -1 };
-  }
-
-  /** Record (or clear) the xcodebuild that runs WebDriverAgent, so a successor can stop it if this process dies. */
-  setChild(udid: string, child?: number): void {
-    const rec = this.read(udid);
-    if (rec?.pid !== this.pid) return;
-    writeFileSync(this.file(udid), JSON.stringify({ ...rec, child }), { mode: 0o600 });
-  }
-
-  release(udid: string): void {
-    if (this.read(udid)?.pid === this.pid) rmSync(this.file(udid), { force: true });
   }
 }
 
@@ -904,28 +920,29 @@ export interface WdaControl {
   updatedAt: string;
   /** Other Macs on the Wi-Fi may control it too (the person turned sharing on). */
   shared: boolean;
-  /** Sharing on: what another Mac passes to `phonedock connect --ios`. */
+  /** Sharing on: what another Mac passes to `phonedock connect --ios` (follows the phone's Wi-Fi address). */
   sharedUrl?: string;
   /** Sharing off: what the check of the phone's Wi-Fi address after launch found. */
-  lanCheck?: 'refused' | 'unverified' | 'none';
+  lanCheck?: 'refused' | 'none';
 }
 
 export interface SupervisorDeps {
   now(): number;
   /** udids PhoneDock manages WebDriverAgent for (ios-device.json). */
   managed(): string[];
-  saveUrl(udid: string, url: string): void;
-  /** GET /status answered (fresh, short timeout). */
-  status(url: string): Promise<boolean>;
+  /** GET /status (fresh, short timeout): whether it answered, and the Wi-Fi address WebDriverAgent reports. */
+  status(url: string): Promise<{ ok: boolean; ip?: string | null } | false>;
   phone(udid: string): Promise<PhoneFacts>;
-  /** Build if needed, then start the runner (resolves once it is verified). `beforeStart` runs after the build, before
-   *  the new runner starts; `signal` aborts the build or the launch (Stop, Disconnect, daemon exit). */
-  launch(udid: string, onProgress: (l: string) => void, ctl: { signal: AbortSignal; beforeStart: () => Promise<void> }): Promise<Omit<Launched, 'built'>>;
-  /** End WebDriverAgent's runner process on the phone and confirm it's gone (a runner can outlive its xcodebuild).
-   *  Resolves with how many are left. */
+  /** Start the runner from the existing build (`mayBuild`: a person asked, so it may build and sign); resolves once it
+   *  is verified. `beforeStart` runs after the build, before the new runner starts; `onSpawn` as soon as xcodebuild
+   *  exists; `signal` aborts the build or the launch (Stop, Disconnect, daemon exit). */
+  launch(udid: string, onProgress: (l: string) => void,
+    ctl: { signal: AbortSignal; mayBuild: boolean; beforeStart: () => Promise<void>; onSpawn: (pid: number | undefined, xctestrun: string) => void }): Promise<Omit<Launched, 'built'>>;
+  /** End every WebDriverAgent runner on the phone and confirm: resolves with how many are left. */
   stopOnPhone(udid: string): Promise<number>;
-  /** One PhoneDock process per phone on this Mac (HostClaims). */
-  claims?: Pick<HostClaims, 'acquire' | 'setChild' | 'release'>;
+  ledger?: Pick<WdaLedger, 'lock' | 'release' | 'mark' | 'clean' | 'state' | 'pending'> & { record?(udid: string): CleanupRecord | undefined };
+  /** End the xcodebuild a PhoneDock that died left behind (named by its cleanup record). */
+  killOrphan?(rec: CleanupRecord): void;
   /** The person turned sharing on for this phone. */
   shared?(udid: string): boolean;
   log(msg: string): void;
@@ -934,7 +951,7 @@ export interface SupervisorDeps {
 
 export interface SuperviseOptions {
   tickMs: number;
-  /** /status may be quiet this long before the runner counts as stuck (and, at launch, before Local Network is blamed). */
+  /** /status may be quiet this long before the runner counts as stuck. */
   graceMs: number;
   backoffMs: readonly number[];
   /** Failed launches and unexpected stops before giving up until the phone reconnects or setup runs again. */
@@ -946,59 +963,53 @@ export interface SuperviseOptions {
   maxPersonAttempts: number;
   /** A runner counts as healthy, and earlier failures are forgiven, once it has been up this long and answers. */
   minUptimeMs: number;
-  /** How long stopping waits for xcodebuild and the phone (daemon exit, Stop, Disconnect). */
+  /** How long ending the runner on the phone may take (devicectl over Wi-Fi is slow); xcodebuild is always waited for. */
   stopWaitMs: number;
   /** Run tick() on a timer once started (tests drive tick() themselves). */
   autoTick: boolean;
 }
 export const SUPERVISE_DEFAULTS: SuperviseOptions = {
   tickMs: 15_000, graceMs: 45_000, backoffMs: [5_000, 15_000, 60_000, 300_000, 900_000], maxAttempts: 6, personPollMs: 30_000,
-  personBackoffMs: [30_000, 60_000, 300_000, 900_000], maxPersonAttempts: 8, minUptimeMs: 60_000, stopWaitMs: 8_000, autoTick: true,
+  personBackoffMs: [30_000, 60_000, 300_000, 900_000], maxPersonAttempts: 8, minUptimeMs: 60_000, stopWaitMs: 60_000, autoTick: true,
 };
 
 interface Entry {
-  state: WdaState; message: string; hint?: string;
+  state: WdaState; message: string; hint?: string; nextAt?: number; updatedAt: number;
   url?: string; runner?: Runner;
   /** the tunnel address the runner is bound to */
   boundHost?: string;
   sharedUrl?: string;
+  wifi?: string | null;
   lanCheck?: WdaControl['lanCheck'];
   attempts: number;
   personAttempts: number;
-  nextAt?: number;
-  /** last time /status answered */
+  /** last time /status answered (a launch counts: it checked /status) */
   okAt?: number;
-  /** /status answered at least once since this runner started */
-  answered: boolean;
   /** devicectl reported the phone locked while waiting (so "unlocked" now means something) */
   sawLocked: boolean;
-  /** gave up on something only a person can change (an account, a team, Apple's quota): no restart on reconnect */
+  /** gave up on something only a person can change (signing, an account, a team, the binding): no restart on reconnect */
   needsPerson?: boolean;
-  /** a runner was started on the phone at some point (so stopping must look there) */
-  launched?: boolean;
-  /** runners left on the phone from before (another service, a crash) were ended */
-  phoneClean?: boolean;
   /** when a changed tunnel address last caused a relaunch */
-  tunnelRelaunchAt?: number;
-  claimed?: boolean;
+  tunnelAt?: number;
   reachable?: boolean;
-  inflight?: Promise<void>;
   /** aborted by Stop, Disconnect and daemon exit: a build or launch in flight stops */
   abort: AbortController;
   gone?: boolean;
-  updatedAt: number;
 }
 
 /** Waits for the person that only a launch revealed: retried with backoff. */
 const PERSON_CODES = new Set(['device_locked', 'no_device', 'not_found', 'not_paired', 'developer_mode_off']);
-/** Failures only a person can fix (an account, a team, Apple's quota, the binding): no automatic retry at all. */
+/** Failures only a person can fix (signing, an account, a team, Apple's quota, the binding): no automatic retry. */
 const AUTHORITY_CODES = new Set(['xcode_account_missing', 'bundle_id_unavailable', 'device_not_registered', 'team_unknown', 'team_required',
-  'xcode_missing', 'ios_unsupported', 'signing_limit', 'wda_exposed', 'exec_failed']);
+  'xcode_missing', 'ios_unsupported', 'signing_limit', 'signing_expired', 'signature_invalid', 'wda_rebuild_needed', 'wda_exposed', 'exec_failed']);
 
+/** Keeps WebDriverAgent running on the phones PhoneDock manages. Everything that touches a phone (launch, Stop,
+ *  Disconnect, the cleanup after an exit, daemon exit) runs in that phone's lane, one at a time. */
 export class WdaSupervisor {
   private readonly deps: SupervisorDeps;
   private readonly o: SuperviseOptions;
   private readonly entries = new Map<string, Entry>();
+  private readonly lanes = new Map<string, { tail: Promise<unknown>; busy: number }>();
   private timer?: NodeJS.Timeout;
   private ticking?: Promise<void>;
   /** Only a started supervisor (the daemon's, unfiltered) launches anything on its own; setup() always may. */
@@ -1019,24 +1030,32 @@ export class WdaSupervisor {
     const shared = !!this.deps.shared?.(udid);
     return {
       managed: true, state: e.state, message: e.message, ...(e.hint ? { hint: e.hint } : {}),
-      ...(e.url ? { wdaUrl: e.url } : {}), attempts: e.attempts,
+      ...(e.url && e.runner ? { wdaUrl: e.url } : {}), attempts: e.attempts,
       ...(e.nextAt && e.state === 'retrying' ? { nextRetryAt: new Date(e.nextAt).toISOString() } : {}),
       updatedAt: new Date(e.updatedAt).toISOString(),
-      shared, ...(shared && e.sharedUrl ? { sharedUrl: e.sharedUrl } : {}),
+      shared, ...(shared && e.sharedUrl && e.runner ? { sharedUrl: e.sharedUrl } : {}),
       ...(!shared && e.lanCheck && e.runner ? { lanCheck: e.lanCheck } : {}),
     };
   }
 
-  /** Daemon start: start WebDriverAgent on each managed phone (ending any runner left on it), then watch them. */
+  /** The address a running runner is bound to (input goes there only while devicectl reports it for this phone). */
+  boundUrl(udid: string): { url: string; host: string } | undefined {
+    const e = this.entries.get(udid);
+    return e?.runner?.alive() && e.state === 'running' && e.url && e.boundHost ? { url: e.url, host: e.boundHost } : undefined;
+  }
+
+  /** Daemon start: finish cleanups an earlier PhoneDock owed, start WebDriverAgent on each managed phone, then watch. */
   start(): void {
     if (this.started || this.closing) return;
     this.started = true;
-    for (const udid of this.deps.managed()) void this.ensure(udid, 'PhoneDock started');
+    const managed = new Set(this.deps.managed());
+    for (const r of this.deps.ledger?.pending() ?? []) if (!managed.has(r.udid)) void this.cleanUp(r.udid);
+    for (const udid of managed) void this.ensure(udid, 'PhoneDock started');
     if (this.o.autoTick && !this.timer) { this.timer = setInterval(() => { void this.tick(); }, this.o.tickMs); this.timer.unref(); }
   }
 
-  /** Daemon exit: cancel builds and launches (including setups waiting their turn), stop every runner this process
-   *  started, on the Mac and on the phone, and wait for that (bounded). The next daemon starts them again. */
+  /** Daemon exit: cancel builds and launches, end every runner this process started (on the Mac, and on the phone
+   *  within stopWaitMs), and wait for that. An unconfirmed cleanup stays recorded for the next start. */
   async stop(): Promise<void> {
     this.closing = true;
     this.started = false;
@@ -1044,30 +1063,36 @@ export class WdaSupervisor {
     this.timer = undefined;
     const all = [...this.entries];
     this.entries.clear();
-    await this.bounded(Promise.all(all.map(([udid, e]) => this.teardown(udid, e, false))), this.o.stopWaitMs * 2 + 1_000);
+    for (const [, e] of all) { e.gone = true; e.abort.abort(); }
+    await Promise.all([
+      ...all.map(([udid, e]) => this.lane(udid, () => this.teardown(udid, e, { release: true }))),
+      ...[...this.lanes.values()].map((l) => l.tail.catch(() => undefined)),
+    ]);
   }
 
   /** The phones devicectl lists right now. A managed phone that comes back (USB or Wi-Fi) gets a start; one that
-   *  was given up on gets a fresh count, unless only a person can fix why. A changed tunnel address relaunches (the
-   *  runner listens on the old one). A flap while running changes nothing: the tick watches /status. */
+   *  was given up on gets a fresh count, unless only a person can fix why. A changed tunnel address relaunches in
+   *  any state (the runner listens on the old one), bounded. A cleanup owed for a phone that is back is finished. */
   observe(phones: { udid: string; reachable: boolean; tunnelIp?: string }[]): void {
     if (!this.started) return;
     const seen = new Map(phones.map((p) => [p.udid, p]));
-    for (const udid of this.deps.managed()) {
+    const managed = new Set(this.deps.managed());
+    for (const udid of managed) {
       const e = this.entry(udid);
       const p = seen.get(udid);
       const now = p?.reachable ?? false;
       const was = e.reachable;
       e.reachable = now;
-      if (!now || e.inflight) continue;
-      if (e.state === 'running' && e.runner && e.boundHost && p?.tunnelIp && !sameHost(p.tunnelIp, e.boundHost)) {
+      if (!now || this.busy(udid)) continue;
+      if (e.runner && e.boundHost && p?.tunnelIp && !sameHost(p.tunnelIp, e.boundHost)) {
         // Not the runner's fault, so not counted, unless it keeps happening (a flapping tunnel mustn't relaunch forever).
         const t = this.deps.now();
-        if (e.tunnelRelaunchAt !== undefined && t - e.tunnelRelaunchAt < 120_000) {
-          e.attempts++;
-          if (e.attempts >= this.o.maxAttempts) { const r = e.runner; e.runner = undefined; r.kill(); this.giveUp(e, 'the iPhone’s developer connection keeps changing'); this.cleanUpPhone(udid, e); continue; }
+        if (e.tunnelAt !== undefined && t - e.tunnelAt < 120_000 && ++e.attempts >= this.o.maxAttempts) {
+          this.giveUp(e, 'the iPhone’s developer connection keeps changing');
+          void this.lane(udid, () => this.teardown(udid, e, {}));
+          continue;
         }
-        e.tunnelRelaunchAt = t;
+        e.tunnelAt = t;
         void this.ensure(udid, 'the iPhone’s developer connection changed');
         continue;
       }
@@ -1076,43 +1101,51 @@ export class WdaSupervisor {
       if (e.state === 'failed') { e.attempts = 0; e.personAttempts = 0; }
       void this.ensure(udid, 'the iPhone reconnected');
     }
+    for (const r of this.deps.ledger?.pending() ?? []) {
+      if (!managed.has(r.udid) && seen.get(r.udid)?.reachable && !this.busy(r.udid)) void this.cleanUp(r.udid);
+    }
   }
 
-  /** Set up (or redo) WebDriverAgent now, for a person or agent who asked. Waits for a launch already under way
-   *  (one launcher per phone), builds, and only then replaces the running WebDriverAgent, so a setup that fails to
-   *  build leaves a working one alone. Rejects with the reason. */
-  async setup(udid: string, onProgress: (l: string) => void): Promise<{ url: string; pid?: number }> {
-    const stillWanted = () => !this.closing && this.deps.managed().includes(udid);
-    if (!stillWanted()) throw cancelledError();
-    let e = this.entry(udid);
-    while (e.inflight) {
-      await e.inflight.catch(() => undefined);
-      // Stop, Disconnect or daemon exit while this setup waited its turn: it doesn't start anything.
-      if (!stillWanted()) throw cancelledError();
-      e = this.entry(udid);
-    }
-    const c = this.claim(udid, e);
-    if (!c.ok) {
-      throw new PhoneDockError('Another PhoneDock service on this Mac runs WebDriverAgent for this iPhone', 'busy', 409,
-        ['Stop control in that PhoneDock, or set it up from there.'], `owned by process ${c.pid}`);
-    }
-    e.attempts = 0; e.personAttempts = 0; e.needsPerson = false;
-    let failure: unknown;
-    const run = (async () => {
+  /** Set up (or redo) WebDriverAgent now, for a person who asked: may build and sign. Waits for whatever the phone's
+   *  lane is doing, builds, and only then replaces the running WebDriverAgent (so a failed build leaves a working
+   *  one alone), unless `stopFirst` (sharing turned off: the shared runner goes before anything else). */
+  async setup(udid: string, onProgress: (l: string) => void, o: { stopFirst?: boolean } = {}): Promise<{ url: string; pid?: number }> {
+    const wanted = () => !this.closing && this.deps.managed().includes(udid);
+    if (!wanted()) throw cancelledError();
+    return this.lane(udid, async () => {
+      // Stop, Disconnect or daemon exit while this setup waited its turn: it starts nothing.
+      if (!wanted()) throw cancelledError();
+      const e = this.entry(udid);
+      if (!this.claim(udid)) {
+        throw new PhoneDockError('Another PhoneDock service on this Mac runs WebDriverAgent for this iPhone', 'busy', 409,
+          ['Stop control in that PhoneDock, or set it up from there.']);
+      }
+      e.attempts = 0; e.personAttempts = 0; e.needsPerson = false;
       this.set(e, 'starting', 'Setting up WebDriverAgent…');
-      try { await this.launchNow(udid, e, onProgress); }
-      catch (err) {
-        failure = err;
+      try {
+        if (o.stopFirst && e.runner) await this.teardown(udid, e, {});
+        await this.launchNow(udid, e, true, onProgress);
+      } catch (err) {
         if (e.runner?.alive()) this.set(e, 'running', 'WebDriverAgent is running');   // the old one still serves
         else this.failed(udid, e, err, true);
-      }
-    })();
-    const tracked: Promise<void> = run.finally(() => { if (e.inflight === tracked) e.inflight = undefined; this.deps.changed?.(udid); });
-    e.inflight = tracked;
-    await tracked;
-    if (failure) throw failure;
-    if (e.gone || !e.url) throw cancelledError();
-    return { url: e.url, ...(e.runner?.pid ? { pid: e.runner.pid } : {}) };
+        throw err;
+      } finally { this.deps.changed?.(udid); }
+      if (e.gone || !e.url) throw cancelledError();
+      return { url: e.url, ...(e.runner?.pid ? { pid: e.runner.pid } : {}) };
+    });
+  }
+
+  /** Stop the runner (on the Mac and the phone) but keep managing the phone: sharing is being turned off, and nothing
+   *  may keep serving the Wi-Fi meanwhile. Resolves with how many runners are left on the phone. */
+  halt(udid: string, why: string): Promise<number> {
+    const e = this.entry(udid);
+    e.abort.abort(); e.abort = new AbortController();
+    return this.lane(udid, async () => {
+      const left = await this.teardown(udid, e, {});
+      this.set(e, 'failed', `WebDriverAgent stopped: ${why}`, 'Set Up Control starts it again.');
+      this.deps.changed?.(udid);
+      return left;
+    });
   }
 
   /** Try again now with a fresh count (setup failed and the previous configuration was put back). */
@@ -1120,48 +1153,17 @@ export class WdaSupervisor {
     if (!this.started || !this.deps.managed().includes(udid)) return;
     const e = this.entry(udid);
     e.attempts = 0; e.personAttempts = 0; e.needsPerson = false;
-    if (!e.inflight && e.state !== 'running') void this.ensure(udid, why);
+    if (!this.busy(udid) && e.state !== 'running') void this.ensure(udid, why);
   }
 
-  /** Stop managing a phone (Stop Control, Disconnect): cancel a build or launch in flight, stop the runner on the Mac
-   *  and on the phone, and forget the state. Resolves once that's done (bounded). */
+  /** Stop Control and Disconnect: cancel a build or launch in flight, end WebDriverAgent on the Mac and every runner on
+   *  the phone (managed or not: the person asked), and stop managing it. Resolves with how many runners are left on
+   *  the phone (0: confirmed none; -1: couldn't confirm, so the cleanup stays recorded; -2: another PhoneDock on this
+   *  Mac owns the phone, so nothing was touched). */
   unmanage(udid: string): Promise<number> {
     const e = this.entries.get(udid);
-    if (e) { this.entries.delete(udid); this.deps.changed?.(udid); }
-    return this.teardown(udid, e, true);
-  }
-
-  /** Resolves with how many runners are left on the phone (0: confirmed none; -1: couldn't confirm; -2: another
-   *  PhoneDock process on this Mac owns the phone, so its runner was left alone). */
-  private async teardown(udid: string, e: Entry | undefined, always: boolean): Promise<number> {
-    if (e) {
-      e.gone = true;
-      e.abort.abort();
-      const r = e.runner;
-      e.runner = undefined;
-      // A build or launch in flight stops at once (aborted); wait for it, so nothing it started outlives this.
-      await this.bounded(Promise.all([r ? stopRunner(r, this.o.stopWaitMs) : undefined, e.inflight?.catch(() => undefined)]), this.o.stopWaitMs);
-    }
-    // The runner app can outlive xcodebuild on the phone: end it there too. A person's Stop always looks (an older
-    // service may have left one), unless another PhoneDock on this Mac runs it; daemon exit only where this process
-    // started one.
-    let left = 0;
-    if (always && !e?.claimed && this.deps.claims) {
-      const c = this.deps.claims.acquire(udid);
-      if (!c.ok) { this.deps.log(`wda ${udid}: left WebDriverAgent alone: PhoneDock process ${c.pid} runs it`); return -2; }
-    }
-    if (always || e?.launched) {
-      left = (await this.bounded(this.deps.stopOnPhone(udid).catch(() => -1), this.o.stopWaitMs)) ?? -1;
-      if (left !== 0) this.deps.log(`wda ${udid}: couldn’t confirm WebDriverAgent stopped on the iPhone (${left === -1 ? 'no answer' : `${left} left`})`);
-    }
-    if (e?.claimed || always) this.deps.claims?.release(udid);
-    return left;
-  }
-
-  private async bounded<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
-    let t: NodeJS.Timeout | undefined;
-    const timeout = new Promise<undefined>((res) => { t = setTimeout(() => res(undefined), ms); t.unref?.(); });
-    try { return await Promise.race([p, timeout]); } finally { if (t) clearTimeout(t); }
+    if (e) { this.entries.delete(udid); e.gone = true; e.abort.abort(); this.deps.changed?.(udid); }
+    return this.lane(udid, () => this.teardown(udid, e, { claim: true, release: true, always: true }));
   }
 
   /** One supervision pass (the timer calls it; tests call it directly). */
@@ -1176,16 +1178,22 @@ export class WdaSupervisor {
     // unreadable configuration file must not stop every runner.
     await Promise.all(this.deps.managed().map(async (udid) => {
       const e = this.entry(udid);
-      if (e.inflight || e.gone) return;
+      if (this.busy(udid) || e.gone) return;
       const now = this.deps.now();
       switch (e.state) {
         case 'running':
         case 'unreachable': {
-          const ok = e.url ? await this.deps.status(e.url).catch(() => false) : false;
-          if (e.gone || e.inflight) return;
+          const st = e.url ? await this.deps.status(e.url).catch(() => false as const) : false;
+          if (e.gone || this.busy(udid)) return;
           const t = this.deps.now();
-          if (ok) {
-            e.okAt = t; e.answered = true;
+          if (st && st.ok) {
+            e.okAt = t;
+            // Sharing on: the address other Macs use follows the phone's Wi-Fi address.
+            if (st.ip !== undefined && st.ip !== e.wifi) {
+              e.wifi = st.ip;
+              const port = parsePrinted(e.url!)?.port ?? WDA_PORT;
+              e.sharedUrl = st.ip ? urlFor(st.ip, port) : undefined;
+            }
             // Forgive earlier failures only once this runner has stayed up a while: one that answers and then dies
             // keeps counting toward giving up.
             const up = e.runner ? t - (e.runner.readyAt ?? e.runner.startedAt) : 0;
@@ -1196,22 +1204,21 @@ export class WdaSupervisor {
           if (e.runner && !e.runner.alive()) return;    // its exit handler takes over
           const since = e.okAt ?? e.runner?.readyAt ?? e.runner?.startedAt ?? 0;
           if (t - since < this.o.graceMs) return;
-          if (e.runner && !e.answered) {
-            // It started on the phone but this Mac never reached it: the developer connection or this Mac's network.
-            // Relaunching would kill a working runner, so wait for /status instead.
+          // Quiet while the phone is away (asleep on Wi-Fi, unplugged): nothing is wrong with the runner. Wait, without
+          // counting; the phone coming back with a new tunnel address relaunches it (observe).
+          const f = await this.deps.phone(udid).catch(() => undefined);
+          if (e.gone || this.busy(udid)) return;
+          if (!f?.found || f.reachable === false) {
             if (e.state !== 'unreachable') {
-              this.set(e, 'unreachable', `WebDriverAgent started, but PhoneDock can’t reach it at ${e.url}`,
-                `Keep the iPhone connected (USB, or awake on the same Wi-Fi). ${LOCAL_NETWORK_HINT}`);
+              this.set(e, 'unreachable', `PhoneDock can’t reach WebDriverAgent at ${e.url}`,
+                'Keep the iPhone connected (USB, or awake on the same Wi-Fi); PhoneDock picks it up again when it’s back.');
             }
             return;
           }
           // It answered before and is quiet now (hung, or its tunnel went away): replace it, and count it.
-          e.attempts++;
-          if (e.attempts >= this.o.maxAttempts) {
-            const r = e.runner; e.runner = undefined;
-            if (r) r.kill();
+          if (++e.attempts >= this.o.maxAttempts) {
             this.giveUp(e, 'WebDriverAgent keeps hanging');
-            this.cleanUpPhone(udid, e);
+            void this.lane(udid, () => this.teardown(udid, e, {}));
             this.deps.changed?.(udid);
             return;
           }
@@ -1220,7 +1227,7 @@ export class WdaSupervisor {
         }
         case 'waiting_unlock': {
           const f = await this.deps.phone(udid).catch(() => undefined);
-          if (e.gone || e.inflight) return;
+          if (e.gone || this.busy(udid)) return;
           if (f?.locked === true) { e.sawLocked = true; return; }
           // Seen locked and now unlocked: go. Otherwise (lock state unknown, or devicectl disagrees with xcodebuild)
           // only at the waiting pace, so a lock nobody can read never relaunches xcodebuild every tick.
@@ -1244,48 +1251,60 @@ export class WdaSupervisor {
   private entry(udid: string): Entry {
     let e = this.entries.get(udid);
     if (!e) {
-      e = { state: 'starting', message: 'Starting WebDriverAgent…', attempts: 0, personAttempts: 0, answered: false, sawLocked: false, abort: new AbortController(), updatedAt: this.deps.now() };
+      e = { state: 'starting', message: 'Starting WebDriverAgent…', attempts: 0, personAttempts: 0, sawLocked: false, abort: new AbortController(), updatedAt: this.deps.now() };
       this.entries.set(udid, e);
     }
     return e;
   }
 
-  private claim(udid: string, e: Entry): ClaimResult {
-    if (e.claimed) return { ok: true };
-    const r = this.deps.claims?.acquire(udid) ?? { ok: true };
-    if (r.ok) e.claimed = true;
-    return r;
+  private claim(udid: string): boolean { return this.deps.ledger ? this.deps.ledger.lock(udid) : true; }
+
+  private busy(udid: string): boolean { return (this.lanes.get(udid)?.busy ?? 0) > 0; }
+
+  /** Run `fn` after everything already queued for this phone. */
+  private lane<T>(udid: string, fn: () => Promise<T>): Promise<T> {
+    let l = this.lanes.get(udid);
+    if (!l) { l = { tail: Promise.resolve(), busy: 0 }; this.lanes.set(udid, l); }
+    const lane = l;
+    lane.busy++;
+    // Not busy any more by the time the caller resumes.
+    const step = async () => { try { return await fn(); } finally { if (--lane.busy === 0 && this.lanes.get(udid) === lane) this.lanes.delete(udid); } };
+    const run = lane.tail.then(step, step);
+    lane.tail = run.catch(() => undefined);
+    return run;
   }
 
   private set(e: Entry, state: WdaState, message: string, hint?: string, nextAt?: number): void {
     e.state = state; e.message = message; e.hint = hint; e.nextAt = nextAt; e.updatedAt = this.deps.now();
   }
 
-  /** One attempt at a time per phone; callers share it. */
+  /** One automatic attempt at a time per phone. */
   private ensure(udid: string, why: string): Promise<void> {
-    if (!this.started) return Promise.resolve();
+    if (!this.started || this.busy(udid)) return Promise.resolve();
     const e = this.entry(udid);
-    if (e.inflight) return e.inflight;
-    const p = this.attempt(udid, e, why).catch((err) => { this.deps.log(`wda ${udid}: ${(err as Error).message}`); });
-    const tracked: Promise<void> = p.finally(() => { if (e.inflight === tracked) e.inflight = undefined; this.deps.changed?.(udid); });
-    e.inflight = tracked;
-    return tracked;
+    return this.lane(udid, () => this.attempt(udid, e, why))
+      .catch((err) => { this.deps.log(`wda ${udid}: ${(err as Error).message}`); })
+      .finally(() => { this.deps.changed?.(udid); });
   }
 
   private async attempt(udid: string, e: Entry, why: string): Promise<void> {
+    if (e.gone || !this.started) return;
     // Waits devicectl can see cost no launch: look again at the waiting pace.
     const f = await this.deps.phone(udid).catch(() => undefined);
     if (e.gone) return;
-    const c = this.claim(udid, e);
-    if (!c.ok) {
+    if (!this.claim(udid)) {
       this.set(e, 'waiting_phone', 'Another PhoneDock service on this Mac runs WebDriverAgent for this iPhone',
         'Stop control there, or leave it to that service.', this.deps.now() + this.o.personPollMs);
       return;
     }
-    // A runner left on the phone (by a service that died, or one from before PhoneDock managed it) may listen on the
-    // Wi-Fi: end it as soon as the phone can be reached, also while it waits for an unlock.
-    if (!e.phoneClean && f?.found && f.reachable !== false) {
-      e.phoneClean = (await this.deps.stopOnPhone(udid).catch(() => -1)) === 0;
+    // A runner nobody confirmed gone (a PhoneDock that died, an older one, another tool) may listen on the Wi-Fi: end
+    // it as soon as the phone can be reached, also while it waits for an unlock.
+    if (!e.runner && this.deps.ledger?.state(udid) !== 'clean' && f?.found && f.reachable !== false) {
+      if ((await this.clearPhone(udid)) !== 0) {
+        this.set(e, 'retrying', 'PhoneDock couldn’t confirm an earlier WebDriverAgent stopped on the iPhone; it tries again', undefined,
+          this.deps.now() + this.backoff(++e.personAttempts));
+        return;
+      }
       if (e.gone) return;
     }
     const person = this.personWait(f);
@@ -1296,7 +1315,7 @@ export class WdaSupervisor {
     }
     this.set(e, 'starting', `Starting WebDriverAgent (${why})…`);
     this.deps.log(`wda ${udid}: starting (${why})`);
-    try { await this.launchNow(udid, e, (l) => { if (!e.gone) { e.message = l; e.updatedAt = this.deps.now(); } }); }
+    try { await this.launchNow(udid, e, false, (l) => { if (!e.gone) { e.message = l; e.updatedAt = this.deps.now(); } }); }
     catch (err) { this.failed(udid, e, err, false); }
   }
 
@@ -1310,47 +1329,81 @@ export class WdaSupervisor {
     return undefined;
   }
 
-  /** Build, then replace the current runner (if any) with a new one. The current runner keeps serving until the
-   *  build is done; if the launch fails before replacing it, it stays. */
-  private async launchNow(udid: string, e: Entry, onProgress: (l: string) => void): Promise<void> {
-    // The current runner stays attached (Stop stops it) until the build is done.
-    const old = e.runner;
-    let started = false;
+  /** End what an earlier runner may have left: its orphaned xcodebuild (from the record), then every runner on the
+   *  phone. Records the outcome; resolves with how many runners are left (-1: unknown). */
+  private async clearPhone(udid: string): Promise<number> {
+    const rec = this.deps.ledger?.record?.(udid);
+    if (rec?.xcodebuild) { try { this.deps.killOrphan?.(rec); } catch { /* gone */ } }
+    const left = rec?.simulator ? 0 : (await this.bounded(this.deps.stopOnPhone(udid).catch(() => -1), this.o.stopWaitMs)) ?? -1;
+    if (left === 0) this.deps.ledger?.clean(udid);
+    else this.deps.log(`wda ${udid}: couldn’t confirm WebDriverAgent stopped on the iPhone (${left === -1 ? 'no answer' : `${left} left`})`);
+    return left;
+  }
+
+  /** End the runner: xcodebuild (always waited for: SIGINT, then SIGKILL), then the runner app on the phone, which can
+   *  outlive it (bounded). `always`: look on the phone even if this process started nothing (a person's Stop). */
+  private async teardown(udid: string, e: Entry | undefined, o: { claim?: boolean; release?: boolean; always?: boolean }): Promise<number> {
+    if (o.claim && !this.claim(udid)) { this.deps.log(`wda ${udid}: left WebDriverAgent alone: another PhoneDock on this Mac runs it`); return -2; }
+    const r = e?.runner;
+    if (e) e.runner = undefined;
+    const macGone = r ? await stopRunner(r) : true;
+    let left = 0;
+    if (o.always || r || this.deps.ledger?.state(udid) !== 'clean') left = await this.clearPhone(udid);
+    if (!macGone) { left = left === 0 ? -1 : left; this.deps.ledger?.mark(udid, { ...(r?.pid ? { xcodebuild: r.pid } : {}) }); }
+    if (o.release) this.deps.ledger?.release(udid);
+    return left;
+  }
+
+  private async bounded<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+    let t: NodeJS.Timeout | undefined;
+    const timeout = new Promise<undefined>((res) => { t = setTimeout(() => res(undefined), ms); t.unref?.(); });
+    try { return await Promise.race([p, timeout]); } finally { if (t) clearTimeout(t); }
+  }
+
+  /** Build (if `mayBuild`), then replace the current runner (if any) with a new one, which starts only once the old
+   *  one is gone on the Mac and on the phone. The current runner keeps serving until the build is done. */
+  private async launchNow(udid: string, e: Entry, mayBuild: boolean, onProgress: (l: string) => void): Promise<void> {
+    let spawned = false;
     let r: Omit<Launched, 'built'>;
     try {
       r = await this.deps.launch(udid, onProgress, {
-        signal: e.abort.signal,
+        signal: e.abort.signal, mayBuild,
         beforeStart: async () => {
-          started = true; e.launched = true;
-          if (old && e.runner === old) e.runner = undefined;    // its exit is no longer a crash to handle
-          if (old) await stopRunner(old, this.o.stopWaitMs);
-          // A runner can outlive its xcodebuild on the phone, and one may be left from before this service started:
-          // end every WebDriverAgent runner on the phone before starting this one.
-          e.phoneClean = (await this.deps.stopOnPhone(udid).catch(() => -1)) === 0;
+          const old = e.runner;
+          if (old || this.deps.ledger?.state(udid) !== 'clean') {
+            const left = await this.teardown(udid, e, {});
+            if (left !== 0) {
+              throw new PhoneDockError('PhoneDock couldn’t confirm the previous WebDriverAgent stopped on the iPhone', 'wda_stop_unconfirmed', 502,
+                ['Keep the iPhone connected and awake; PhoneDock tries again.']);
+            }
+          }
+          if (e.gone) throw cancelledError();
+        },
+        onSpawn: (pid, xctestrun) => {
+          spawned = true;
+          // From now on a runner may exist: whatever happens next, a later PhoneDock knows to look.
+          this.deps.ledger?.mark(udid, { ...(pid ? { xcodebuild: pid } : {}), xctestrun, ...(/iphonesimulator/.test(xctestrun) ? { simulator: true } : {}) });
         },
       });
     } catch (err) {
       // A launch that got as far as starting leaves nothing behind on the phone either.
-      if (started) await this.deps.stopOnPhone(udid).catch(() => -1);
+      if (spawned) await this.teardown(udid, e, {});
       throw err;
     }
-    if (e.gone) { await stopRunner(r.runner, this.o.stopWaitMs); return; }
-    e.runner = r.runner; e.url = r.url; e.boundHost = hostOf(r.url); e.sharedUrl = r.sharedUrl; e.lanCheck = r.lanCheck;
-    e.answered = false; e.okAt = undefined; e.sawLocked = false;
-    this.deps.claims?.setChild(udid, r.runner.pid);
-    this.deps.saveUrl(udid, r.url);
+    if (e.gone) { e.runner = r.runner; await this.teardown(udid, e, {}); throw cancelledError(); }
+    e.runner = r.runner; e.url = r.url; e.boundHost = hostOf(r.url); e.sharedUrl = r.sharedUrl; e.lanCheck = r.lanCheck; e.wifi = r.wifi;
+    e.okAt = this.deps.now(); e.sawLocked = false;
     this.set(e, 'running', 'WebDriverAgent is running');
     this.deps.log(`wda ${udid}: running at ${r.url} (xcodebuild pid ${r.runner.pid ?? '?'}${r.lanCheck ? `, Wi-Fi address ${r.lanCheck}` : ''}${r.sharedUrl ? `, shared at ${r.sharedUrl}` : ''})`);
     const runner = r.runner;
     void runner.exited.then(() => this.onExit(udid, e, runner));
   }
 
-  /** The runner's xcodebuild ended without anyone asking. Every such exit counts toward giving up, also one that
-   *  happens while its own launch is still settling (a runner that dies right after printing its address). */
+  /** The runner's xcodebuild ended without anyone asking. Every such exit counts toward giving up, also one right
+   *  after its launch; the runner app may live on on the phone, so it is ended there before anything starts again. */
   private onExit(udid: string, e: Entry, runner: Runner): void {
     if (e.gone || e.runner !== runner || this.entries.get(udid) !== e) return;
-    e.runner = undefined; e.answered = false;
-    this.deps.claims?.setChild(udid, undefined);
+    e.runner = undefined;
     const up = this.deps.now() - (runner.readyAt ?? runner.startedAt);
     e.attempts++;
     this.deps.log(`wda ${udid}: WebDriverAgent stopped after ${Math.round(up / 1000)} s (${e.attempts}/${this.o.maxAttempts})`);
@@ -1359,19 +1412,11 @@ export class WdaSupervisor {
     } else {
       this.set(e, 'retrying', 'WebDriverAgent stopped; PhoneDock is restarting it', undefined, this.deps.now() + this.backoff(e.attempts));
     }
-    this.cleanUpPhone(udid, e);
+    void this.lane(udid, () => this.teardown(udid, e, {})).catch(() => undefined);
     this.deps.changed?.(udid);
   }
 
-  /** Its xcodebuild is gone, but the runner may live on on the phone: end it there, before anything starts again
-   *  (queued behind whatever is in flight, and skipped if a new runner took its place). */
-  private cleanUpPhone(udid: string, e: Entry): void {
-    const prev = e.inflight ?? Promise.resolve();
-    const p = prev.catch(() => undefined).then(async () => { if (!e.gone && !e.runner) await this.deps.stopOnPhone(udid).catch(() => -1); });
-    const tracked: Promise<void> = p.finally(() => { if (e.inflight === tracked) e.inflight = undefined; });
-    e.inflight = tracked;
-  }
-
+  /** A launch failed: wait for a person, retry with backoff, or give up. */
   private failed(udid: string, e: Entry, err: unknown, manual: boolean): void {
     if (e.gone) return;
     const pe = err instanceof PhoneDockError ? err : new PhoneDockError((err as Error)?.message ?? String(err), 'wda_setup_failed', 502);
@@ -1393,14 +1438,13 @@ export class WdaSupervisor {
       return;
     }
     if (AUTHORITY_CODES.has(pe.code)) {
-      // Retrying can't help (and would ask Apple again): wait for the person to change something and set up again.
+      // Retrying can't help (and must not sign anything): wait for the person to set up again.
       e.needsPerson = true;
       this.giveUp(e, pe.message, hint);
       return;
     }
     if (manual) { this.giveUp(e, pe.message, hint); return; }
-    e.attempts++;
-    if (e.attempts >= this.o.maxAttempts) { this.giveUp(e, pe.message, hint); return; }
+    if (++e.attempts >= this.o.maxAttempts) { this.giveUp(e, pe.message, hint); return; }
     this.set(e, 'retrying', `${pe.message}; PhoneDock tries again`, hint, this.deps.now() + this.backoff(e.attempts));
   }
 
@@ -1410,6 +1454,14 @@ export class WdaSupervisor {
 
   private backoff(attempts: number): number {
     return this.o.backoffMs[Math.min(Math.max(attempts, 1) - 1, this.o.backoffMs.length - 1)];
+  }
+
+  /** Finish a cleanup owed for a phone this process doesn't manage (Disconnected, or a PhoneDock that died). */
+  private cleanUp(udid: string): Promise<void> {
+    return this.lane(udid, async () => {
+      if (this.deps.managed().includes(udid) || !this.claim(udid)) return;
+      try { await this.clearPhone(udid); } finally { this.deps.ledger?.release(udid); }
+    }).catch(() => undefined);
   }
 }
 
@@ -1423,7 +1475,9 @@ export interface SetupEntry {
   [k: string]: unknown;
 }
 export interface SetupRequest { team?: string; destination?: string; name?: string; apiKey?: WdaApiKey; share?: boolean }
-export interface WdaSetupResult { udid: string; wdaUrl: string; pid?: number; team: string; managed: true; shared: boolean; sharedUrl?: string }
+/** `udid` is the identifier the caller passed; `hardwareUdid` the phone's UDID, which ios-device.json and the
+ *  supervisor use. */
+export interface WdaSetupResult { udid: string; hardwareUdid: string; wdaUrl: string; pid?: number; team: string; managed: true; shared: boolean; sharedUrl?: string }
 
 export interface SetupDeps {
   xcode(): Promise<XcodeInfo | undefined>;
@@ -1432,29 +1486,60 @@ export interface SetupDeps {
   phone(id: string): Promise<PhoneFacts & { udid?: string }>;
   developerMode(udid: string): Promise<boolean | null | undefined>;
   exists(path: string): boolean;
-  /** Stop Control and Disconnect mark a phone; a setup that began before the mark changes nothing and starts nothing. */
+  /** Stop Control and Disconnect mark a phone (by every name it has); a setup that began before the mark changes
+   *  nothing and starts nothing. */
   marks: { now(): number; since(udid: string, t: number): boolean };
   store: { get(udid: string): SetupEntry | undefined; set(udid: string, entry: SetupEntry | undefined): void };
-  sup: Pick<WdaSupervisor, 'setup' | 'info' | 'unmanage' | 'resume'>;
+  sup: Pick<WdaSupervisor, 'setup' | 'info' | 'unmanage' | 'resume' | 'halt'>;
   /** udids being set up now (one setup per phone). */
   running: Set<string>;
   changed(): void;
 }
 
-/** `-destination` names this device ("id=<udid>", alone or among other keys). */
-export function destinationNames(dest: string, id: string): boolean {
-  return dest.split(',').some((kv) => { const [k, v] = kv.split('='); return k.trim() === 'id' && (v ?? '').trim().toLowerCase() === id.toLowerCase(); });
+/** `-destination` names this phone: `id=` one of its identifiers, or `name=` its name. Nothing else is accepted: a
+ *  destination without either could pick any device. */
+export function destinationNames(dest: string, ids: string[], name?: string): boolean {
+  const kv = new Map(dest.split(',').map((p) => { const i = p.indexOf('='); return [p.slice(0, i).trim().toLowerCase(), p.slice(i + 1).trim()] as const; }));
+  const id = kv.get('id'), nm = kv.get('name');
+  if (id === undefined && nm === undefined) return false;
+  return (id === undefined || ids.some((x) => x.toLowerCase() === id.toLowerCase())) && (nm === undefined || (!!name && nm === name));
+}
+
+/** Codes a wda-setup job failed with before this version, kept as they were; every other failure keeps the old
+ *  catch-all code `wda_setup_failed` and names the specific one in `cause`. */
+const SETUP_KEEPS = new Set(['bad_request', 'exec_failed']);
+function asSetupError(e: unknown): unknown {
+  if (!(e instanceof PhoneDockError) || SETUP_KEEPS.has(e.code) || e.code === 'wda_setup_failed') return e;
+  const out = new PhoneDockError(e.message, 'wda_setup_failed', e.status, e.hints, e.detail);
+  out.cause = e.code;
+  return out;
 }
 
 /** One-step setup: preflight with plain errors, pick the team, build the pinned WebDriverAgent if needed, start it,
- *  and from then on keep it running. Nothing is written before preflight passes; Stop or Disconnect during setup wins;
- *  a failure puts the phone's whole entry back as it was. */
+ *  and from then on keep it running. Turning sharing off takes effect first, durably; otherwise nothing is written
+ *  before preflight passes. Stop or Disconnect during setup wins; a failure puts the phone's whole entry back. */
 export async function setupPhone(d: SetupDeps, id: string, req: SetupRequest, progress: (l: string) => void): Promise<WdaSetupResult> {
+  try { return await setupSteps(d, id, req, progress); } catch (e) { throw asSetupError(e); }
+}
+
+async function setupSteps(d: SetupDeps, id: string, req: SetupRequest, progress: (l: string) => void): Promise<WdaSetupResult> {
   const t0 = d.marks.now();
   let last = '';
   const onProgress = (l: string) => { if (l !== last) { last = l; progress(l); } };
   const sim = !!req.destination && !isDeviceDestination(req.destination);
   const stoppedMeanwhile = (...ids: string[]) => ids.some((u) => d.marks.since(u, t0));
+  // Sharing off: nobody on the Wi-Fi keeps control while the rest runs, or after it fails. Persisted, then the shared
+  // runner is stopped, before anything that can fail.
+  const before = d.store.get(id);
+  const optOut = req.share === false && !!before?.wda?.share;
+  if (optOut && before?.wda) {
+    const { share: _share, ...wda } = before.wda;
+    const key = before.udid ?? id;
+    d.store.set(key, { ...before, wda });
+    onProgress('Turning sharing off…');
+    await d.sup.halt(key, 'sharing was turned off');
+    d.changed();
+  }
   onProgress('Checking Xcode and the iPhone…');
   const [xcode, teams, facts] = await Promise.all([
     d.xcode(), sim ? Promise.resolve([] as XcodeTeam[]) : d.teams(),
@@ -1463,8 +1548,9 @@ export async function setupPhone(d: SetupDeps, id: string, req: SetupRequest, pr
   const udid = facts?.udid ?? id;
   if (stoppedMeanwhile(id, udid)) throw cancelledError();
   // One phone, one name: the CoreDevice identifier and the UDID are the same iPhone, and the destination must be it.
-  if (req.destination && !destinationNames(req.destination, id) && !destinationNames(req.destination, udid)) {
-    throw new PhoneDockError('The destination names a different device', 'bad_request', 400, ['Pass `id=<the same udid>` (or leave destination out).'], `destination ${req.destination}, udid ${udid}`);
+  if (req.destination && !destinationNames(req.destination, [id, udid], facts?.name)) {
+    throw new PhoneDockError('The destination names a different device', 'bad_request', 400,
+      ['Pass `id=<this iPhone’s udid>` or `name=<its name>` (or leave destination out).'], `destination ${req.destination}, udid ${udid}`);
   }
   if (d.running.has(udid) && udid !== id) throw new PhoneDockError('This iPhone is already being set up', 'busy', 409, ['Wait for that setup to finish.']);
   d.running.add(udid);
@@ -1487,7 +1573,7 @@ export async function setupPhone(d: SetupDeps, id: string, req: SetupRequest, pr
     const apiKey = req.apiKey ?? reuseKey;
     const team = sim ? { id: UNSIGNED_TEAM, free: false }
       : chooseTeam(teams, { team: req.team ?? (reuseKey ? reuse?.team : undefined), apiKey, udid, remembered: reuse?.team });
-    if (!sim) onProgress(`Signing with team ${team.id}${team.free ? ' (a personal team: its signing lasts 7 days, and PhoneDock renews it)' : ''}`);
+    if (!sim) onProgress(`Signing with team ${team.id}${team.free ? ' (a personal team: its signing lasts 7 days; set up again to renew it)' : ''}`);
     const share = req.share ?? prior?.share ?? false;
     let cfg: WdaConfig = {
       team: team.id, free: team.free,
@@ -1513,12 +1599,16 @@ export async function setupPhone(d: SetupDeps, id: string, req: SetupRequest, pr
         commit(cfg);
         r = await d.sup.setup(udid, onProgress);
       }
+      // Done only while it still runs (one that dies right after printing its address is a failed setup).
+      const info = d.sup.info(udid);
+      if (info && info.state !== 'running') {
+        throw new PhoneDockError('WebDriverAgent stopped right after it started', 'wda_stopped', 502, [info.message, ...(info.hint ? [info.hint] : [])]);
+      }
       const done = d.store.get(udid);
       if (done?.wda && done.wdaStopped) { const next = { ...done }; delete next.wdaStopped; d.store.set(udid, next); }
       d.changed();
-      const info = d.sup.info(udid);
       return {
-        udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true,
+        udid: id, hardwareUdid: udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true,
         shared: !!cfg.share, ...(info?.sharedUrl ? { sharedUrl: info.sharedUrl } : {}),
       };
     } catch (e) {
@@ -1529,10 +1619,11 @@ export async function setupPhone(d: SetupDeps, id: string, req: SetupRequest, pr
         if (e instanceof PhoneDockError) e.hints = [...(e.hints ?? []), 'PhoneDock keeps trying: it starts WebDriverAgent as soon as that’s done.'];
       } else if (info?.state !== 'waiting_trust') {
         // Nothing to wait for: put the phone's entry back as it was (a new name too), and with it the previous
-        // setup and its WebDriverAgent, or stop managing the phone.
+        // setup and its WebDriverAgent, or stop managing the phone. Sharing that was turned off stays off, and stays
+        // stopped: never shared again by a rollback.
         d.store.set(udid, snapshot);
-        if (snapshot?.wda) d.sup.resume(udid, 'setup failed; back to the previous setup');
-        else await d.sup.unmanage(udid);
+        if (snapshot?.wda && !optOut) d.sup.resume(udid, 'setup failed; back to the previous setup');
+        else if (!snapshot?.wda) await d.sup.unmanage(udid);
       }
       d.changed();
       throw e;
