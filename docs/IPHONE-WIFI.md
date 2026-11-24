@@ -185,13 +185,15 @@ PhoneDock stores the key's path and IDs (not the key) so it can rebuild later.
 Only the Mac the iPhone is plugged into (or paired with) can set it up, and by default only that Mac can use it. To
 drive the phone from another Mac on the same Wi-Fi, turn on **Let other Macs on this Wi-Fi control this iPhone** in
 its Info tab (or set it up with `--share`; `--no-share` turns it off). **Anyone on that Wi-Fi can then control the
-iPhone, without a password**, so use it on networks you trust. The Info tab then shows the address to use; on the other
-Mac:
+iPhone, without a password**, so use it on networks you trust. The Info tab then shows the command to run on the other
+Mac, with the phone's Wi-Fi address:
 
 ```sh
-phonedock connect --ios Old-iPhone.local --name "Wi-Fi iPhone"     # the phone's local name, as shown; or its IP
+phonedock connect --ios <iphone-ip> --name "Wi-Fi iPhone"           # as shown in the Info tab
 phonedock connect --ios http://<iphone-ip>:8100 --udid <UDID>       # with the UDID, installing apps works too
 ```
+
+If the network gives the phone a new address, connect again with the one the Info tab shows.
 
 In the app: ＋ Add Device › Physical Device › Older iPhone? › Set up on another Mac?. If Terminal reaches the phone
 (`curl http://<iphone-ip>:8100/status`) but PhoneDock can't (`wda_unreachable`), macOS is blocking PhoneDock from the

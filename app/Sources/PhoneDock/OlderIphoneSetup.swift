@@ -244,8 +244,20 @@ extension AppModel {
         controlSetups[device.id] = .stopping
         Task {
             do {
-                try await c.send("POST", "/v1/ios/wda-stop", json: ["udid": udid], timeout: 60)
+                let data = try await c.send("POST", "/v1/ios/wda-stop", json: ["udid": udid], timeout: 60)
                 await refresh()
+                // Stopped on this Mac either way; say so when the runner on the iPhone couldn't be confirmed gone.
+                let r = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                if r?["ownedElsewhere"] as? Bool == true {
+                    controlSetups[device.id] = .failed(FriendlyError(title: "Another PhoneDock runs control for this iPhone",
+                        message: "Stop it in that PhoneDock; this one left it running."), retry: .stop)
+                    return
+                }
+                if r?["confirmed"] as? Bool == false {
+                    controlSetups[device.id] = .failed(FriendlyError(title: "Control stopped on this Mac",
+                        message: "PhoneDock couldn’t confirm it also stopped on the iPhone. Keep the iPhone connected and press Try Again."), retry: .stop)
+                    return
+                }
                 controlSetups[device.id] = .stopped
                 try? await Task.sleep(for: .seconds(4))
                 if controlSetups[device.id] == .stopped { controlSetups[device.id] = nil }

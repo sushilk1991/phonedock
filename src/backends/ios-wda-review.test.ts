@@ -125,6 +125,14 @@ test('#1: WebDriverAgent binds the phone’s tunnel address only, and a runner t
     const unverified = await launchWda(f.d, UDID, cfgA, () => undefined);
     assert.equal(unverified.lanCheck, 'unverified');
     unverified.runner.kill();
+    f.probes.delete(`${WIFI}:9100`);
+    // /status didn't answer through the tunnel: the Wi-Fi address is unknown, so it is not "none".
+    const getJson = f.d.getJson;
+    f.d.getJson = async () => undefined;
+    const silent = await launchWda(f.d, UDID, cfgA, () => undefined);
+    assert.equal(silent.lanCheck, 'unverified');
+    silent.runner.kill();
+    f.d.getJson = getJson;
   } finally { f.cleanup(); }
 
   // A WebDriverAgent that ignored USE_IP (prints its Wi-Fi address): fail closed.
@@ -140,7 +148,7 @@ test('#1: WebDriverAgent binds the phone’s tunnel address only, and a runner t
     const shared = await launchWda(h.d, UDID, { ...cfgA, share: true }, () => undefined);
     assert.equal(h.envs[0].TEST_RUNNER_USE_IP, undefined);
     assert.equal(shared.url, `http://[${TUNNEL}]:8100`, 'this Mac still uses the tunnel');
-    assert.equal(shared.sharedUrl, 'http://Old-iPhone.local:8100');
+    assert.equal(shared.sharedUrl, `http://${WIFI}:8100`, 'the Wi-Fi address WebDriverAgent reports (reachable from other Macs)');
     shared.runner.kill();
   } finally { h.cleanup(); }
 });
@@ -312,7 +320,7 @@ function setupWorld(o: { facts?: PhoneFacts & { udid?: string }; teams?: XcodeTe
     sup: {
       setup: async (u: string) => { calls.push(`setup:${u}:${store.get(u)?.wda?.bundleId}`); return o.supSetup ? o.supSetup(u) : { url: `http://[${TUNNEL}]:8100` }; },
       info: () => o.info?.(),
-      unmanage: async (u: string) => { calls.push(`unmanage:${u}`); },
+      unmanage: async (u: string) => { calls.push(`unmanage:${u}`); return 0; },
       resume: (u: string) => { calls.push(`resume:${u}`); },
     } as SetupDeps['sup'],
     running: new Set(),
@@ -499,4 +507,72 @@ test('FIX-3: Stop ends xcodebuild first, then the runner on the phone, and confi
   await sup.unmanage(UDID);                               // nothing tracked, but a person's Stop still looks on the phone
   assert.deepEqual(order, ['xcodebuild', 'phone', 'phone']);
   assert.ok(logs.some((l) => /couldn’t confirm WebDriverAgent stopped on the iPhone/.test(l)));
+});
+
+// ── follow-ups from the final review ───────────────────────────────────────
+
+test('a tunnel address in another spelling is the same address (no endless relaunch, no refused input)', async () => {
+  const { sameHost, hostOf } = await import('./ios-wda.ts');
+  assert.ok(sameHost('FD00:0000:0000:0001:0000:0000:0000:0001', 'fd00:0:0:1::1'));
+  assert.equal(hostOf('http://[FD00:0:0:1:0:0:0:1]:8100'), 'fd00:0:0:1::1');
+  assert.ok(!sameHost('fd00:0:0:1::1', 'fd00:0:0:2::1'));
+});
+
+test('a tunnel that keeps changing address relaunches, but counts after the first and gives up', async () => {
+  let now = 1_000_000;
+  let n = 0;
+  const deps: SupervisorDeps = {
+    ...LEGACY,
+    now: () => now, managed: () => [UDID], saveUrl: () => undefined, status: async () => true,
+    phone: async () => ({ found: true, paired: true, reachable: true, developerMode: true, locked: false }),
+    launch: async (_u, _p, ctl) => {
+      await ctl.beforeStart();
+      n++;
+      let live = true; let res!: (c: number | null) => void;
+      const runner = { pid: n, startedAt: now, readyAt: now, alive: () => live, kill: () => { live = false; res(130); }, exited: new Promise<number | null>((r) => { res = r; }) };
+      return { runner, url: `http://[fd00:0:0:${n}::1]:8100` };
+    },
+    stopOnPhone: async () => 0, log: () => undefined,
+  };
+  const sup = new WdaSupervisor(deps, { autoTick: false, maxAttempts: 3, stopWaitMs: 50 });
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
+  sup.start(); await settle();
+  for (let i = 0; i < 8 && sup.info(UDID)?.state !== 'failed'; i++) {
+    now += 10_000;
+    sup.observe([{ udid: UDID, reachable: true, tunnelIp: `fd00:0:0:${900 + i}::1` }]);
+    await settle();
+  }
+  assert.equal(sup.info(UDID)?.state, 'failed');
+  assert.ok(n <= 4, `bounded relaunches (${n})`);
+});
+
+test('daemon start ends a leftover runner even while the phone waits for an unlock', async () => {
+  const stops: string[] = [];
+  const deps: SupervisorDeps = {
+    ...LEGACY,
+    now: () => 1, managed: () => [UDID], saveUrl: () => undefined, status: async () => false,
+    phone: async () => ({ found: true, paired: true, reachable: true, developerMode: true, locked: true }),
+    launch: async () => { throw new Error('no launch while locked'); },
+    stopOnPhone: async (u) => { stops.push(u); return 0; }, log: () => undefined,
+  };
+  const sup = new WdaSupervisor(deps, { autoTick: false });
+  sup.start();
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(sup.info(UDID)?.state, 'waiting_unlock');
+  assert.deepEqual(stops, [UDID], 'the leftover runner (maybe on the Wi-Fi) is ended without waiting for the unlock');
+});
+
+test('Stop leaves the phone alone when another PhoneDock on this Mac runs it, and says the stop wasn’t confirmed otherwise', async () => {
+  const stops: string[] = [];
+  const base: SupervisorDeps = {
+    ...LEGACY,
+    now: () => 1, managed: () => [], saveUrl: () => undefined, status: async () => false,
+    phone: async () => ({ found: true }), launch: async () => { throw new Error('x'); },
+    stopOnPhone: async (u) => { stops.push(u); return 0; }, log: () => undefined,
+  };
+  const owned = new WdaSupervisor({ ...base, claims: { acquire: () => ({ ok: false, pid: 4321 }), setChild: () => undefined, release: () => undefined } });
+  assert.equal(await owned.unmanage(UDID), -2);
+  assert.deepEqual(stops, [], 'another service’s runner is not killed');
+  const unsure = new WdaSupervisor({ ...base, stopOnPhone: async () => { throw new Error('devicectl listed no processes'); } });
+  assert.equal(await unsure.unmanage(UDID), -1, 'no answer is not "confirmed gone"');
 });

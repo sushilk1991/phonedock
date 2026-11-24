@@ -111,7 +111,7 @@ const shutdown = (sig: string) => {
   console.log(`[phonedockd] ${sig} – exiting (devices keep running)`); server.close();
   const stopTraces = traces.size ? Promise.race([abortAllTraces(`daemon exiting (${sig})`), new Promise((r) => setTimeout(r, 25_000))]) : Promise.resolve();
   // WebDriverAgent runners this daemon started end with it, on the Mac and on the phone (bounded, in parallel).
-  const stopWda = Promise.race([Promise.resolve(iosSupervision()?.stopWdaSupervisor?.()).catch(() => undefined), new Promise((r) => setTimeout(r, 25_000))]);
+  const stopWda = Promise.race([Promise.resolve(iosSupervision()?.stopWdaSupervisor?.()).catch(() => undefined), new Promise((r) => setTimeout(r, 20_000))]);
   void Promise.all([stopTraces, stopWda]).finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
 };
 process.on('SIGINT', () => shutdown('SIGINT'));

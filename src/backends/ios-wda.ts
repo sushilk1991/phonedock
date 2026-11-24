@@ -562,8 +562,15 @@ export function parsePrinted(url: string): { host: string; port: number } | unde
   return { host, port: Number(m[2]) };
 }
 export const urlFor = (host: string, port: number) => `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
-export const sameHost = (a: string, b: string) => a.replace(/^\[|\]$/g, '').toLowerCase() === b.replace(/^\[|\]$/g, '').toLowerCase();
-export const hostOf = (url: string) => { try { return new URL(url).hostname.replace(/^\[|\]$/g, ''); } catch { return undefined; } };
+/** One spelling per address: IPv6 compressed and lower-case the way URL writes it ("FD00:0:0:1:0:0:0:1" → "fd00:0:0:1::1"),
+ *  so devicectl's text and a saved URL compare equal. */
+export function canonHost(h: string): string {
+  const bare = h.trim().replace(/^\[|\]$/g, '');
+  if (!bare.includes(':')) return bare.toLowerCase();
+  try { return new URL(`http://[${bare}]/`).hostname.replace(/^\[|\]$/g, ''); } catch { return bare.toLowerCase(); }
+}
+export const sameHost = (a: string, b: string) => canonHost(a) === canonHost(b);
+export const hostOf = (url: string) => { try { return canonHost(new URL(url).hostname); } catch { return undefined; } };
 
 /** Where this Mac reaches a phone's WebDriverAgent. By default it is bound to that address only: the phone's end of
  *  this Mac's paired CoreDevice tunnel (USB or Wi-Fi), so nothing else on the network reaches it. */
@@ -788,10 +795,13 @@ export async function launchWda(d: WdaBuildDeps, udid: string, cfg: WdaConfig, o
       const url = urlFor(ep.host, port);
       const out: Launched = { runner: r.runner, url, built: b.built };
       if (device) {
-        const ip = (await d.getJson(`${url}/status`))?.value?.ios?.ip;
+        const status = await d.getJson(`${url}/status`);
+        const ip = status?.value?.ios?.ip;
         const wifi = typeof ip === 'string' && ip && !sameHost(ip, ep.host) ? ip : undefined;
         if (!cfg.share) {
-          if (!wifi) out.lanCheck = 'none';
+          // No answer through the tunnel: the Wi-Fi address is unknown, so nothing was checked (the bind was).
+          if (!status) out.lanCheck = 'unverified';
+          else if (!wifi) out.lanCheck = 'none';
           else {
             const [http, mjpeg] = await Promise.all([d.probe(wifi, port), d.probe(wifi, MJPEG_PORT)]);
             if (http === 'open' || mjpeg === 'open') {
@@ -802,7 +812,10 @@ export async function launchWda(d: WdaBuildDeps, udid: string, cfg: WdaConfig, o
             out.lanCheck = http === 'refused' && mjpeg === 'refused' ? 'refused' : 'unverified';
           }
         } else {
-          out.sharedUrl = ep.lanName ? urlFor(ep.lanName, port) : wifi ? urlFor(wifi, port) : undefined;
+          // The Wi-Fi address WebDriverAgent itself reports is what other machines can reach; a local hostname is
+          // only a fallback (devicectl's names may be CoreDevice aliases only this Mac resolves).
+          const name = ep.lanName && /\.local$/i.test(ep.lanName) && !/coredevice/i.test(ep.lanName) ? ep.lanName : undefined;
+          out.sharedUrl = wifi ? urlFor(wifi, port) : name ? urlFor(name, port) : undefined;
         }
       }
       onProgress(cfg.share
@@ -940,7 +953,7 @@ export interface SuperviseOptions {
 }
 export const SUPERVISE_DEFAULTS: SuperviseOptions = {
   tickMs: 15_000, graceMs: 45_000, backoffMs: [5_000, 15_000, 60_000, 300_000, 900_000], maxAttempts: 6, personPollMs: 30_000,
-  personBackoffMs: [30_000, 60_000, 300_000, 900_000], maxPersonAttempts: 8, minUptimeMs: 60_000, stopWaitMs: 20_000, autoTick: true,
+  personBackoffMs: [30_000, 60_000, 300_000, 900_000], maxPersonAttempts: 8, minUptimeMs: 60_000, stopWaitMs: 8_000, autoTick: true,
 };
 
 interface Entry {
@@ -963,6 +976,10 @@ interface Entry {
   needsPerson?: boolean;
   /** a runner was started on the phone at some point (so stopping must look there) */
   launched?: boolean;
+  /** runners left on the phone from before (another service, a crash) were ended */
+  phoneClean?: boolean;
+  /** when a changed tunnel address last caused a relaunch */
+  tunnelRelaunchAt?: number;
   claimed?: boolean;
   reachable?: boolean;
   inflight?: Promise<void>;
@@ -1027,7 +1044,7 @@ export class WdaSupervisor {
     this.timer = undefined;
     const all = [...this.entries];
     this.entries.clear();
-    await this.bounded(Promise.all(all.map(([udid, e]) => this.teardown(udid, e, false))), this.o.stopWaitMs * 2);
+    await this.bounded(Promise.all(all.map(([udid, e]) => this.teardown(udid, e, false))), this.o.stopWaitMs * 2 + 1_000);
   }
 
   /** The phones devicectl lists right now. A managed phone that comes back (USB or Wi-Fi) gets a start; one that
@@ -1044,6 +1061,13 @@ export class WdaSupervisor {
       e.reachable = now;
       if (!now || e.inflight) continue;
       if (e.state === 'running' && e.runner && e.boundHost && p?.tunnelIp && !sameHost(p.tunnelIp, e.boundHost)) {
+        // Not the runner's fault, so not counted, unless it keeps happening (a flapping tunnel mustn't relaunch forever).
+        const t = this.deps.now();
+        if (e.tunnelRelaunchAt !== undefined && t - e.tunnelRelaunchAt < 120_000) {
+          e.attempts++;
+          if (e.attempts >= this.o.maxAttempts) { const r = e.runner; e.runner = undefined; r.kill(); this.giveUp(e, 'the iPhone’s developer connection keeps changing'); this.cleanUpPhone(udid, e); continue; }
+        }
+        e.tunnelRelaunchAt = t;
         void this.ensure(udid, 'the iPhone’s developer connection changed');
         continue;
       }
@@ -1101,13 +1125,15 @@ export class WdaSupervisor {
 
   /** Stop managing a phone (Stop Control, Disconnect): cancel a build or launch in flight, stop the runner on the Mac
    *  and on the phone, and forget the state. Resolves once that's done (bounded). */
-  unmanage(udid: string): Promise<void> {
+  unmanage(udid: string): Promise<number> {
     const e = this.entries.get(udid);
     if (e) { this.entries.delete(udid); this.deps.changed?.(udid); }
     return this.teardown(udid, e, true);
   }
 
-  private async teardown(udid: string, e: Entry | undefined, always: boolean): Promise<void> {
+  /** Resolves with how many runners are left on the phone (0: confirmed none; -1: couldn't confirm; -2: another
+   *  PhoneDock process on this Mac owns the phone, so its runner was left alone). */
+  private async teardown(udid: string, e: Entry | undefined, always: boolean): Promise<number> {
     if (e) {
       e.gone = true;
       e.abort.abort();
@@ -1117,12 +1143,19 @@ export class WdaSupervisor {
       await this.bounded(Promise.all([r ? stopRunner(r, this.o.stopWaitMs) : undefined, e.inflight?.catch(() => undefined)]), this.o.stopWaitMs);
     }
     // The runner app can outlive xcodebuild on the phone: end it there too. A person's Stop always looks (an older
-    // service may have left one); daemon exit only where this process started one.
+    // service may have left one), unless another PhoneDock on this Mac runs it; daemon exit only where this process
+    // started one.
+    let left = 0;
+    if (always && !e?.claimed && this.deps.claims) {
+      const c = this.deps.claims.acquire(udid);
+      if (!c.ok) { this.deps.log(`wda ${udid}: left WebDriverAgent alone: PhoneDock process ${c.pid} runs it`); return -2; }
+    }
     if (always || e?.launched) {
-      const left = await this.bounded(this.deps.stopOnPhone(udid).catch(() => -1), this.o.stopWaitMs);
-      if (left !== 0) this.deps.log(`wda ${udid}: couldn’t confirm WebDriverAgent stopped on the iPhone (${left ?? 'timed out'})`);
+      left = (await this.bounded(this.deps.stopOnPhone(udid).catch(() => -1), this.o.stopWaitMs)) ?? -1;
+      if (left !== 0) this.deps.log(`wda ${udid}: couldn’t confirm WebDriverAgent stopped on the iPhone (${left === -1 ? 'no answer' : `${left} left`})`);
     }
     if (e?.claimed || always) this.deps.claims?.release(udid);
+    return left;
   }
 
   private async bounded<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
@@ -1243,16 +1276,22 @@ export class WdaSupervisor {
     // Waits devicectl can see cost no launch: look again at the waiting pace.
     const f = await this.deps.phone(udid).catch(() => undefined);
     if (e.gone) return;
-    const person = this.personWait(f);
-    if (person) {
-      if (person.state === 'waiting_unlock') e.sawLocked = true;
-      this.set(e, person.state, person.message, person.hint, this.deps.now() + this.o.personPollMs);
-      return;
-    }
     const c = this.claim(udid, e);
     if (!c.ok) {
       this.set(e, 'waiting_phone', 'Another PhoneDock service on this Mac runs WebDriverAgent for this iPhone',
         'Stop control there, or leave it to that service.', this.deps.now() + this.o.personPollMs);
+      return;
+    }
+    // A runner left on the phone (by a service that died, or one from before PhoneDock managed it) may listen on the
+    // Wi-Fi: end it as soon as the phone can be reached, also while it waits for an unlock.
+    if (!e.phoneClean && f?.found && f.reachable !== false) {
+      e.phoneClean = (await this.deps.stopOnPhone(udid).catch(() => -1)) === 0;
+      if (e.gone) return;
+    }
+    const person = this.personWait(f);
+    if (person) {
+      if (person.state === 'waiting_unlock') e.sawLocked = true;
+      this.set(e, person.state, person.message, person.hint, this.deps.now() + this.o.personPollMs);
       return;
     }
     this.set(e, 'starting', `Starting WebDriverAgent (${why})…`);
@@ -1287,7 +1326,7 @@ export class WdaSupervisor {
           if (old) await stopRunner(old, this.o.stopWaitMs);
           // A runner can outlive its xcodebuild on the phone, and one may be left from before this service started:
           // end every WebDriverAgent runner on the phone before starting this one.
-          await this.deps.stopOnPhone(udid).catch(() => -1);
+          e.phoneClean = (await this.deps.stopOnPhone(udid).catch(() => -1)) === 0;
         },
       });
     } catch (err) {

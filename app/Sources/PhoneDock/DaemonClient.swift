@@ -371,10 +371,11 @@ enum DaemonLocator {
         return args.contains { $0.hasPrefix(resources + "/") }
     }
 
-    /// SIGTERM the daemon and wait (up to ~6 s) for it to exit.
+    /// SIGTERM the daemon and wait (up to ~30 s) for it to exit: it first ends the WebDriverAgent runners it started on
+    /// older iPhones, on the Mac and on the phone.
     static func stop(pid: Int) async -> Bool {
         guard pid > 0, kill(pid_t(pid), SIGTERM) == 0 else { return false }
-        for _ in 0..<60 {
+        for _ in 0..<300 {
             try? await Task.sleep(for: .milliseconds(100))
             if kill(pid_t(pid), 0) != 0 { return true }
         }

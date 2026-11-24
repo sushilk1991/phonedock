@@ -608,7 +608,7 @@ test('daemon start ends any runner left on the phone, then starts its own (nothi
   w.answering.add(`http://[${TUNNEL_IP}]:8100`);
   w.sup.start();
   await w.settle();
-  assert.deepEqual(w.events, ['build', 'stopOnPhone', 'start'], 'the orphan is ended before the new runner starts');
+  assert.deepEqual(w.events, ['stopOnPhone', 'build', 'stopOnPhone', 'start'], 'the orphan is ended at once, and again right before the new runner starts');
   assert.ok(!w.onPhone.has(999));
   assert.equal(w.saved.get(UDID), `http://[${TUNNEL_IP}]:8100`);
   assert.equal(w.sup.info(UDID)?.state, 'running');
@@ -648,7 +648,7 @@ test('setup builds before it stops the running WebDriverAgent; a failed build le
   assert.ok(first.alive(), 'still serving during the build');
   open(); await s;
   assert.equal(first.kills, 1);
-  assert.deepEqual(w.events, ['build', 'stopOnPhone', 'start', 'build', 'stopOnPhone', 'start']);
+  assert.deepEqual(w.events, ['stopOnPhone', 'build', 'stopOnPhone', 'start', 'build', 'stopOnPhone', 'start']);
 
   const second = w.runners[1];
   // A build failure throws before beforeStart: nothing on the phone or the Mac is touched.
@@ -667,7 +667,7 @@ test('a runner that exits is relaunched; a crash loop gives up, even when each r
   await w.settle();
   assert.equal(w.sup.info(UDID)?.state, 'retrying');
   assert.equal(w.sup.info(UDID)?.attempts, 1);
-  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 2, 'the exit is followed by a cleanup on the phone');
+  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 3, 'the exit is followed by a cleanup on the phone');
   await w.tickAfter(4_000);
   assert.equal(w.launches.length, 1, 'not before the pause');
   await w.tickAfter(1_000);

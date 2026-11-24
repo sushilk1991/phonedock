@@ -880,7 +880,9 @@ function tcpProbe(host: string, port: number): Promise<ProbeResult> {
 /** WebDriverAgent runner processes on the phone (the runner app is "WebDriverAgentRunner-Runner" whatever its bundle id). */
 async function runnersOnPhone(udid: string): Promise<number[]> {
   const r = await devicectl<{ runningProcesses?: { executable?: string; processIdentifier?: number }[] }>(['device', 'info', 'processes', '--device', udid], { timeoutMs: 30_000 });
-  return (r?.runningProcesses ?? [])
+  // No list is not an empty list: "confirmed gone" needs devicectl's answer.
+  if (!Array.isArray(r?.runningProcesses)) throw new PhoneDockError('devicectl listed no processes', 'device_error', 502);
+  return r.runningProcesses
     .filter((p) => /\/WebDriverAgentRunner-Runner\.app\//.test(String(p.executable ?? '')))
     .map((p) => Number(p.processIdentifier)).filter((n) => Number.isInteger(n) && n > 0);
 }
@@ -901,6 +903,9 @@ async function stopRunnersOnPhone(udid: string): Promise<number> {
   return (await runnersOnPhone(udid)).length;
 }
 
+/** What Stop, Disconnect and supervision do on the phone itself (devicectl). Unit tests replace it: no devicectl there. */
+export const wdaPhoneOps = { stopRunners: stopRunnersOnPhone };
+
 /** One PhoneDock process per phone on this Mac, whatever its state directory (per user, in Library/Caches). */
 const wdaClaims = new HostClaims(process.env.PHONEDOCK_WDA_CLAIMS_DIR || join(homedir(), 'Library', 'Caches', 'PhoneDock', 'wda-claims'), {
   // Only ever an xcodebuild a dead PhoneDock left behind (the pid could have been reused by anything else).
@@ -914,7 +919,7 @@ const wdaSup = new WdaSupervisor({
   now: Date.now,
   managed: () => Object.entries(cfgState.read()).filter(([, c]) => c.wda).map(([k, c]) => c.udid ?? k),
   shared: (udid) => !!cfgFor(udid)?.wda?.share,
-  stopOnPhone: (udid) => stopRunnersOnPhone(udid),
+  stopOnPhone: (udid) => wdaPhoneOps.stopRunners(udid),
   claims: wdaClaims,
   saveUrl(udid, url) {
     cfgState.update((all) => {
@@ -1018,7 +1023,7 @@ function setupDeps(): SetupDeps {
 /** Stop Control: stop WebDriverAgent (on the Mac and on the phone) and stop keeping it running. The phone stays paired
  *  and listed (screenshots, apps and installs work as before), and its setup is remembered, so Set Up Control starts
  *  it again with the same build. Also cancels a setup in flight. Idempotent: `stopped` is false when nothing ran. */
-async function wdaStop(udid: string): Promise<{ udid: string; stopped: boolean }> {
+async function wdaStop(udid: string): Promise<{ udid: string; stopped: boolean; confirmed: boolean; ownedElsewhere?: true }> {
   if (!/^[A-Za-z0-9-]+$/.test(udid)) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400);
   let stopped = false;
   let url: string | undefined;
@@ -1038,9 +1043,10 @@ async function wdaStop(udid: string): Promise<{ udid: string; stopped: boolean }
   markStopped(udid, hwUdid);
   if (url) { sessions.delete(url); statusCache.delete(url); }
   scaleCache.delete(udid);
-  await wdaSup.unmanage(hwUdid ?? udid);
+  const left = await wdaSup.unmanage(hwUdid ?? udid);
   wdaChanged();
-  return { udid: hwUdid ?? udid, stopped };
+  // confirmed: devicectl showed no WebDriverAgent runner left on the phone.
+  return { udid: hwUdid ?? udid, stopped, confirmed: left === 0, ...(left === -2 ? { ownedElsewhere: true as const } : {}) };
 }
 
 /** The teams Xcode is signed in to, for the app's team picker and `phonedock ios wda-teams`. */
@@ -1079,7 +1085,7 @@ export const backend: Backend & {
   disconnect(nativeId: string): Promise<boolean>;
   wdaSetup(udid: string, opts: WdaSetupOptions, onProgress?: (l: string) => void): Promise<WdaSetupResult>;
   wdaTeams(): Promise<{ teams: XcodeTeam[]; xcode: boolean; xcodeVersion?: string; minIos?: string }>;
-  wdaStop(udid: string): Promise<{ udid: string; stopped: boolean }>;
+  wdaStop(udid: string): Promise<{ udid: string; stopped: boolean; confirmed: boolean; ownedElsewhere?: true }>;
   /** Daemon lifecycle (main.ts): relaunch managed WebDriverAgents and keep them running. */
   startWdaSupervisor(onChange?: () => void): void;
   stopWdaSupervisor(): void;

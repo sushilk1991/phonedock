@@ -9,7 +9,10 @@ import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'pd-ios-connect-'));
 process.env.PHONEDOCK_HOME = home;
-const { backend, publicConfig } = await import('./ios-device.ts');
+process.env.PHONEDOCK_WDA_CLAIMS_DIR = join(home, 'claims');   // never the real per-user claims
+const { backend, publicConfig, wdaPhoneOps } = await import('./ios-device.ts');
+const phoneStops: string[] = [];
+wdaPhoneOps.stopRunners = async (udid: string) => { phoneStops.push(udid); return 0; };   // no devicectl in unit tests
 after(() => rmSync(home, { recursive: true, force: true }));
 
 const UDID = '00008020-0000FAKE0000FAKE';
@@ -44,7 +47,8 @@ test('connect --ios to a managed phone’s address keeps its entry and its wda s
 test('Stop Control ends management but keeps the phone’s entry, name and setup for the next Set Up Control', async () => {
   writeFileSync(cfgFile, JSON.stringify({ [UDID]: { udid: UDID, name: 'Old iPhone', wdaUrl: 'http://192.0.2.10:8100', wda } }));
   const r = await backend.wdaStop(UDID);
-  assert.deepEqual(r, { udid: UDID, stopped: true });
+  assert.deepEqual(r, { udid: UDID, stopped: true, confirmed: true });
+  assert.deepEqual(phoneStops, [UDID], 'the runner on the phone is ended (and confirmed)');
   const e = JSON.parse(readFileSync(cfgFile, 'utf8'))[UDID];
   assert.equal(e.name, 'Old iPhone', 'not forgotten (that is Disconnect)');
   assert.equal(e.wda, undefined, 'no longer managed');
@@ -52,7 +56,7 @@ test('Stop Control ends management but keeps the phone’s entry, name and setup
   assert.equal(e.wdaStopped.team, wda.team, 'remembered, so setting up again reuses the team and its build');
   assert.equal(e.wdaStopped.since, undefined);
   assert.ok(Date.parse(e.wdaStopped.stoppedAt));
-  assert.deepEqual(await backend.wdaStop(UDID), { udid: UDID, stopped: false }, 'idempotent');
+  assert.deepEqual(await backend.wdaStop(UDID), { udid: UDID, stopped: false, confirmed: true }, 'idempotent');
   await assert.rejects(backend.wdaStop('bad/udid'), (err: { code?: string }) => err.code === 'bad_request');
 });
 
