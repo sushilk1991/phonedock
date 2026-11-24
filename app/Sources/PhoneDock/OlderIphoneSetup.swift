@@ -85,6 +85,9 @@ extension Device {
     /// The person stopped control (Stop Control) and hasn't set it up again. The service remembers the team, so Set Up
     /// Control starts it again without asking for one.
     var wdaStopped: Bool { if case .object = meta?["wdaStopped"] { return true }; return false }
+    /// A paired phone with WebDriverAgent PhoneDock doesn't manage here (an earlier setup, or connected by address): it
+    /// may still answer on the Wi-Fi. The service's plain note, with Stop Control next to it.
+    var wdaNotice: String? { meta?["wdaNotice"]?.stringValue }
 
     /// Whether to offer Set Up Control: nothing answers yet and PhoneDock isn't already looking after it (or gave up).
     var offersControlSetup: Bool {
@@ -208,7 +211,7 @@ extension AppModel {
                     if controlSetups[device.id] == .done(said) { controlSetups[device.id] = nil }
                     return
                 }
-                let code = end.apiError?.code ?? ""
+                let code = end.apiError?.specificCode ?? ""
                 if team == nil, share == nil, Self.needsTeamCodes.contains(code) {
                     chooseTeamThenSetUp(device)
                     return
@@ -299,7 +302,7 @@ extension AppModel {
     static func controlProblem(_ job: Job) -> FriendlyError {
         var p = FriendlyError.from(job: job, title: "Couldn’t set up control")
         guard let e = job.apiError else { return p }
-        switch e.code {
+        switch e.specificCode {
         case "xcode_account_missing": p = FriendlyError(title: signInProblem.title, message: signInProblem.message, details: p.details)
         case "developer_mode_off":
             p.title = "Turn on Developer Mode"
@@ -368,6 +371,12 @@ struct ControlSetupPanel: View {
                     sharing(c)
                     stopControl
                 }
+            }
+        } else if let n = device.wdaNotice {
+            VStack(alignment: .leading, spacing: Theme.Space.l) {
+                if device.wdaAnswers { statusLine("Taps and typing work through WebDriverAgent", dot: .running) }
+                note(n).testAnchor("control-notice")
+                if !compact { stopControl }
             }
         } else if device.wdaAnswers {
             statusLine("Taps and typing work through WebDriverAgent", dot: .running)

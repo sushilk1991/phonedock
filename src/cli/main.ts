@@ -228,8 +228,12 @@ export function devicesTable(list: Device[]): string {
   }));
   const cols = ['name', 'id', 'platform', 'state', 'os', 'screen', 'lease', ...(rows.some((r) => r.human) ? ['human'] : []), 'managed'];
   const waiting = list.filter((d) => humanCell(d));
+  // An older iPhone with WebDriverAgent from an earlier setup: it may still answer on the Wi-Fi.
+  const notices = list.filter((d) => typeof d.meta?.wdaNotice === 'string');
   return table(rows, cols) + (waiting.length
     ? `\n\n${waiting.map((d) => `${d.name} is waiting for a person: ${d.handoff!.reason}\n  Do it on the device (as the person: --owner app:human, no lease needed), then: phonedock handoff done ${d.handoff!.id} [--note "…"]   (or: phonedock handoff cancel ${d.handoff!.id})`).join('\n')}`
+    : '') + (notices.length
+    ? `\n\n${notices.map((d) => `${d.name}: ${d.meta!.wdaNotice}\n  Stop it: phonedock ios wda-stop --udid ${d.nativeId}   Make it private: phonedock ios wda-setup --udid ${d.nativeId}`).join('\n')}`
     : '');
 }
 
@@ -1001,7 +1005,7 @@ export async function run(argv: string[]): Promise<number> {
           : r.confirmed ? '' : ' PhoneDock couldn’t confirm the runner on the iPhone stopped (is it connected?); it ends it next time it can.';
         out(r, () => (r.stopped
           ? `Stopped control on ${udid}. The iPhone stays paired and listed (screenshots, apps, installs). \`phonedock ios wda-setup --udid ${udid}\` starts it again with the same build.`
-          : `PhoneDock wasn’t running control on ${udid}.`) + onPhone);
+          : `PhoneDock wasn’t managing control on ${udid}.${r.confirmed ? ' No WebDriverAgent runner is left on the iPhone.' : ''}`) + onPhone);
         return 0;
       }
       if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--name N] [--api-key-path P --api-key-id K --api-key-issuer I] | phonedock ios wda-stop --udid <id> | phonedock ios wda-teams');

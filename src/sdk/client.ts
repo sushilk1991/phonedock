@@ -176,7 +176,8 @@ export interface Job {
   startedAt: string;
   endedAt?: string;
 }
-export interface JobError { code: string; message: string; hints?: string[]; detail?: string }
+/** `cause`: the specific failure behind a catch-all code kept for compatibility (wda-setup: `wda_setup_failed`). */
+export interface JobError { code: string; message: string; hints?: string[]; detail?: string; cause?: string }
 
 /** A failed job's error as one readable line: the message, then its hints. */
 export function jobErrorText(error: Job['error']): string {

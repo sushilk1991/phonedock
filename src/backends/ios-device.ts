@@ -258,8 +258,15 @@ const sw = (d: DcDevice) => d.properties?.software ?? {};
 const st = (d: DcDevice) => d.properties?.state ?? d.deviceProperties ?? {};
 
 let listCache: { at: number; list: DcDevice[] } | undefined;
+let listing: Promise<DcDevice[]> | undefined;
 async function physicalDevices(force = false): Promise<DcDevice[]> {
   if (!force && listCache && Date.now() - listCache.at < 3000) return listCache.list;
+  // One devicectl list at a time (seconds over Wi-Fi): readers that arrive meanwhile (input, the inventory, a launch)
+  // share it.
+  listing ??= listDevicectl().finally(() => { listing = undefined; });
+  return listing;
+}
+async function listDevicectl(): Promise<DcDevice[]> {
   const r = await devicectl<{ devices?: DcDevice[] }>(['list', 'devices'], { timeoutMs: 60_000 });
   const list = (r?.devices ?? []).filter((d) => {
     const h = hw(d);
@@ -809,6 +816,9 @@ async function discover(): Promise<Discovered[]> {
 
 /** devicectl's view of a phone, for the preflight and the supervisor (found, trusted, reachable, unlocked). */
 async function phoneFacts(udid: string, fresh = false): Promise<PhoneFacts> {
+  // Each devicectl call takes seconds over Wi-Fi: ask for the lock state while the list is read (ignored when the
+  // list says the phone can't be asked).
+  const lock = probeLock(udid).catch(() => null);
   const list = await physicalDevices(fresh);
   const d = list.find((x) => hw(x).udid === udid || x.identifier === udid);
   if (!d) return { found: false };
@@ -817,7 +827,7 @@ async function phoneFacts(udid: string, fresh = false): Promise<PhoneFacts> {
   const tunnel = legacy.tunnelState ?? c.tunnelState ?? c.state;
   const reachable = tunnel !== 'unavailable';
   const osVersion = sw(d).osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
-  const locked = reachable && (!pairing || pairing === 'paired') ? await probeLock(hw(d).udid ?? udid).catch(() => null) : null;
+  const locked = reachable && (!pairing || pairing === 'paired') ? await lock : null;
   return {
     found: true, name: st(d).name, paired: !pairing || pairing === 'paired', reachable,
     ...(osVersion ? { osVersion: String(osVersion) } : {}), developerMode: devModeOf(d) ?? null, locked,
@@ -890,15 +900,16 @@ let wdaChanged: () => void = () => {};
  *  entry in devicectl is what proves the address is this phone. */
 async function wdaEndpoint(udid: string, cfg: WdaConfig): Promise<WdaEndpoint> {
   if (cfg.destination && !isDeviceDestination(cfg.destination)) return { host: '127.0.0.1' };
-  const look = async (): Promise<WdaEndpoint | undefined> => {
-    const d = (await physicalDevices(true)).find((x) => hw(x).udid === udid || x.identifier === udid);
+  const look = async (fresh: boolean): Promise<WdaEndpoint | undefined> => {
+    const d = (await physicalDevices(fresh)).find((x) => hw(x).udid === udid || x.identifier === udid);
     const ip = d ? tunnelIpOf(d) : undefined;
     return ip ? { host: ip } : undefined;
   };
-  const now = await look();
+  // A list at most 3 s old (setup's preflight just read one) is as good as a new one, and saves a devicectl call.
+  const now = (await look(false)) ?? (await look(true));
   if (now) return now;
   await devicectl(['device', 'info', 'details', '--device', udid], { timeoutMs: 30_000 }).catch(() => undefined);
-  const after = await look();
+  const after = await look(true);
   if (after) return after;
   throw new PhoneDockError('The iPhone’s developer connection isn’t up', 'no_device', 409,
     ['Plug it in by USB, or wake it on the same Wi-Fi as this Mac; PhoneDock tries again.'], `devicectl reports no tunnel address for ${udid}`);
@@ -1078,7 +1089,6 @@ function setupDeps(udid: string): SetupDeps {
       },
     },
     sup: wdaSup,
-    running: setupsRunning,
     changed: () => wdaChanged(),
   };
 }

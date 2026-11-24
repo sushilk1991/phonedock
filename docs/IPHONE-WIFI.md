@@ -151,23 +151,34 @@ Management**, tap your Apple ID and tap **Trust**, then press **Retry** in Phone
   phone connected and trusted, Developer Mode on, the phone unlocked, and its iOS new enough for your Xcode (Xcode 27
   runs WebDriverAgent on iOS 17 and later).
 - **Builds once** per WebDriverAgent version, team and Xcode build, and registers the phone with your team on the way
-  (`-allowProvisioningDeviceRegistration`). It rebuilds by itself only when one of those changes, when the signing is
-  about to expire (a free Apple ID signs for 7 days), or for a phone that isn't in the build's profile yet.
+  (`-allowProvisioningDeviceRegistration`). Setting up again rebuilds only when one of those changes, when the signing
+  is about to expire, or for a phone that isn't in the build's profile yet. **PhoneDock only signs when you ask**: on
+  its own it restarts WebDriverAgent from the existing build, never asking Apple for anything. A free Apple ID signs
+  for 7 days, so after that the Info tab asks you to press Set Up Control again (it takes about a minute).
 - **Keeps it private.** WebDriverAgent has no password: anyone who can reach it can control the phone. So PhoneDock
   makes it listen only on the phone's end of this Mac's paired developer connection (the CoreDevice tunnel Xcode uses,
   over USB or Wi-Fi). Other computers on your network, other Macs included, can't reach it. After each start PhoneDock
-  checks that the phone's Wi-Fi address refuses it, and stops it if it doesn't.
+  checks that the phone's Wi-Fi address refuses it, and stops it if it answers there, or if PhoneDock can't tell (then
+  it tries again; allow PhoneDock under Privacy & Security › Local Network if it keeps saying so). Turning sharing off
+  stops the shared WebDriverAgent at once, before anything else.
 - **Keeps it running.** WebDriverAgent stops whenever the iPhone restarts or PhoneDock restarts (including after an
   update). PhoneDock starts it again when it starts, when the phone reconnects over USB or Wi-Fi, and when it stops
-  answering, with growing pauses between tries. A locked phone (one that just restarted, for example) waits until you
+  answering while the phone is reachable, with growing pauses between tries. A locked phone (one that just restarted, for example) waits until you
   unlock it; the device's Info tab says what PhoneDock is waiting for. If it still can't start after several tries it
   stops trying and says why; reconnect the phone or press Set Up Control again to start over. Setting up again keeps
   the running WebDriverAgent until the new build is ready.
 - **Stop Control** (in the phone's Info tab or its right-click menu, or `phonedock ios wda-stop --udid <UDID>`) ends
-  WebDriverAgent on the Mac and on the phone, and stops keeping it running. It doesn't unpair anything: the phone stays
-  listed, and screenshots, apps and installs keep working. Set Up Control starts it again in seconds, with the same
-  build. (Apple's **Unpair** in Finder or Xcode is something else: it removes the phone's trust in this Mac.)
-  `phonedock disconnect ios-device:<UDID>` also stops it, and forgets the phone's saved settings.
+  WebDriverAgent on the Mac and on the phone, any WebDriverAgent on the phone, whoever started it (another Mac using a
+  shared phone loses it too), and stops keeping it running. It doesn't unpair anything: the phone stays listed, and
+  screenshots, apps and installs keep working. Set Up Control starts it again in seconds, with the same build. (Apple's
+  **Unpair** in Finder or Xcode is something else: it removes the phone's trust in this Mac.) If the phone can't be
+  reached just then, PhoneDock says so and finishes the job when the phone is back.
+- **Disconnect** (`phonedock disconnect ios-device:<UDID>`) forgets the phone's connection on this Mac. A phone
+  PhoneDock manages here is stopped first; anything else (a phone connected by its address, a setup from an earlier
+  PhoneDock) is only forgotten, and nothing on the phone is touched.
+- **WebDriverAgent from an earlier setup.** A paired phone that an earlier PhoneDock set up (or that you connected by
+  its address) may still run WebDriverAgent on your Wi-Fi. Its Info tab, `phonedock devices` and the MCP device list say
+  so: Stop Control ends it, Set Up Control makes it private.
 
 ### No Apple ID in Xcode? Use an App Store Connect API key
 
@@ -193,7 +204,7 @@ phonedock connect --ios <iphone-ip> --name "Wi-Fi iPhone"           # as shown i
 phonedock connect --ios http://<iphone-ip>:8100 --udid <UDID>       # with the UDID, installing apps works too
 ```
 
-If the network gives the phone a new address, connect again with the one the Info tab shows.
+The Info tab follows the phone's address; if the network gives the phone a new one, connect again with that.
 
 In the app: ＋ Add Device › Physical Device › Older iPhone? › Set up on another Mac?. If Terminal reaches the phone
 (`curl http://<iphone-ip>:8100/status`) but PhoneDock can't (`wda_unreachable`), macOS is blocking PhoneDock from the

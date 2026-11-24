@@ -298,7 +298,6 @@ function setupWorld(o: { facts?: PhoneFacts & { udid?: string }; teams?: XcodeTe
       resume: (u: string) => { calls.push(`resume:${u}`); },
       halt: async (u: string) => { calls.push(`halt:${u}`); return 0; },
     } as SetupDeps['sup'],
-    running: new Set(),
     changed: () => undefined,
   };
   return {

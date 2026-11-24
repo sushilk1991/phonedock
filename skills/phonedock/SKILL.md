@@ -165,14 +165,18 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   `get_ui` need a one-time setup (an input error says "Set up control for this iPhone first"). Setup installs a test
   runner signed with the person's Apple ID and builds for a few minutes, so run it only for a phone the user asked you
   to use: `phonedock ios wda-setup --udid <nativeId>` (HTTP `POST /v1/ios/wda-setup`; the app's button is Set Up
-  Control). `team_required`: ask which team (`phonedock ios wda-teams`), then pass `--team`. `xcode_account_missing`,
-  `developer_mode_off`, `not_paired` and `wda_untrusted` are the person's to fix: `request_human` with the error's
-  hint. After that PhoneDock keeps it running across reboots; `wda_not_ready` means it is restarting or waiting (its
-  message says on what, such as an unlock), so wait or ask, don't run setup again. It is reachable only from this Mac;
-  never pass `--share` (it lets anyone on the Wi-Fi control the phone) unless the user asks for another Mac to drive
-  it. To stop control: `phonedock ios wda-stop --udid <nativeId>` (HTTP `POST /v1/ios/wda-stop`; the app's Stop
-  Control). It ends the runner on the phone too and keeps the phone paired and listed; don't unpair the phone for
-  this, and don't use `disconnect`, which also forgets its settings.
+  Control). A failed setup keeps the code `wda_setup_failed` and names what to fix in the error's `cause`: for
+  `team_required`, ask which team (`phonedock ios wda-teams`), then pass `--team`; `xcode_account_missing`,
+  `developer_mode_off`, `not_paired`, `wda_untrusted` and `wda_rebuild_needed` (a personal team's signing ran out after
+  7 days) are the person's to fix: `request_human` with the error's hint, then set up again. After that PhoneDock
+  keeps it running across reboots; `wda_not_ready` means it is restarting or waiting (its message says on what, such as
+  an unlock), so wait or ask, don't run setup again. It is reachable only from this Mac; never pass `--share` (it lets
+  anyone on the Wi-Fi control the phone) unless the user asks for another Mac to drive it. To stop control:
+  `phonedock ios wda-stop --udid <nativeId>` (HTTP `POST /v1/ios/wda-stop`; the app's Stop Control). It ends every
+  WebDriverAgent on the phone, also one another Mac uses, so only when the user asks, and keeps the phone paired and
+  listed; don't unpair the phone for this. `disconnect` only forgets the connection (and stops it when PhoneDock
+  manages it here). A device with `notice=` in `list_devices` may still run an earlier WebDriverAgent on the Wi-Fi: tell
+  the user (Stop Control ends it, Set Up Control makes it private); don't act on it unasked.
 - **App Store screenshots.** Create the required model (`list_profiles backend="ios-simulator" filter="Pro Max"`),
   set the scene (`set_appearance`, sample data, `open_url` deep links), then `screenshot save_to=… format="png"`
   at full resolution (no `max_size`). On a simulator/emulator, `device_environment` can override the status bar;

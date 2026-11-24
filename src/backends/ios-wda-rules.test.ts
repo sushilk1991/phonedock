@@ -144,7 +144,6 @@ function setupWorld(o: { prior?: SetupEntry; locked?: boolean; setupFails?: Phon
       resume: () => { calls.push(`resume share=${!!store.get(UDID)?.wda?.share}`); },
       halt: async () => { calls.push(`halt share=${!!store.get(UDID)?.wda?.share}`); },
     } as unknown as SetupDeps['sup'],
-    running: new Set(),
     changed: () => undefined,
   };
   return { d, store, calls };

@@ -452,7 +452,7 @@ export interface Runner {
 
 /** Stop a runner (SIGINT, SIGKILL after `graceMs`) and wait until xcodebuild has exited; resolves with whether it has
  *  (false only if even SIGKILL didn't end it within `waitMs`). */
-export async function stopRunner(r: Runner, graceMs = 3_000, waitMs = 15_000): Promise<boolean> {
+export async function stopRunner(r: Runner, graceMs = 1_000, waitMs = 15_000): Promise<boolean> {
   if (r.alive()) r.kill(graceMs);
   let t: NodeJS.Timeout | undefined;
   await Promise.race([r.exited, new Promise<void>((res) => { t = setTimeout(res, waitMs); t.unref?.(); })]);
@@ -1108,8 +1108,8 @@ export class WdaSupervisor {
 
   /** Set up (or redo) WebDriverAgent now, for a person who asked: may build and sign. Waits for whatever the phone's
    *  lane is doing, builds, and only then replaces the running WebDriverAgent (so a failed build leaves a working
-   *  one alone), unless `stopFirst` (sharing turned off: the shared runner goes before anything else). */
-  async setup(udid: string, onProgress: (l: string) => void, o: { stopFirst?: boolean } = {}): Promise<{ url: string; pid?: number }> {
+   *  one alone). */
+  async setup(udid: string, onProgress: (l: string) => void): Promise<{ url: string; pid?: number }> {
     const wanted = () => !this.closing && this.deps.managed().includes(udid);
     if (!wanted()) throw cancelledError();
     return this.lane(udid, async () => {
@@ -1122,10 +1122,8 @@ export class WdaSupervisor {
       }
       e.attempts = 0; e.personAttempts = 0; e.needsPerson = false;
       this.set(e, 'starting', 'Setting up WebDriverAgent…');
-      try {
-        if (o.stopFirst && e.runner) await this.teardown(udid, e, {});
-        await this.launchNow(udid, e, true, onProgress);
-      } catch (err) {
+      try { await this.launchNow(udid, e, true, onProgress); }
+      catch (err) {
         if (e.runner?.alive()) this.set(e, 'running', 'WebDriverAgent is running');   // the old one still serves
         else this.failed(udid, e, err, true);
         throw err;
@@ -1276,6 +1274,11 @@ export class WdaSupervisor {
 
   private set(e: Entry, state: WdaState, message: string, hint?: string, nextAt?: number): void {
     e.state = state; e.message = message; e.hint = hint; e.nextAt = nextAt; e.updatedAt = this.deps.now();
+    // A retry is due before the next tick (a restart after 5 s, say): look then, not up to tickMs later.
+    if (nextAt !== undefined && this.o.autoTick && this.started) {
+      const t = setTimeout(() => { void this.tick(); }, Math.max(0, nextAt - this.deps.now()) + 50);
+      t.unref?.();
+    }
   }
 
   /** One automatic attempt at a time per phone. */
@@ -1491,8 +1494,6 @@ export interface SetupDeps {
   marks: { now(): number; since(udid: string, t: number): boolean };
   store: { get(udid: string): SetupEntry | undefined; set(udid: string, entry: SetupEntry | undefined): void };
   sup: Pick<WdaSupervisor, 'setup' | 'info' | 'unmanage' | 'resume' | 'halt'>;
-  /** udids being set up now (one setup per phone). */
-  running: Set<string>;
   changed(): void;
 }
 
@@ -1552,81 +1553,77 @@ async function setupSteps(d: SetupDeps, id: string, req: SetupRequest, progress:
     throw new PhoneDockError('The destination names a different device', 'bad_request', 400,
       ['Pass `id=<this iPhone’s udid>` or `name=<its name>` (or leave destination out).'], `destination ${req.destination}, udid ${udid}`);
   }
-  if (d.running.has(udid) && udid !== id) throw new PhoneDockError('This iPhone is already being set up', 'busy', 409, ['Wait for that setup to finish.']);
-  d.running.add(udid);
-  try {
-    if (!sim) {
-      const f = facts!;
-      if (f.found && f.developerMode == null) {
-        f.developerMode = (await d.developerMode(udid).catch(() => null)) ?? null;
-        if (stoppedMeanwhile(id, udid)) throw cancelledError();
-      }
-      const err = preflight(xcode, f, udid);
-      if (err) throw err;
-    } else if (!xcode) throw preflight(undefined, undefined, udid)!;
-
-    const cur = d.store.get(udid);
-    const prior = cur?.wda ?? cur?.wdaStopped;
-    // Nothing asked for: reuse this phone's last setup (running, or stopped with Stop Control), and so its build.
-    const reuse = req.team === undefined && !req.apiKey ? prior : undefined;
-    const reuseKey = reuse?.apiKey && d.exists(reuse.apiKey.path) ? reuse.apiKey : undefined;
-    const apiKey = req.apiKey ?? reuseKey;
-    const team = sim ? { id: UNSIGNED_TEAM, free: false }
-      : chooseTeam(teams, { team: req.team ?? (reuseKey ? reuse?.team : undefined), apiKey, udid, remembered: reuse?.team });
-    if (!sim) onProgress(`Signing with team ${team.id}${team.free ? ' (a personal team: its signing lasts 7 days; set up again to renew it)' : ''}`);
-    const share = req.share ?? prior?.share ?? false;
-    let cfg: WdaConfig = {
-      team: team.id, free: team.free,
-      // A team that fell back to its own runner id before keeps it.
-      bundleId: sim ? UPSTREAM_RUNNER_BUNDLE_ID : prior?.team === team.id && prior.bundleId ? prior.bundleId : runnerBundleId(team.id, team.free),
-      ...(apiKey ? { apiKey } : {}), ...(req.destination ? { destination: req.destination } : {}), ...(share ? { share: true } : {}),
-    };
-    const snapshot = cur ? structuredClone(cur) : undefined;
-    const since = cur?.wda?.since ?? new Date().toISOString();
-    const commit = (c: WdaConfig) => {
+  if (!sim) {
+    const f = facts!;
+    if (f.found && f.developerMode == null) {
+      f.developerMode = (await d.developerMode(udid).catch(() => null)) ?? null;
       if (stoppedMeanwhile(id, udid)) throw cancelledError();
-      d.store.set(udid, { ...(d.store.get(udid) ?? {}), udid, ...(req.name ? { name: req.name } : {}), wda: { ...c, since } });
-    };
-    commit(cfg);
-    try {
-      let r: { url: string; pid?: number };
-      try { r = await d.sup.setup(udid, onProgress); }
-      catch (e) {
-        // A paid team whose profile can't cover upstream's runner id: its own id, once.
-        if (!(e instanceof PhoneDockError) || e.code !== 'bundle_id_unavailable' || cfg.bundleId !== UPSTREAM_RUNNER_BUNDLE_ID || sim) throw e;
-        cfg = { ...cfg, bundleId: teamScopedBundleId(cfg.team) };
-        onProgress(`Team ${cfg.team} can’t sign WebDriverAgent’s usual app ID; trying its own (${cfg.bundleId})…`);
-        commit(cfg);
-        r = await d.sup.setup(udid, onProgress);
-      }
-      // Done only while it still runs (one that dies right after printing its address is a failed setup).
-      const info = d.sup.info(udid);
-      if (info && info.state !== 'running') {
-        throw new PhoneDockError('WebDriverAgent stopped right after it started', 'wda_stopped', 502, [info.message, ...(info.hint ? [info.hint] : [])]);
-      }
-      const done = d.store.get(udid);
-      if (done?.wda && done.wdaStopped) { const next = { ...done }; delete next.wdaStopped; d.store.set(udid, next); }
-      d.changed();
-      return {
-        udid: id, hardwareUdid: udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true,
-        shared: !!cfg.share, ...(info?.sharedUrl ? { sharedUrl: info.sharedUrl } : {}),
-      };
-    } catch (e) {
-      if ((e instanceof PhoneDockError && e.code === 'cancelled') || stoppedMeanwhile(id, udid)) { d.changed(); throw e instanceof PhoneDockError && e.code === 'cancelled' ? e : cancelledError(); }
-      const info = d.sup.info(udid);
-      if (info?.state === 'waiting_unlock' || info?.state === 'waiting_phone') {
-        // The service took it on: it starts WebDriverAgent once the person has done their part.
-        if (e instanceof PhoneDockError) e.hints = [...(e.hints ?? []), 'PhoneDock keeps trying: it starts WebDriverAgent as soon as that’s done.'];
-      } else if (info?.state !== 'waiting_trust') {
-        // Nothing to wait for: put the phone's entry back as it was (a new name too), and with it the previous
-        // setup and its WebDriverAgent, or stop managing the phone. Sharing that was turned off stays off, and stays
-        // stopped: never shared again by a rollback.
-        d.store.set(udid, snapshot);
-        if (snapshot?.wda && !optOut) d.sup.resume(udid, 'setup failed; back to the previous setup');
-        else if (!snapshot?.wda) await d.sup.unmanage(udid);
-      }
-      d.changed();
-      throw e;
     }
-  } finally { d.running.delete(udid); }
+    const err = preflight(xcode, f, udid);
+    if (err) throw err;
+  } else if (!xcode) throw preflight(undefined, undefined, udid)!;
+
+  const cur = d.store.get(udid);
+  const prior = cur?.wda ?? cur?.wdaStopped;
+  // Nothing asked for: reuse this phone's last setup (running, or stopped with Stop Control), and so its build.
+  const reuse = req.team === undefined && !req.apiKey ? prior : undefined;
+  const reuseKey = reuse?.apiKey && d.exists(reuse.apiKey.path) ? reuse.apiKey : undefined;
+  const apiKey = req.apiKey ?? reuseKey;
+  const team = sim ? { id: UNSIGNED_TEAM, free: false }
+    : chooseTeam(teams, { team: req.team ?? (reuseKey ? reuse?.team : undefined), apiKey, udid, remembered: reuse?.team });
+  if (!sim) onProgress(`Signing with team ${team.id}${team.free ? ' (a personal team: its signing lasts 7 days; set up again to renew it)' : ''}`);
+  const share = req.share ?? prior?.share ?? false;
+  let cfg: WdaConfig = {
+    team: team.id, free: team.free,
+    // A team that fell back to its own runner id before keeps it.
+    bundleId: sim ? UPSTREAM_RUNNER_BUNDLE_ID : prior?.team === team.id && prior.bundleId ? prior.bundleId : runnerBundleId(team.id, team.free),
+    ...(apiKey ? { apiKey } : {}), ...(req.destination ? { destination: req.destination } : {}), ...(share ? { share: true } : {}),
+  };
+  const snapshot = cur ? structuredClone(cur) : undefined;
+  const since = cur?.wda?.since ?? new Date().toISOString();
+  const commit = (c: WdaConfig) => {
+    if (stoppedMeanwhile(id, udid)) throw cancelledError();
+    d.store.set(udid, { ...(d.store.get(udid) ?? {}), udid, ...(req.name ? { name: req.name } : {}), wda: { ...c, since } });
+  };
+  commit(cfg);
+  try {
+    let r: { url: string; pid?: number };
+    try { r = await d.sup.setup(udid, onProgress); }
+    catch (e) {
+      // A paid team whose profile can't cover upstream's runner id: its own id, once.
+      if (!(e instanceof PhoneDockError) || e.code !== 'bundle_id_unavailable' || cfg.bundleId !== UPSTREAM_RUNNER_BUNDLE_ID || sim) throw e;
+      cfg = { ...cfg, bundleId: teamScopedBundleId(cfg.team) };
+      onProgress(`Team ${cfg.team} can’t sign WebDriverAgent’s usual app ID; trying its own (${cfg.bundleId})…`);
+      commit(cfg);
+      r = await d.sup.setup(udid, onProgress);
+    }
+    // Done only while it still runs (one that dies right after printing its address is a failed setup).
+    const info = d.sup.info(udid);
+    if (info && info.state !== 'running') {
+      throw new PhoneDockError('WebDriverAgent stopped right after it started', 'wda_stopped', 502, [info.message, ...(info.hint ? [info.hint] : [])]);
+    }
+    const done = d.store.get(udid);
+    if (done?.wda && done.wdaStopped) { const next = { ...done }; delete next.wdaStopped; d.store.set(udid, next); }
+    d.changed();
+    return {
+      udid: id, hardwareUdid: udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true,
+      shared: !!cfg.share, ...(info?.sharedUrl ? { sharedUrl: info.sharedUrl } : {}),
+    };
+  } catch (e) {
+    if ((e instanceof PhoneDockError && e.code === 'cancelled') || stoppedMeanwhile(id, udid)) { d.changed(); throw e instanceof PhoneDockError && e.code === 'cancelled' ? e : cancelledError(); }
+    const info = d.sup.info(udid);
+    if (info?.state === 'waiting_unlock' || info?.state === 'waiting_phone') {
+      // The service took it on: it starts WebDriverAgent once the person has done their part.
+      if (e instanceof PhoneDockError) e.hints = [...(e.hints ?? []), 'PhoneDock keeps trying: it starts WebDriverAgent as soon as that’s done.'];
+    } else if (info?.state !== 'waiting_trust') {
+      // Nothing to wait for: put the phone's entry back as it was (a new name too), and with it the previous
+      // setup and its WebDriverAgent, or stop managing the phone. Sharing that was turned off stays off, and stays
+      // stopped: never shared again by a rollback.
+      d.store.set(udid, snapshot);
+      if (snapshot?.wda && !optOut) d.sup.resume(udid, 'setup failed; back to the previous setup');
+      else if (!snapshot?.wda) await d.sup.unmanage(udid);
+    }
+    d.changed();
+    throw e;
+  }
 }

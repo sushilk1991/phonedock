@@ -102,6 +102,7 @@ function fmtDevice(d: Device): string {
   if (d.handoff) bits.push(`waiting-for-human=${JSON.stringify(d.handoff.reason.slice(0, 60))}`);
   if (!d.managed) bits.push('unmanaged');
   if (d.error) bits.push(`error=${d.error}`);
+  if (typeof d.meta?.wdaNotice === 'string') bits.push(`notice=${d.meta.wdaNotice}`);
   return bits.join(' | ');
 }
 

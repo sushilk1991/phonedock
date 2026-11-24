@@ -853,7 +853,7 @@ struct SidebarView: View {
                 Button("Set Up Control") { model.selection = d.id; model.beginControlSetup(d); model.requestedInspectorTab = .info }
                     .disabled(!online || !d.isRunning || busy)
             }
-            if d.wdaControl != nil {
+            if d.wdaControl != nil || d.wdaNotice != nil {
                 Button("Stop Control") { model.selection = d.id; model.stopControl(d); model.requestedInspectorTab = .info }
                     .disabled(!online || busy)
             }
