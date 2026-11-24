@@ -775,7 +775,7 @@ export class WdaSupervisor {
 
   /** Try again now with a fresh count (setup failed and the previous configuration was put back). */
   resume(udid: string, why: string): void {
-    if (!this.started) return;
+    if (!this.started || !this.deps.managed().includes(udid)) return;
     const e = this.entry(udid);
     e.attempts = 0; e.personAttempts = 0;
     if (!e.inflight && e.state !== 'running') void this.ensure(udid, why);

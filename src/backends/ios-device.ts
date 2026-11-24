@@ -866,7 +866,9 @@ async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, onProgress: (l:
     return { udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true };
   } catch (e) {
     const info = wdaSup.info(udid);
-    if (info?.state.startsWith('waiting')) {
+    if (e instanceof PhoneDockError && e.code === 'cancelled') {
+      // Disconnected during setup: the entry is gone and must stay gone.
+    } else if (info?.state.startsWith('waiting')) {
       // Waiting for the person (unlock, trust): keep the new setup and carry on once that's done.
       if (e instanceof PhoneDockError) e.hints = [...(e.hints ?? []), 'PhoneDock keeps trying: it starts WebDriverAgent as soon as that’s done.'];
     } else {

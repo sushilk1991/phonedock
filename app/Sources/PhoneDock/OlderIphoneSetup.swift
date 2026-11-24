@@ -69,6 +69,9 @@ enum ControlSetup: Equatable {
     case running(String)
     case done
     case failed(FriendlyError)
+    /// The setup ended on something only the person can fix on the phone (unlock, trust); the service carries on by
+    /// itself once that's done, so its live state replaces this as soon as it moves on.
+    case handedOff(FriendlyError)
 }
 
 extension AppModel {
@@ -76,9 +79,12 @@ extension AppModel {
     /// the service carries on by itself) gives way to the service's live state once that moves on.
     func controlFlow(for device: Device) -> ControlSetup? {
         let flow = controlSetups[device.id]
-        if case .failed = flow, let c = device.wdaControl, !c.isFailed { return nil }
+        if case .handedOff = flow, let c = device.wdaControl, !c.isFailed { return nil }
         return flow
     }
+
+    /// Setup failures the service keeps working on by itself once the person has done their part.
+    static let handedOffCodes: Set<String> = ["device_locked", "wda_untrusted", "no_device"]
 
     /// Set Up Control: read Xcode's teams; one goes straight on, several ask, none says how to sign in.
     func beginControlSetup(_ device: Device) {
@@ -124,6 +130,8 @@ extension AppModel {
                     controlSetups[device.id] = .done
                     try? await Task.sleep(for: .seconds(4))
                     if controlSetups[device.id] == .done { controlSetups[device.id] = nil }
+                } else if let code = end.apiError?.code, Self.handedOffCodes.contains(code) {
+                    controlSetups[device.id] = .handedOff(Self.controlProblem(end))
                 } else {
                     controlSetups[device.id] = .failed(Self.controlProblem(end))
                 }
@@ -200,7 +208,7 @@ struct ControlSetupPanel: View {
                 teamPicker(teams)
             case .done:
                 ConnectStatusView(status: .ok("Control is set up")).testAnchor("control-setup-done")
-            case .failed(let p):
+            case .failed(let p), .handedOff(let p):
                 ProblemView(problem: p, retry: { model.beginControlSetup(device) },
                             otherTitle: "Dismiss", other: { model.dismissControlSetup(device) })
                     .testAnchor("control-setup-problem")
@@ -354,7 +362,7 @@ struct OlderIphoneControlCapsule: View {
             case .done:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.Status.running).accessibilityHidden(true)
                 Text("Control is set up").font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.primary)
-            case .failed:
+            case .failed, .handedOff:
                 failedLine("Setup failed")
             case nil:
                 if let c = device.wdaControl, !c.isRunning {

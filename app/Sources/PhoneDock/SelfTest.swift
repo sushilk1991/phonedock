@@ -343,7 +343,7 @@ enum SelfTest {
                 log("#\(i) fakeDevice cleared")
             }
         case "fakeControlSetup":   // an older iPhone's Set Up Control state without running it (fakes only):
-            // {"op":"fakeControlSetup","device":"ios-device:…","phase":"checking|choose|running|done|failed|none",
+            // {"op":"fakeControlSetup","device":"ios-device:…","phase":"checking|choose|running|done|failed|handedOff|none",
             //  "teams":[{"id":"…","name":"…","free":false}],"line":"Building…","title":"…","message":"…"}
             guard let m = model, let id = s["device"] as? String else { fail("#\(i) fakeControlSetup FAIL no model/device"); return }
             switch s["phase"] as? String ?? "none" {
@@ -354,8 +354,10 @@ enum SelfTest {
                 m.controlSetups[id] = .chooseTeam(teams)
             case "running": m.controlSetups[id] = .running(s["line"] as? String ?? "Building WebDriverAgent…")
             case "done": m.controlSetups[id] = .done
-            case "failed": m.controlSetups[id] = .failed(FriendlyError(title: s["title"] as? String ?? "Couldn’t set up control",
-                                                                      message: s["message"] as? String, details: s["details"] as? String))
+            case "failed", "handedOff":
+                let p = FriendlyError(title: s["title"] as? String ?? "Couldn’t set up control",
+                                      message: s["message"] as? String, details: s["details"] as? String)
+                m.controlSetups[id] = s["phase"] as? String == "handedOff" ? .handedOff(p) : .failed(p)
             default: m.controlSetups[id] = nil
             }
             log("#\(i) fakeControlSetup \(s["phase"] as? String ?? "none")")

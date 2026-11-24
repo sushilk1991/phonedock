@@ -809,6 +809,10 @@ test('unmanage (Disconnect) cancels a build in flight, stops the runner, and set
   await assert.rejects(s, (e: PhoneDockError) => e.code === 'cancelled');
   assert.equal(v.runners.length, 1, 'no new runner started after Disconnect');
   assert.equal(v.runners[0].kills, 1);
+  v.sup.resume(UDID, 'setup failed; back to the previous setup');
+  await v.tickAfter(60_000);
+  assert.equal(v.sup.info(UDID), undefined, 'a phone no longer managed is not brought back');
+  assert.equal(v.launches.length, 2);
 });
 
 test('a manual setup failure is reported to the caller and not retried on its own', async () => {
