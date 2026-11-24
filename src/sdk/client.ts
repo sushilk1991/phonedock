@@ -39,6 +39,8 @@ export type {
 export interface IdleSleepStatus {
   timeoutSec: number | null;
   source: 'env' | 'setting' | 'default';
+  /** Whether this service puts phones to sleep (only the app's does, or one a test opts in with PHONEDOCK_IDLE_SLEEP). */
+  sleeper?: boolean;
   saved?: number | null;
   choices: (number | null)[];
   devices: { id: string; name: string; state: DeviceState; eligible: boolean; why?: string; sleep?: DeviceSleep; idleSec?: number;

@@ -779,3 +779,21 @@ test('a wake notice is its own content item, on the call that woke the phone onl
     assert.ok(!doc.content.some((x) => /Woke/.test(x.text ?? '')), 'not on a call that never touched the phone');
   } finally { await close(); }
 });
+
+test('implicit device: the only running phone, as before idle sleep; a sleeping one only when none runs', async () => {
+  const mk = (n: string, state: string, sleep: unknown) => ({ id: `android-emulator:${n}`, nativeId: n, name: n, backend: 'android-emulator', platform: 'android',
+    kind: 'virtual', state, managed: true, capabilities: [], sleep, screen: { width: 1080, height: 2400, scale: 1 } }) as unknown as Device;
+  for (const [list, want] of [[[mk('pdtest-run', 'running', null), mk('pdtest-zzz', 'stopped', { since: '', reason: 'idle' })], 'android-emulator:pdtest-run'],
+    [[mk('pdtest-zzz', 'stopped', { since: '', reason: 'idle' })], 'android-emulator:pdtest-zzz']] as const) {
+    const calls: unknown[][] = [];
+    const fake: Fake = { calls, owner: 'test', devices: async () => list, resolveDevice: async () => list[0],
+      screen: async () => ({ width: 1080, height: 2400, scale: 1 }),
+      ui: async (id: string): Promise<UiTree> => { calls.push(['ui', id]); return { source: 'accessibility', screen: { width: 1080, height: 2400, scale: 1 }, root: [], capturedAt: '' }; } };
+    const s = await connect(fake);
+    try {
+      const r = await s.call('get_ui');
+      assert.equal(r.isError, false, r.text);
+      assert.deepEqual(calls.find((c) => c[0] === 'ui'), ['ui', want]);
+    } finally { await s.close(); }
+  }
+});

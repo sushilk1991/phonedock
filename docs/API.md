@@ -34,7 +34,7 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | GET | /v1/backends/:backend/profiles | – | `HardwareProfile[]` |
 | GET | /v1/components | – | `ComponentStatus[]` — status of managed upstream components (`ios-tools`, `axe`): `{ id, displayName, description, state: 'missing'|'installing'|'ready'|'failed', pinnedVersion, installedVersion?, source: 'managed'|'override'|'external'|'none', updateAvailable, sizeBytes?, estimatedBytes, downloadBytes?, progress?: { phase, percent?, bytesDone?, bytesTotal?, detail? }, jobId?, detail?, error?: { code, message, detail? }, lastAttemptAt?, nextRetryAt? }` |
 | POST | /v1/components/:id/install | – | `202 { job, component }` — starts (or attaches idempotently to an already-running) download, SHA-256 verification, isolated install and self-check for `ios-tools` or `axe`; `404 not_found` for unknown ids |
-| GET | /v1/idle-sleep | – | Added in 0.7.0. `{ timeoutSec, source, saved?, choices, devices }`: when idle Android emulators PhoneDock created go to sleep (`timeoutSec`: seconds, `null` = never; `source`: `setting`, `default` (15 minutes) or `env` when `PHONEDOCK_IDLE_SLEEP` overrides the saved `saved`), and each such device: `{ id, name, state, eligible, why?, sleep?, idleSec?, sleepsInSec?, keptAwakeBy?: string[], sleepFailure? }`. See *Idle sleep* |
+| GET | /v1/idle-sleep | – | Added in 0.7.0. `{ timeoutSec, source, saved?, sleeper, choices, devices }`: when idle Android emulators PhoneDock created go to sleep (`timeoutSec`: seconds, `null` = never; `sleeper`: whether this service is the one that puts phones to sleep; `source`: `setting`, `default` or `env` when `PHONEDOCK_IDLE_SLEEP` overrides the saved `saved`), and each such device: `{ id, name, state, eligible, why?, sleep?, idleSec?, sleepsInSec?, keptAwakeBy?: string[], sleepFailure? }`. See *Idle sleep* |
 | POST | /v1/idle-sleep | `{ timeoutSec: null \| 600 \| 900 \| 1800 \| 3600 }` or `{ after: "off" \| "10m" \| "15m" \| "30m" \| "1h" }` | Added in 0.7.0. Saves the setting (under `$PHONEDOCK_HOME`, shared by the app, the CLI and agents) and returns what GET returns; other values are `bad_request` |
 | GET | /v1/disguise | – | `{ backend, defaultProfile, defaultCarrier, profiles[], carriers[] }`: what a virtual phone (`options.disguise`) can present as. Each profile: `{ id, name, manufacturer, model, androidRelease, sdk, image, screen }`, where `image` is the Google Play system image it runs on (install it via `/v1/backends/android-emulator/images/install`); each carrier: `{ id, name, country }`. Added in 0.4.0 |
 | GET | /v1/jobs/:id | – | `Job` = `{ id, kind, state: 'running'|'done'|'failed', progress: string[] (last 50 lines, each starting with the Mac's local time `HH:MM:SS`), result?, error?: { code, message, hints?, detail? }, startedAt, endedAt? }` |
@@ -50,12 +50,12 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | GET | /v1/devices/:id | – | `Device` |
 | PATCH | /v1/devices/:id | `{ name?, autoStart? }` | `Device` |
 | DELETE | /v1/devices/:id | `?force=1` | `{ ok }`. Managed devices only, and `409 lease_conflict` while someone else holds its lease, unless `force` (deletes it anyway; `phonedock rm --force`) |
-| POST | /v1/devices/:id/boot | `BootOptions` | `202 { job }`. A phone PhoneDock put to sleep (`Device.sleep`) wakes instead, usually where it left off (its job says `woke in 5.1s, where it left off`, or `…, started fresh (…)`); with `coldBoot` or `window` it starts fresh and its sleep is forgotten. Android emulators PhoneDock created get Chrome's first-run screens skipped at boot: `/data/local/tmp/chrome-command-line` = `_ --disable-fre --no-default-browser-check --no-first-run` and Chrome's notification permission granted, once (an existing file is left alone; never on AVDs PhoneDock didn't create) |
+| POST | /v1/devices/:id/boot | `BootOptions` | `202 { job }`. A phone PhoneDock put to sleep (`Device.sleep`) wakes instead, with these options (`coldBoot`: fresh; `window`/`headless: false`: windowed), usually where it left off (its job says `woke in 5.1s, where it left off`, or `…, started fresh (…)`). Android emulators PhoneDock created get Chrome's first-run screens skipped at boot: `/data/local/tmp/chrome-command-line` = `_ --disable-fre --no-default-browser-check --no-first-run` and Chrome's notification permission granted, once (an existing file is left alone; never on AVDs PhoneDock didn't create) |
 | POST | /v1/devices/:id/shutdown | – | `{ ok }`. The device reads `state: "stopping"` from the moment the call starts; its lease ends with the shutdown. On a sleeping phone it forgets the sleep (the phone is already off and now stays off until started) |
 | POST | /v1/devices/:id/restart | `BootOptions` | `202 { job }` (shut down if running, then boot) |
 | POST | /v1/devices/:id/clone | `{ name }` | `202 { job }` (result = new Device; cloning a disguised Android emulator generates a fresh `DeviceIdentity`) |
 | POST | /v1/devices/:id/window | – | `{ ok }` opens native viewer (Simulator.app / emulator window / scrcpy) |
-| GET | /v1/devices/:id/snapshots | – | `Snapshot[]`. Never lists the emulator's internal `default_boot` (its quick-boot state, which idle sleep also uses; refused by POST, restore and DELETE, also as any name that normalises to it in any case, like `default boot` or `DEFAULT_BOOT`); `sizeMB` is the size on disk, stable between calls. Errors: `snapshot_vulkan` (Android emulator can't save after a Vulkan app ran), `snapshot_incompatible`, `snapshot_failed` (e.g. the phone isn't running after a restore) |
+| GET | /v1/devices/:id/snapshots | – | `Snapshot[]`. Never lists the emulator's internal `default_boot` (its quick-boot state, which idle sleep also uses; refused by POST, restore and DELETE, also as a name that is that folder on its disk: `default boot`, and `DEFAULT_BOOT` on a case-insensitive volume such as the Mac's default; on a case-sensitive one a distinct `DEFAULT_BOOT` is listed and usable); `sizeMB` is the size on disk, stable between calls. Errors: `snapshot_vulkan` (Android emulator can't save after a Vulkan app ran), `snapshot_incompatible`, `snapshot_failed` (e.g. the phone isn't running after a restore) |
 | POST | /v1/devices/:id/snapshots | `{ name }` | `{ ok }` |
 | POST | /v1/devices/:id/snapshots/:name/restore | – | `{ ok }` |
 | DELETE | /v1/devices/:id/snapshots/:name | – | `{ ok }` |
@@ -658,62 +658,76 @@ element refs are diagnostic identifiers, not native `e…` refs accepted by `/in
 
 ## Idle sleep
 Added in 0.7.0. A booted emulator holds its whole RAM (4–12 GB) even when unused for hours. Once an Android emulator
-PhoneDock created has gone unused for the idle timeout (default 15 minutes; `GET/POST /v1/idle-sleep`, `phonedock
-idle-sleep`, the app's Settings › General), the daemon stops it the ordinary way, freeing all of its memory. The next
-request that needs it boots it the ordinary way: usually right where it left off (its quick-boot save, about 5 s for a
-3 GB phone on an M-series Mac); otherwise it restarts with its apps and data, and says so. Every failure or race ends
-one of those two ways, or as a request that fails and is safe to retry. Nothing copies, restores or replaces a disk image.
+PhoneDock created has gone unused for the idle timeout (the default is 15 minutes; `GET/POST /v1/idle-sleep`,
+`phonedock idle-sleep`, the app's Settings › General), it is stopped the ordinary way, freeing all of its memory. The
+next request that needs it boots it the ordinary way: usually right where it left off (its quick-boot save, about 5 s
+for a 3 GB phone on an M-series Mac); otherwise it restarts with its apps and data, and says so. Every failure or race
+ends one of those two ways, or as a request that fails and is safe to retry. Nothing copies, restores or replaces a disk
+image.
+
+**One sleeper.** Only the app's service (port 47420), or one started with `PHONEDOCK_IDLE_SLEEP` set to a duration (for
+tests), puts phones to sleep and wakes them. Any other service shows a sleeping phone as stopped and boots it the
+ordinary way, which the disk rule keeps safe; its use still counts (`devices/<id>/last-use`). The setting is shared.
 
 **Never put to sleep:** iOS simulators; physical, Wi-Fi and cloud devices; emulators PhoneDock didn't create (Android
-Studio's; a rename in PhoneDock doesn't change that); devices a filtered daemon (`PHONEDOCK_DEVICE_FILTER`) doesn't
-show (its latest complete scan decides, including a rename another daemon saved).
+Studio's; a rename in PhoneDock doesn't change that); devices a filtered service (`PHONEDOCK_DEVICE_FILTER`) doesn't
+show (its latest complete scan decides).
 
 **Idle** means none of these for the whole timeout: a use request (below); a lease or claim; a pending handoff; a
-recording, trace or job; a live view watched while the display is on (or can't be read); its emulator or scrcpy
-window; an `adb -s <serial> shell|logcat|…` session the daemon didn't start; input PhoneDock didn't send (`dumpsys
-power`) or a running `am instrument`, asked last. Whatever can't be read counts as in use. Idle clocks start with the
-daemon; daemons sharing `PHONEDOCK_HOME` share use (`devices/<id>/last-use`) and the setting.
+recording, trace or job; a live view watched while the display is on (or can't be read). Nor, asked of the Mac: an
+emulator window (only an emulator process PhoneDock can tie to the phone and that runs `-no-window` counts as without
+one), scrcpy (`-s`/`--serial` naming it, or no selector), an adb client's `shell|logcat|…` that may be on it (`-s`
+naming it, `-e`, `-t`, or no selector; not `-d` or another serial) the service didn't start. Nor, asked of the phone
+last: input PhoneDock didn't send (`dumpsys power`), a running `am instrument`, or an instrumentation Android lists as
+active (`dumpsys activity processes`). Whatever can't be read counts as in use. Idle clocks start with the service.
 
 **Use vs observe.** Only *use* resets the idle clock or wakes a sleeping phone. Every `/v1/devices/:id/...` request is
 use except `GET` of the device itself, `…/actions`, `…/requests/:requestId`, `…/recording`, `…/snapshots`, `…/info`,
 `…/trace(s)`, `…/apps/:appId/data`, `…/environment` and the live views (`…/frame`, `…/stream`, `…/video`), and a GET
 sent with `X-PhoneDock-Observe: 1` (the Mac app's background reads; ignored on other methods). Lifecycle calls (boot,
 shutdown, restart, delete, clone, rename, lease release) handle a sleeping phone themselves and hold it until they
-finish. An input resent with the same `X-PhoneDock-Request-Id` is answered from its receipt without a wake; a new one,
-or one whose receipt expired, wakes the phone before its receipt is written.
+finish; they and the snapshot calls are `not_found` when the AVD that went to sleep is gone (never a same-named one). An
+input resent with the same `X-PhoneDock-Request-Id` is answered from its receipt without a wake; a new one, or one whose
+receipt expired, wakes the phone before its receipt is written.
 
-**Waking.** Requests on a sleeping phone share one wake and run once the device list says running. The response has
-`X-PhoneDock-Woke: <ms>; name=<URI-encoded name>` (`; fresh=1` when it started fresh): the SDK calls `onWake`, the CLI
-prints `Woke <name> (7.2 s)` on stderr, an MCP call ends with that as its own text item, each adding `, started fresh;
-its previous screen is gone` after a fresh start. Then an input aimed at the screen (tap, swipe, typing, back…; not an
-app launch, the clipboard or environment) is `woke_fresh` 409, so the caller looks again. `aborted`, `wake_failed` 503
-(it stays asleep), `woke_fresh` and `not_ready` (not running 30 s after waking) are `delivery: not_sent`. `POST /boot`
-and `/v1/pool/acquire` wake it too (an acquire gives back its lease if the wake fails). A phone the person stops stays off.
+**Waking.** Requests on a sleeping phone share one wake and run once the phone has booted and a fresh device list says
+running; until then it stays asleep, so a wake that fails or isn't ready in 30 s (`not_ready`) leaves it for the next
+request. The response has `X-PhoneDock-Woke: <ms>; name=<URI-encoded name>` (`; fresh=1` when it started fresh): the
+SDK calls `onWake`, the CLI prints `Woke <name> (7.2 s)` on stderr, an MCP call ends with that as its own text item,
+each adding `, started fresh; its previous screen is gone` after a fresh start. Then an input aimed at the screen (tap,
+swipe, typing, back…, and a replay, before its job starts; not an app launch, the clipboard or environment) is
+`woke_fresh` 409, so the caller looks again. `aborted`, `wake_failed` 503, `woke_fresh` and `not_ready` are
+`delivery: not_sent`. `POST /boot` wakes it with its options; `/v1/pool/acquire` wakes it too, waits for a sleep under
+way, and gives back its lease if the wake fails. MCP's implicit device is the only running phone, else the only
+sleeping one. A phone the person stops stays off.
 
 **Sleeping** (`android-emulator`): check it is positively this AVD (`emu avd path`, asked now) and the disk has room
 for its exit save (RAM plus 1 GB; else, or if free space can't be read, `disk_full` in `Device.sleepFailure`); write
-the marker `devices/<id>/sleep.json`; ask the phone's own idle clock, then re-check everything else with nothing in
-between (a use here or through another daemon; the setting, Never wins): a use lands first or sees the marker and
-waits. Then `sync` in the guest and `emu kill` (the ordinary shutdown: the emulator saves `default_boot` on its way out).
-It is asleep only with proof it exited, else `device.sleep_failed` and the marker stays: a request waits for the
-phone to stop, or, past the stop's 200 s deadline, finds it running and goes ahead. The exit save is proven by its
-`snapshot.pb` rewritten during the stop (Activity says which); unproven, `default_boot` is removed, since any boot that
-loads an older one brings back an older disk (measured). A sleeping phone keeps one RAM image on disk.
+the marker `devices/<id>/sleep.json` (with the AVD's path); ask the phone's own idle clock; remove the old `default_boot`'s
+`snapshot.pb` (see below); `sync` in the guest (a failure, or another emulator on its serial by then, and it keeps
+running). Then the last look, with nothing in between it and the stop: a request, a use elsewhere, a lease, the filter,
+the setting (Never wins). Then `emu kill` stops it the ordinary way, bound to the emulator process it verified. It is asleep only with proof that process exited, else `device.sleep_failed` (the marker stays while it
+reads stopped). The exit save is proven when a new `snapshot.pb` and RAM image were written; then the disk images'
+mtimes are recorded (`phonedock-exit-save.json` in the AVD). A sleeping phone keeps one RAM image on disk.
 
-**Resuming** is an ordinary boot that loads `default_boot` only while its `snapshot.pb` is the one the exit save wrote
-(loading or saving rewrites it). Otherwise, or when it doesn't load (missing, unreadable, another configuration: the
-emulator cold-boots by itself), or after a disguise change, it starts fresh with apps and data. Boot id and uptime tell
-which; then the guest clock is set from the Mac's when more than 2 s off. Only PhoneDock's own AVD is woken (one deleted
-outside PhoneDock is `not_found`).
+**The disk rule:** a saved state is loaded only if nothing has written the disk since it was saved (loading an older
+one brings back an older disk: measured). Without its `snapshot.pb` the emulator cold-boots, keeping apps and data, so
+from the stop on no boot by anyone (another service, an older PhoneDock, the emulator by hand) can load the old one;
+the exit save writes a new one. Every boot PhoneDock makes of that AVD quick-boots only while the recorded `snapshot.pb`
+and disk images are unchanged; otherwise, or when anything can't be read, it removes that `snapshot.pb` and boots cold.
+
+**Resuming:** boot id and uptime tell whether it resumed; then the guest clock is set from the Mac's when more than 2 s
+off. A phone already started elsewhere is waited for until it has booted. A disguise change also starts it fresh.
 
 Activity logs `device.sleep` (`idleSec`, `stopMs`, `exitSave`), `device.sleep_failed`, `device.wake` (`ms`, `resumed`,
 `via`: `quickboot` \| `cold`, `note`, `clock`) and `device.wake_failed`.
 
-**Contract changes in 0.7.0 (all additive):** `Device.sleep`, `Device.sleepFailure`; types `DeviceSleep`, `SleepState`,
-`WakeReport`; optional `Backend` methods `prepareSleep`, `stopForSleep`, `wakeFromSleep`, `keepAwake`; optional
-`FrameStream.asleep()`; `GET/POST /v1/idle-sleep`; the `X-PhoneDock-Observe` and `X-PhoneDock-Woke` headers;
-`WakeNotice` in the SDK; the `idle-sleep` SSE event; error codes `wake_failed`, `woke_fresh`, `not_ready`;
-`PHONEDOCK_IDLE_SLEEP` (`off` or a duration such as `90s`: overrides the saved setting, for tests).
+**Contract changes in 0.7.0 (all additive):** `Device.sleep`, `Device.sleepFailure`; types `DeviceSleep`, `SleepState`
+(with `avdPath`), `WakeReport`; optional `Backend` methods `prepareSleep`, `stopForSleep` (with `confirm`; the code
+`sleep_called_off`), `wakeFromSleep` (with `BootOptions`), `checkSleeping`, `keepAwake`; optional `FrameStream.asleep()`;
+`GET/POST /v1/idle-sleep` (with `sleeper`); the `X-PhoneDock-Observe` and `X-PhoneDock-Woke` headers; `WakeNotice` in the
+SDK; the `idle-sleep` SSE event; error codes `wake_failed`, `woke_fresh`, `not_ready`; `PHONEDOCK_IDLE_SLEEP` (`off` or
+a duration such as `90s`: overrides the saved setting, and makes a service on another port the sleeper, for tests).
 
 ## Human handoff
 An agent hits something it must not or cannot do itself: Face ID, a passcode, a CAPTCHA, an Apple Account

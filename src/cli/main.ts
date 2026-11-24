@@ -1117,7 +1117,8 @@ export function idleSleepText(st: import('../sdk/client.ts').IdleSleepStatus): s
   const head = st.timeoutSec === null
     ? 'Idle virtual phones never go to sleep.'
     : `Idle virtual phones go to sleep after ${words(st.timeoutSec)} without use: their memory is freed, and any use wakes them, usually where they left off (otherwise they restart with their apps and data).`;
-  const src = st.source === 'env' ? `\n(Set by PHONEDOCK_IDLE_SLEEP for this service${st.saved !== undefined ? `; the saved setting is ${words(st.saved)}` : ''}.)` : '';
+  const src = (st.source === 'env' ? `\n(Set by PHONEDOCK_IDLE_SLEEP for this service${st.saved !== undefined ? `; the saved setting is ${words(st.saved)}` : ''}.)` : '')
+    + (st.sleeper === false ? '\nThis service doesn’t put phones to sleep or wake them: the app’s does (here a sleeping phone is a stopped one).' : '');
   const lines = st.devices.map((d) => {
     if (!d.eligible) return `  ${d.name}: never sleeps (${d.why})`;
     if (d.sleep) return `  ${d.name}: sleeping since ${d.sleep.since}`;

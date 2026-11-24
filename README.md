@@ -40,7 +40,7 @@ PhoneDock requires **an Apple silicon Mac with macOS 15 or later**. The first ti
 - **Work in apps without a web version.** Have your agent inspect a screen or collect information. You can see its taps and swipes as they happen.
 - **Take over for sensitive steps.** When the agent asks you to sign in or use Face ID, take over and hand the device back when you’re done.
 - **Replay a test.** Save a flow, run it again after a change and share the result from the **Runs** tab. [Run tests in CI](docs/CI.md).
-- **Keep your Mac fast.** An emulator nobody has used for 15 minutes goes to sleep and frees its memory. It wakes the next time you or your agent use it, usually right where it left off; otherwise it restarts with its apps and data. Change the time in **Settings → General**.
+- **Keep your Mac fast.** An emulator nobody has used for a while can go to sleep and free its memory (**Settings → General**). It wakes the next time you or your agent use it, usually right where it left off; otherwise it restarts with its apps and data.
 
 <img src="docs/media/readme/window.png" alt="PhoneDock shows a live Android screen, an iPhone simulator and an iPad in one window">
 

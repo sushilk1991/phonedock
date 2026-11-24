@@ -104,7 +104,9 @@ export interface SleepState {
   at: string;                    // ISO: when it was put to sleep
   bootId?: string;               // the guest kernel's boot id then (a cold boot gets a new one)
   uptimeSec?: number;            // the guest's uptime then (a resumed guest is at least this old)
-  /** Its exit save, once proven (Android: snapshot.pb's mtime): the wake resumes it only while unchanged, else fresh. */
+  /** Which device went to sleep (Android: its AVD's path): a wake, lifecycle or snapshot call acts on no other. */
+  avdPath?: string;
+  /** Its exit save, once proven (Android: snapshot.pb's mtime). The wake resumes it only if nothing wrote the disk since. */
   exitSave?: { mtimeMs: number };
 }
 
@@ -617,10 +619,14 @@ export interface Backend {
   // ── idle sleep (optional, added in 0.7.0; the daemon only sleeps devices whose backend has all three) ──
   /** Check a running device can sleep (else throw: `disk_full`, `not_found`…) and note who it is now. Changes nothing. */
   prepareSleep?(nativeId: string): Promise<SleepState>;
-  /** Stop it the ordinary way; `saved` plus `exitSave` when that save is proven. Throws without proof it exited. */
-  stopForSleep?(nativeId: string, saved: SleepState, opts?: { timeoutMs?: number }): Promise<SleepState>;
-  /** Boot it the ordinary way: from its exit save when proven and unchanged, else fresh (apps and data kept). */
-  wakeFromSleep?(nativeId: string, saved: SleepState, opts?: { onProgress?: (line: string) => void }): Promise<WakeReport>;
+  /** Stop it the ordinary way; `saved` plus `exitSave` when that save is proven. Throws without proof it exited, and
+   *  `sleep_called_off` (still running) when `confirm`, asked just before the stop, gives a reason not to. */
+  stopForSleep?(nativeId: string, saved: SleepState, opts?: { timeoutMs?: number; confirm?: () => string | undefined }): Promise<SleepState>;
+  /** Boot it the ordinary way, with the caller's options: from its exit save only if nothing wrote the disk since, else
+   *  fresh (apps and data kept). Resolves once it has booted. */
+  wakeFromSleep?(nativeId: string, saved: SleepState, opts?: BootOptions & { onProgress?: (line: string) => void }): Promise<WakeReport>;
+  /** Throws `not_found` unless this id still names the device that went to sleep (never a same-named other). */
+  checkSleeping?(nativeId: string, saved: SleepState): Promise<void>;
   /** Why a running device must stay awake now (its window, an adb session), if anything; `guest`: also ask the device
    *  (input within `timeoutSec`, a test run; slower, only when otherwise due). Unknown is a reason, not an error. */
   keepAwake?(nativeId: string, opts?: { timeoutSec?: number | null; guest?: boolean }): Promise<string | undefined>;

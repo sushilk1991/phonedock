@@ -21,6 +21,12 @@ export interface FakeSdkState {
   instrument: boolean;
   /** The guest's shell doesn't answer at all / only its `ps` fails / only `dumpsys power` says nothing. */
   shellFails: boolean; psFails: boolean; dumpsysFails: boolean;
+  /** An instrumentation Android lists as active (`dumpsys activity processes`) / that dump fails alone. */
+  activeInstrumentation: boolean; instrFails: boolean;
+  /** The guest's `sync` fails / the emulator dies during it / meanwhile another AVD's emulator takes this serial. */
+  syncFails: boolean; syncKills?: boolean; syncSwapsTo?: string;
+  /** `sys.boot_completed` (false: still booting). */
+  bootCompleted: boolean;
   wakefulness: 'Awake' | 'Asleep';
 }
 
@@ -54,7 +60,7 @@ function load(dir, n, j) {   // the guest and its disk as they were at the save;
   return { bootId: j.bootId, uptimeBase: j.uptime, startedAt: Date.now() };
 }
 if (tool !== 'adb') {   // emulator (or a renamed copy of it)
-  const name = argv[argv.indexOf('-avd') + 1], port = argv[argv.indexOf('-port') + 1];
+  const name = argv[argv.indexOf('-avd') + 1], port = argv.includes('-port') ? argv[argv.indexOf('-port') + 1] : process.env.FAKE_EMU_PORT || '5554';   // no -port: the emulator picks one
   const s = read();
   const dir = s.avdPaths[name] || path.join(process.env.ANDROID_AVD_HOME || '', name + '.avd');
   const snap = argv.includes('-no-snapshot-load') ? undefined : loadable(s, dir, 'default_boot');
@@ -94,6 +100,12 @@ if (tool !== 'adb') {   // emulator (or a renamed copy of it)
   if (rest[0] === 'shell') {
     const cmd = rest.slice(1).join(' ');
     if (s.shellFails) { console.error('error: closed'); process.exit(1); }
+    if (cmd === 'sync') {
+      if (s.syncKills) { try { process.kill(emu.pid, 'SIGKILL'); } catch {} console.error('error: closed'); process.exit(1); }
+      if (s.syncFails) { console.error('sync: I/O error'); process.exit(1); }
+      if (s.syncSwapsTo) { emu.path = s.syncSwapsTo; write(s); }
+      process.exit(0);
+    }
     const w = /^echo (\S+) > \/data\/local\/tmp\/(\S+)$/.exec(cmd);
     if (w) { const d = disk(emu.path); d.files[w[2]] = w[1]; putDisk(emu.path, d); process.exit(0); }
     if (/^cat /.test(cmd)) {   // each file in turn, like the real one; a missing one is an error at the end
@@ -102,13 +114,14 @@ if (tool !== 'adb') {   // emulator (or a renamed copy of it)
       process.exit(out.includes(undefined) ? 1 : 0);
     }
     const out = [];
-    if (/getprop sys\.boot_completed/.test(cmd)) out.push('1');
+    if (/getprop sys\.boot_completed/.test(cmd)) out.push(s.bootCompleted === false ? '0' : '1');
     if (/dumpsys power/.test(cmd)) {
       if (/mWakefulness/.test(cmd)) out.push('  mWakefulness=' + s.wakefulness);
       if (/lastUserActivityTime/.test(cmd) && !s.dumpsysFails) out.push('  lastUserActivityTime=4242 (' + s.userActivityAgoMs + ' ms ago)');
     }
     // A guest script that reports its ps itself (PhoneDock's check), or a plain "ps | grep" that shows the process.
     if (/ps -A/.test(cmd) && !s.psFails) out.push(/echo "ps ok/.test(cmd) ? 'ps ok ' + (s.instrument ? 1 : 0) : s.instrument ? 'app_process /system/bin com.android.commands.am.Am instrument -w pdtest.app.test/androidx.test.runner.AndroidJUnitRunner' : '');
+    if (/dumpsys activity processes/.test(cmd) && !s.instrFails) out.push('instr ok ' + (s.activeInstrumentation ? 1 : 0));
     if (/date \+%s/.test(cmd)) out.push(String(Math.round(Date.now() / 1000)));
     console.log(out.join('\n'));
     process.exit(0);
@@ -132,7 +145,7 @@ export interface FakeSdk {
 export function fakeAndroidSdk(initial: Partial<FakeSdkState> = {}): FakeSdk {
   const root = mkdtempSync(join(tmpdir(), 'pd-fake-sdk-'));
   const statePath = join(root, 'state.json');
-  const st: FakeSdkState = { emulators: {}, avdPaths: {}, badSnapshots: [], exitSave: true, ignoreKill: false, userActivityAgoMs: 3_600_000, instrument: false, shellFails: false, psFails: false, dumpsysFails: false, wakefulness: 'Awake', ...initial };
+  const st: FakeSdkState = { emulators: {}, avdPaths: {}, badSnapshots: [], exitSave: true, ignoreKill: false, userActivityAgoMs: 3_600_000, instrument: false, shellFails: false, psFails: false, dumpsysFails: false, activeInstrumentation: false, instrFails: false, syncFails: false, bootCompleted: true, wakefulness: 'Awake', ...initial };
   writeFileSync(statePath, JSON.stringify(st));
   writeFileSync(statePath + '.log', '');
   const script = SCRIPT.replace('__STATE__', JSON.stringify(statePath));

@@ -18,6 +18,7 @@ const { router } = await import('./routes.ts');
 const states = new Map<string, DeviceState>([['pdtest-a', 'running'], ['someones-phone', 'running']]);
 const calls: string[] = [];
 const names = new Map<string, string>();   // display names that differ from the AVD name
+let syncHook: (() => Promise<void>) | undefined;
 core.backends.push({
   id: 'fake-emu', displayName: 'Fake emulator', platform: 'android', kind: 'virtual', capabilities: ['boot'],
   async available() { return { ok: true }; },
@@ -27,7 +28,11 @@ core.backends.push({
   async screenshot() { return Buffer.alloc(0); }, async tap() {}, async swipe() {}, async type() {}, async key() {},
   async boot(nid: string) { calls.push(`boot:${nid}`); states.set(nid, 'running'); },
   async prepareSleep(nid: string) { calls.push(`prepare:${nid}`); return { at: new Date().toISOString() }; },
-  async stopForSleep(nid: string, st: unknown) { calls.push(`stop:${nid}`); states.set(nid, 'stopped'); return st; },
+  async stopForSleep(nid: string, st: unknown, opts: { confirm?: () => string | undefined } = {}) {
+    await syncHook?.();   // the guest's sync, then the daemon's last look
+    if (opts.confirm?.()) throw Object.assign(new Error('called off'), { code: 'sleep_called_off' });
+    calls.push(`stop:${nid}`); states.set(nid, 'stopped'); return st;
+  },
   async wakeFromSleep(nid: string) { calls.push(`wake:${nid}`); states.set(nid, 'running'); return { resumed: true, via: 'quickboot' as const }; },
 } as unknown as Backend);
 
@@ -87,4 +92,15 @@ test('membership follows each complete scan: renamed out (here, or by another da
   const c = { params: { id: 'fake-emu:pdtest-b' }, req: { headers: {} }, res: { headersSent: false, setHeader() {} } } as unknown as Ctx;
   await S.enterRequest(c, 'POST', '/v1/devices/:id/input').then((l) => l?.(), () => undefined);
   assert.ok(!calls.includes('wake:pdtest-b'), calls.join());
+});
+
+test('renamed out of the filter while the guest syncs: the last look before the stop calls the sleep off', async () => {
+  states.set('pdtest-a', 'stopped'); states.set('pdtest-f', 'running');
+  core.invalidateDevices(); await core.listDevices(true);
+  S.resetIdleSleepForTests(); calls.length = 0;
+  syncHook = async () => { names.set('pdtest-f', 'personal f'); core.invalidateDevices(); await core.listDevices(true); };
+  clock += 3_600_000;
+  try { await S.sweep(); } finally { syncHook = undefined; }
+  assert.deepEqual(calls, ['prepare:pdtest-f'], 'it keeps running');
+  assert.equal(S.readMarker('fake-emu:pdtest-f'), undefined);
 });

@@ -237,9 +237,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
     if (ctx.lastDevice) { const d = list.find((x) => x.id === ctx.lastDevice); if (d) return d; }
     // Implicit selection only ever picks a PhoneDock-managed device: pre-existing simulators/AVDs and
     // physical phones may be in use by a human, so agents must name them explicitly.
-    // A phone PhoneDock put to sleep counts as running here: using it wakes it.
-    const running = list.filter((d) => (d.state === 'running' || !!d.sleep) && d.managed);
-    if (running.length === 1) { ctx.lastDevice = running[0].id; return running[0]; }
+    // The only running one; when none runs, the only one PhoneDock put to sleep (using it wakes it).
+    const running = list.filter((d) => d.state === 'running' && d.managed);
+    const sleeping = running.length ? [] : list.filter((d) => !!d.sleep && d.managed);
+    const only = running.length === 1 ? running[0] : sleeping.length === 1 ? sleeping[0] : undefined;
+    if (only) { ctx.lastDevice = only.id; return only; }
     throw new PhoneDockApiError(running.length ? `${running.length} devices are running; pass "device"` : 'No running device; pass "device" or boot one first', 'device_required', 400,
       [running.length ? 'Running: ' + running.map((d) => `${d.name} [${d.id}]`).join(', ') : 'Use list_devices, boot_device, or acquire_device.']);
   }
