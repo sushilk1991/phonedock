@@ -445,7 +445,8 @@ struct ContentView: View {
                     ToolbarItem(placement: .automatic) { inspectorToggle }
                 }
             }
-            .inspectorColumnWidth(min: 280, ideal: 320, max: 420)
+            // The minimum fits the tab picker (InspectorTabPicker.width, 248 pt) and the inspector toggle in the band.
+            .inspectorColumnWidth(min: 312, ideal: 320, max: 420)
         }
         .toolbar { toolbar }
         // One sheet for every way into Add Device; its step changes while it stays open (AddDeviceSheet.swift).

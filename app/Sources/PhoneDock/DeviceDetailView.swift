@@ -32,6 +32,10 @@ extension Device {
         return major < 27
     }
 
+    /// Whether Wake can reach the phone: it's a key press (Android's wake key, the iPhone's side button), so the phone
+    /// must take keys. The same test as the hardware bar's lock button (`HardwareSupport.lock`).
+    var canWake: Bool { HardwareSupport(self).lock }
+
     /// Window subtitle: model, then OS ("Pixel 9 · Android 16").
     var pdWindowSubtitle: String { [pdFriendlyModel, pdFriendlyOS].compactMap { $0 }.joined(separator: " · ") }
 }
@@ -134,7 +138,9 @@ struct DeviceDetailView: View {
     }
 }
 
-/// "The phone is asleep · Wake": quiet, at the bottom of the screen, only while the picture is solid black.
+/// "The phone is asleep · Wake": quiet, at the bottom of the screen, only while the picture is solid black. A phone
+/// PhoneDock can't press keys on (an iPhone without its native tools or WebDriverAgent) gets "Wake it on the phone"
+/// instead of a button that can only fail.
 private struct AsleepHint: View {
     @Environment(AppModel.self) private var model
     let device: Device
@@ -144,10 +150,15 @@ private struct AsleepHint: View {
             Image(systemName: "moon.zzz.fill").foregroundStyle(Theme.Ink.secondary).accessibilityHidden(true)
             Text("The phone is asleep").font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.primary)
             Text("·").foregroundStyle(Theme.Ink.secondary)
-            Button("Wake") { model.wake(device) }
-                .buttonStyle(.pdLink)
-                .font(Theme.Fonts.callout)
-                .testAnchor("Wake")
+            if device.canWake {
+                Button("Wake") { model.wake(device) }
+                    .buttonStyle(.pdLink)
+                    .font(Theme.Fonts.callout)
+                    .testAnchor("Wake")
+            } else {
+                Text("Wake it on the phone").font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                    .testAnchor("wake-on-phone")
+            }
         }
         .padding(.horizontal, Theme.Space.l)
         .padding(.vertical, Theme.Space.xs + 1)

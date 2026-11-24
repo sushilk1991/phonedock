@@ -5,7 +5,7 @@ and older is **Beta**.
 
 | iOS | How | You need |
 |---|---|---|
-| **27 and later** | Directly, with no app on the phone | Developer Mode, one pairing, UI Automation turned on |
+| **27 and later** | Directly, with no app on the phone | Developer Mode, one pairing, UI Automation turned on, and `pymobiledevice3` on the Mac |
 | 26 and older | Through WebDriverAgent, a test runner you install on the phone | Developer Mode, a USB cable once, an Apple ID for signing, a rebuild every 7 days |
 
 ## iOS 27 and later
@@ -24,6 +24,10 @@ team is needed. It works over USB, or over Wi-Fi when the phone and the Mac are 
      the code it shows.
 3. **Allow control.** On the iPhone, open Settings › **Developer** › **Enable UI Automation**. This is needed
    for taps and typing. Without it, PhoneDock can still show the screen and the UI tree.
+4. **Install pymobiledevice3 on this Mac:** `uv tool install pymobiledevice3` (it needs Python 3.11 or later;
+   `pipx install pymobiledevice3` works too). PhoneDock talks to the phone's services through it. Without it,
+   PhoneDock can take screenshots and install and launch apps, but can't tap, type, press keys (Wake, Home) or show
+   live video. PhoneDock picks it up within seconds; no restart is needed.
 
 The first time you connect, PhoneDock mounts Apple's developer disk image on the phone if it's missing. That needs
 an internet connection. Phones already used with Xcode usually have it.
@@ -102,6 +106,7 @@ If something here fails on your phone, please open an issue on GitHub.
 | `developer_mode_off` | Settings › Privacy & Security › Developer Mode › On, then restart the phone |
 | `ui_automation_off` | Settings › Developer › Enable UI Automation |
 | `ios_too_old` | iOS 26 or older: use WebDriverAgent, below |
+| `not_supported` "can’t control this iPhone yet" | Install pymobiledevice3 on this Mac (step 4 above) |
 | `ddi_missing` | The developer disk image couldn't be mounted (it needs internet). Open the phone in Xcode once |
 | `stream_busy` | Another app is showing the phone's screen, or a call, the camera, the microphone or Siri is active |
 | `device_locked` | The phone is locked, so taps, swipes and typing weren't sent (they'd land on the Lock Screen). Unlock it; an agent should ask with `request_human`. Keys such as Home still work |
