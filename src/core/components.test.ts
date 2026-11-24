@@ -494,7 +494,8 @@ test('atomic activation, .last-used file, pin bump coexistence, 30-day pruning, 
 
       const mgr = new ComponentManager({
         rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        now: () => nowMs, externalLookup: () => undefined, envOverride: () => undefined,
+        now: () => nowMs, pidAlive: (pid) => pid === process.pid,
+        externalLookup: () => undefined, envOverride: () => undefined,
       });
 
       const st1 = await mgr.install('axe');
@@ -529,10 +530,10 @@ test('atomic activation, .last-used file, pin bump coexistence, 30-day pruning, 
       assert.ok(existsSync(join(rootDir, 'axe', key1, '.ready.json')));
       assert.ok(existsSync(join(rootDir, 'axe', key2, '.ready.json')));
 
-      // Seed abandoned stage-* (>24h), fresh stage-* (<24h), and leftover .trash-*
-      const oldStage = join(rootDir, 'axe', 'stage-old-dead');
-      const freshStage = join(rootDir, 'axe', 'stage-fresh-live');
-      const leftoverTrash = join(rootDir, 'axe', '.trash-dead');
+      // Seed abandoned dead-PID stage-<pid>-* (>24h), fresh dead-PID stage-<pid>-* (<24h), and leftover dead-PID .trash-*
+      const oldStage = join(rootDir, 'axe', 'stage-999991-dead');
+      const freshStage = join(rootDir, 'axe', 'stage-999992-fresh');
+      const leftoverTrash = join(rootDir, 'axe', '.trash-999991-dead');
       mkdirSync(oldStage, { recursive: true });
       mkdirSync(freshStage, { recursive: true });
       mkdirSync(leftoverTrash, { recursive: true });
@@ -541,11 +542,11 @@ test('atomic activation, .last-used file, pin bump coexistence, 30-day pruning, 
       utimesSync(oldStage, twoDaysAgo, twoDaysAgo);
       utimesSync(freshStage, oneHourAgo, oneHourAgo);
 
-      // 10 days later: key1 must NOT be pruned; old stage & trash ARE removed; fresh stage is checked against nowMs
+      // 10 days later: key1 must NOT be pruned; dead old stage & trash ARE removed; fresh stage is kept
       const gc1 = mgr.prune('axe');
       assert.deepEqual(gc1.removedKeys, []);
-      assert.deepEqual(gc1.removedStaging, ['axe/stage-old-dead']);
-      assert.deepEqual(gc1.removedTrash, ['axe/.trash-dead']);
+      assert.deepEqual(gc1.removedStaging, ['axe/stage-999991-dead']);
+      assert.deepEqual(gc1.removedTrash, ['axe/.trash-999991-dead']);
       assert.equal(existsSync(oldStage), false);
       assert.equal(existsSync(leftoverTrash), false);
       assert.equal(existsSync(freshStage), true);
@@ -902,6 +903,211 @@ test('override protects old key from pruning, invalid override blocks auto-insta
     assert.equal(extSt.source, 'external');
     assert.equal(extSt.updateAvailable, false);
     assert.match(extSt.detail ?? '', /installed on this Mac/i);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('Round 4 #1 (P1): touchUsed never recreates a pruned key, and activation cleans up a garbage key without .ready.json', async () => {
+  const work = makeTempDir('pd-comp-r4-touch-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    await withServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const pinnedKey = componentKey(m.components.axe, m.components.axe.artifacts[0]);
+
+      // Part A: Exact interleaving — A passes ready check in touchUsed(), B prunes oldKey before A writes .last-used
+      const oldKey = '1.7.0-aaaaaaaaaaaa';
+      const oldDir = join(rootDir, 'axe', oldKey);
+      mkdirSync(oldDir, { recursive: true });
+      const oldBin = join(oldDir, 'axe');
+      writeFileSync(oldBin, '#!/bin/sh\necho 1.7.0\n');
+      chmodSync(oldBin, 0o755);
+      const expiredIso = '2026-09-01T00:00:00Z';
+      writeFileSync(join(oldDir, '.ready.json'), JSON.stringify({
+        key: oldKey, version: '1.7.0', activatedAt: expiredIso, sizeBytes: 10, binaryRelPath: 'axe',
+      }));
+      writeFileSync(join(oldDir, '.last-used'), expiredIso + '\n');
+
+      const nowMs = Date.parse('2026-11-24T00:00:00Z');
+      const prunerB = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, now: () => nowMs,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+
+      let hookFired = false;
+      const toucherA = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, now: () => nowMs,
+        externalLookup: () => undefined, envOverride: () => undefined,
+        onBeforeTouchWrite: (_id, key) => {
+          hookFired = true;
+          assert.equal(key, oldKey);
+          // B prunes oldKey right after A saw .ready.json
+          assert.deepEqual(prunerB.prune('axe').removedKeys, [`axe/${oldKey}`]);
+          assert.equal(existsSync(oldDir), false);
+        },
+      });
+
+      toucherA.touchUsed('axe');
+      assert.equal(hookFired, true);
+      // A must NOT have recreated oldDir with a lone .last-used!
+      assert.equal(existsSync(oldDir), false);
+
+      // Part B: Defensive activation — pre-existing garbage <key> without .ready.json is trashed and activation succeeds
+      const garbageKeyDir = join(rootDir, 'axe', pinnedKey);
+      mkdirSync(garbageKeyDir, { recursive: true });
+      writeFileSync(join(garbageKeyDir, '.last-used'), expiredIso + '\n');
+      assert.equal(existsSync(join(garbageKeyDir, '.ready.json')), false);
+
+      const installer = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        now: () => nowMs, externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      const st = await installer.install('axe');
+      assert.equal(st.state, 'ready');
+      assert.equal(st.installedVersion, '1.8.0');
+      assert.ok(existsSync(join(garbageKeyDir, '.ready.json')));
+      assert.deepEqual(readdirSync(join(rootDir, 'axe')), [pinnedKey]);
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('Round 4 #2 (P2): slow pruner re-checks trashed copy and restores (or discards duplicate of) a fresh reinstall', () => {
+  const work = makeTempDir('pd-comp-r4-slowprune-');
+  try {
+    const toolsDir = join(work, 'tools');
+    const rootDir = join(work, 'components');
+    writeTestTools(toolsDir, { url: 'https://github.com/cameroncooke/AXe/releases/download/v1.9.0/a.tar.gz', sha256: 'c'.repeat(64), size: 100, version: '1.9.0' });
+
+    const targetKey = '1.8.0-bbbbbbbbbbbb';
+    const keyDir = join(rootDir, 'axe', targetKey);
+    const seedKey = (activatedIso: string, lastUsedIso: string, tag: string) => {
+      mkdirSync(keyDir, { recursive: true });
+      const bin = join(keyDir, 'axe');
+      writeFileSync(bin, `#!/bin/sh\necho "${tag}"\n`);
+      chmodSync(bin, 0o755);
+      writeFileSync(join(keyDir, '.ready.json'), JSON.stringify({
+        key: targetKey, version: '1.8.0', activatedAt: activatedIso, sizeBytes: 10, binaryRelPath: 'axe',
+      }));
+      writeFileSync(join(keyDir, '.last-used'), lastUsedIso + '\n');
+    };
+
+    const expiredIso = '2026-09-01T00:00:00Z';
+    const nowIso = '2026-11-24T00:00:00Z';
+    const nowMs = Date.parse(nowIso);
+
+    // Part A: A reads expired copy and pauses -> B prunes -> C reinstalls fresh copy -> A trashes C's copy,
+    // re-checks activatedAt/.last-used, sees it's within 30 days, and restores it to <key>.
+    seedKey(expiredIso, expiredIso, 'old-copy');
+    const prunerB = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
+      externalLookup: () => undefined, envOverride: () => undefined,
+    });
+    let paused = false;
+    const prunerA = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
+      externalLookup: () => undefined, envOverride: () => undefined,
+      onBeforePruneTrash: (_id, key) => {
+        paused = true;
+        assert.equal(key, targetKey);
+        assert.deepEqual(prunerB.prune('axe').removedKeys, [`axe/${targetKey}`]);
+        // C reinstalls fresh copy of the same key
+        seedKey(nowIso, nowIso, 'fresh-C');
+      },
+    });
+    const resA = prunerA.prune('axe');
+    assert.equal(paused, true);
+    assert.deepEqual(resA.removedKeys, []);
+    assert.ok(existsSync(join(keyDir, '.ready.json')), 'C fresh copy must be restored to <key>');
+    assert.equal(execFileSync(join(keyDir, 'axe'), [], { encoding: 'utf8' }).trim(), 'fresh-C');
+    assert.deepEqual(readdirSync(join(rootDir, 'axe')), [targetKey]);
+
+    // Part B: Same interleaving, plus D already placed a copy back at <key> before A restores ->
+    // A sees ENOTEMPTY/EEXIST on restore and deletes its duplicate .trash-* cleanly while keeping D's copy.
+    rmSync(keyDir, { recursive: true, force: true });
+    seedKey(expiredIso, expiredIso, 'old-copy-2');
+    const prunerA2 = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
+      externalLookup: () => undefined, envOverride: () => undefined,
+      onBeforePruneTrash: () => {
+        assert.deepEqual(prunerB.prune('axe').removedKeys, [`axe/${targetKey}`]);
+        seedKey(nowIso, nowIso, 'fresh-C2');
+      },
+      onBeforePruneRestore: () => {
+        // D places a fresh copy at <key> while A holds C2 in .trash-*
+        seedKey(nowIso, nowIso, 'fresh-D');
+      },
+    });
+    const resA2 = prunerA2.prune('axe');
+    assert.deepEqual(resA2.removedKeys, []);
+    assert.equal(execFileSync(join(keyDir, 'axe'), [], { encoding: 'utf8' }).trim(), 'fresh-D');
+    assert.deepEqual(readdirSync(join(rootDir, 'axe')), [targetKey]);
+
+    // Part C: Concurrent touchUsed updating .last-used (with old activatedAt) also causes post-trash re-check to restore.
+    rmSync(keyDir, { recursive: true, force: true });
+    seedKey(expiredIso, expiredIso, 'touched-copy');
+    const prunerA3 = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
+      externalLookup: () => undefined, envOverride: () => undefined,
+      onBeforePruneTrash: () => {
+        writeFileSync(join(keyDir, '.last-used'), nowIso + '\n');
+      },
+    });
+    assert.deepEqual(prunerA3.prune('axe').removedKeys, []);
+    assert.equal(execFileSync(join(keyDir, 'axe'), [], { encoding: 'utf8' }).trim(), 'touched-copy');
+    assert.deepEqual(readdirSync(join(rootDir, 'axe')), [targetKey]);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('Round 4 #3 (P2): startup cleanup deletes stage-<pid>-* only when PID is dead AND older than 24 h', () => {
+  const work = makeTempDir('pd-comp-r4-stagepid-');
+  try {
+    const toolsDir = join(work, 'tools');
+    const rootDir = join(work, 'components');
+    writeTestTools(toolsDir, { url: 'https://github.com/cameroncooke/AXe/releases/download/v1.8.0/a.tar.gz', sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
+
+    const nowMs = Date.parse('2026-11-24T00:00:00Z');
+    const twoDaysAgo = new Date(nowMs - 48 * 3_600_000);
+    const twoHoursAgo = new Date(nowMs - 2 * 3_600_000);
+
+    const axeDir = join(rootDir, 'axe');
+    const liveOldStage = join(axeDir, 'stage-11111-liveold');
+    const deadFreshStage = join(axeDir, 'stage-22222-deadfresh');
+    const deadOldStage = join(axeDir, 'stage-33333-deadold');
+    const liveTrash = join(axeDir, '.trash-11111-live');
+    const deadTrash = join(axeDir, '.trash-33333-dead');
+    for (const d of [liveOldStage, deadFreshStage, deadOldStage, liveTrash, deadTrash]) {
+      mkdirSync(d, { recursive: true });
+    }
+    utimesSync(liveOldStage, twoDaysAgo, twoDaysAgo);
+    utimesSync(deadFreshStage, twoHoursAgo, twoHoursAgo);
+    utimesSync(deadOldStage, twoDaysAgo, twoDaysAgo);
+
+    const mgr = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
+      pidAlive: (pid) => pid === 11111,
+      externalLookup: () => undefined, envOverride: () => undefined,
+    });
+
+    const gc = mgr.prune('axe');
+    assert.deepEqual(gc.removedStaging, ['axe/stage-33333-deadold']);
+    assert.deepEqual(gc.removedTrash, ['axe/.trash-33333-dead']);
+    // Suspended live installer (>24h) and dead-PID (<24h) MUST be preserved
+    assert.equal(existsSync(liveOldStage), true);
+    assert.equal(existsSync(deadFreshStage), true);
+    assert.equal(existsSync(liveTrash), true);
+    // Dead-PID (>24h) stage and dead-PID trash MUST be removed
+    assert.equal(existsSync(deadOldStage), false);
+    assert.equal(existsSync(deadTrash), false);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

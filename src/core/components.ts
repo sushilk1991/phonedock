@@ -66,6 +66,14 @@ export interface ComponentManagerOptions {
   autoEnabled?: () => boolean;
   /** Override clock (unit tests). */
   now?: () => number;
+  /** Override PID liveness check for staging/trash GC (unit tests). */
+  pidAlive?: (pid: number) => boolean;
+  /** Hook fired inside touchUsed() after ready check and before writing .last-used (unit tests). */
+  onBeforeTouchWrite?: (id: ComponentId, key: string) => void;
+  /** Hook fired inside prune() after reading stale timestamp and before trashing <key> (unit tests). */
+  onBeforePruneTrash?: (id: ComponentId, key: string) => void;
+  /** Hook fired inside prune() after trashing a fresh key and before restoring it to <key> (unit tests). */
+  onBeforePruneRestore?: (id: ComponentId, key: string) => void;
   /** Override external discovery for status reporting. */
   externalLookup?: (id: ComponentId) => string | undefined;
   /** Override env override lookup (PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_AXE). */
@@ -88,15 +96,14 @@ export function isExecutable(path: string): boolean {
   try { accessSync(path, constants.X_OK); return true; } catch { return false; }
 }
 
-function atomicWriteText(filePath: string, text: string): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
-  writeFileSync(tmp, text, 'utf8');
-  renameSync(tmp, filePath);
-}
-
-function atomicWriteJson(filePath: string, data: unknown): void {
-  atomicWriteText(filePath, JSON.stringify(data, null, 2) + '\n');
+function defaultPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
 }
 
 /** Build a clean child environment for isolated Python venv creation and pip installs. */
@@ -437,26 +444,51 @@ export class ComponentManager {
     return undefined;
   }
 
-  /** Touch `.last-used` on the active managed key (separate file written atomically via tmp+rename). */
+  /** Check whether a key dir's `activatedAt` or `.last-used` falls inside the 30-day keep window. */
+  private isWithinPruneWindow(keyDir: string, now: number): boolean {
+    const markerFile = join(keyDir, READY_FILE);
+    let marker: Partial<ReadyMarker & { lastUsedAt?: string }> = {};
+    try {
+      if (existsSync(markerFile)) {
+        marker = JSON.parse(readFileSync(markerFile, 'utf8')) as Partial<ReadyMarker & { lastUsedAt?: string }>;
+      }
+    } catch { /* ignore unreadable marker */ }
+    const activatedMs = Date.parse(marker.activatedAt ?? '');
+    if (Number.isFinite(activatedMs) && now - activatedMs <= PRUNE_UNUSED_MS) return true;
+    const lastUsedMs = this.readLastUsedMs(keyDir, marker);
+    if (Number.isFinite(lastUsedMs) && now - lastUsedMs <= PRUNE_UNUSED_MS) return true;
+    return false;
+  }
+
+  /** Touch `.last-used` on the active managed key (separate file written atomically via tmp+rename, never creating directories). */
   touchUsed(id: ComponentId): void {
     const resolved = this.resolveManaged(id);
     if (!resolved || resolved.source !== 'managed' || !resolved.key) return;
     const keyDir = join(this.componentDir(id), resolved.key);
     if (!existsSync(join(keyDir, READY_FILE))) return;
+    this.opts.onBeforeTouchWrite?.(id, resolved.key);
+    const filePath = join(keyDir, LAST_USED_FILE);
+    const tmp = join(keyDir, `${LAST_USED_FILE}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`);
     try {
-      atomicWriteText(join(keyDir, LAST_USED_FILE), new Date(this.now()).toISOString() + '\n');
-    } catch { /* best effort */ }
+      writeFileSync(tmp, new Date(this.now()).toISOString() + '\n', 'utf8');
+      renameSync(tmp, filePath);
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* ignore */ }
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      /* best effort */
+    }
   }
 
   /**
    * Prune sibling keys that are NOT this daemon's pin, NOT referenced by an env override, and haven't been used in 30 days.
-   * Also garbage-collects abandoned `stage-*` dirs older than 24 h and any leftover `.trash-*` dirs.
+   * Also garbage-collects dead-PID `stage-<pid>-*` dirs older than 24 h and dead-PID `.trash-*` dirs.
    */
   prune(id?: ComponentId): { removedKeys: string[]; removedStaging: string[]; removedTrash: string[] } {
     const ids = id ? [id] : [...COMPONENT_IDS];
     const removedKeys: string[] = [];
     const removedStaging: string[] = [];
     const removedTrash: string[] = [];
+    const pidAlive = this.opts.pidAlive ?? defaultPidAlive;
     const now = this.now();
 
     for (const cid of ids) {
@@ -480,16 +512,21 @@ export class ComponentManager {
       try { names = readdirSync(dir); } catch { continue; }
       for (const name of names) {
         const entryPath = join(dir, name);
-        // Clean up leftover .trash-* directories.
+        // Clean up leftover .trash-* directories owned by dead PIDs (skip live pruners' in-flight trash).
         if (name.startsWith(TRASH_PREFIX)) {
+          const tm = /^\.trash-(\d+)-/.exec(name);
+          if (tm && pidAlive(Number(tm[1]))) continue;
           try {
             rmSync(entryPath, { recursive: true, force: true });
             removedTrash.push(`${cid}/${name}`);
           } catch { /* ignore */ }
           continue;
         }
-        // Clean up abandoned stage-* directories older than 24 h.
+        // Clean up abandoned stage-<pid>-<rand> directories ONLY when the owning PID is dead AND older than 24 h.
         if (name.startsWith(STAGE_PREFIX)) {
+          const sm = /^stage-(\d+)-/.exec(name);
+          if (!sm) continue;
+          if (pidAlive(Number(sm[1]))) continue;
           try {
             const st = statSync(entryPath);
             if (now - st.mtimeMs > STAGING_ORPHAN_MS) {
@@ -507,18 +544,40 @@ export class ComponentManager {
         try {
           const marker = JSON.parse(readFileSync(markerFile, 'utf8')) as Partial<ReadyMarker & { lastUsedAt?: string }>;
           const lastUsed = this.readLastUsedMs(entryPath, marker);
-          if (Number.isFinite(lastUsed) && now - lastUsed > PRUNE_UNUSED_MS) {
-            // Rename to .trash-<random> first, then remove; a losing concurrent pruner gets ENOENT and ignores it.
-            const trashDir = join(dir, `${TRASH_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
-            try {
-              renameSync(entryPath, trashDir);
-            } catch (err) {
-              if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-              throw err;
-            }
-            rmSync(trashDir, { recursive: true, force: true });
-            removedKeys.push(`${cid}/${name}`);
+          const activated = Date.parse(marker.activatedAt ?? '');
+          const hasTimestamp = Number.isFinite(lastUsed) || Number.isFinite(activated);
+          if (!hasTimestamp || this.isWithinPruneWindow(entryPath, now)) continue;
+
+          this.opts.onBeforePruneTrash?.(cid, name);
+
+          // Rename to .trash-<pid>-<random> first; a losing concurrent pruner gets ENOENT and ignores it.
+          const trashDir = join(dir, `${TRASH_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
+          try {
+            renameSync(entryPath, trashDir);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+            throw err;
           }
+
+          // Re-check the trashed copy's activatedAt and .last-used in case another process reinstalled it while we paused.
+          if (this.isWithinPruneWindow(trashDir, this.now())) {
+            this.opts.onBeforePruneRestore?.(cid, name);
+            try {
+              renameSync(trashDir, entryPath);
+            } catch (err) {
+              const code = (err as NodeJS.ErrnoException).code;
+              if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+                // Another process already placed a copy at <key>; discard the duplicate trash.
+                rmSync(trashDir, { recursive: true, force: true });
+              } else {
+                throw err;
+              }
+            }
+            continue;
+          }
+
+          rmSync(trashDir, { recursive: true, force: true });
+          removedKeys.push(`${cid}/${name}`);
         } catch { /* ignore unreadable marker or race */ }
       }
     }
@@ -809,14 +868,38 @@ export class ComponentManager {
       writeFileSync(join(payloadDir, LAST_USED_FILE), nowIso + '\n', 'utf8');
 
       // 6. Atomic activation: rename(payloadDir, finalDir). If another process won the race, adopt theirs.
-      try {
-        renameSync(payloadDir, finalDir);
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if ((code === 'ENOTEMPTY' || code === 'EEXIST') && this.readReady(id, key)) {
-          this.touchUsed(id);
-        } else {
+      // Defensive: if finalDir exists WITHOUT .ready.json (garbage), trash it and retry activation once.
+      const tryActivate = (): boolean => {
+        try {
+          renameSync(payloadDir, finalDir);
+          return true;
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code === 'ENOTEMPTY' || code === 'EEXIST') return false;
           throw err;
+        }
+      };
+
+      if (!tryActivate()) {
+        if (this.readReady(id, key)) {
+          this.touchUsed(id);
+        } else if (!existsSync(join(finalDir, READY_FILE))) {
+          const trashDir = join(compDir, `${TRASH_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
+          try {
+            renameSync(finalDir, trashDir);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+          }
+          rmSync(trashDir, { recursive: true, force: true });
+          if (!tryActivate()) {
+            if (this.readReady(id, key)) {
+              this.touchUsed(id);
+            } else {
+              throw new PhoneDockError(`Could not activate ${spec.displayName}`, 'install_failed', 500);
+            }
+          }
+        } else {
+          throw new PhoneDockError(`Could not activate ${spec.displayName}`, 'install_failed', 500);
         }
       }
 
