@@ -186,3 +186,12 @@ test('#9: an explicit PHONEDOCK_WDA_URL keeps main’s precedence; an iPhone now
     server.closeAllConnections?.(); server.close();
   }
 });
+
+test('the tunnel address comes from Xcode 27’s devicectl shape (properties.connection.tunnelIPAddressString), and from the older one', async () => {
+  writeCfg(setUpCfg);
+  for (const legacyOnly of [false, true]) {
+    fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: 'fd00:0:0:1::1', legacyOnly }]; fake.scenario.runners = {}; fake.save();
+    const d = (await backend.listDevices()).find((x) => x.nativeId === UDID)!;
+    assert.equal(d.meta?.wdaUrl, 'http://[fd00:0:0:1::1]:8100', legacyOnly ? 'connectionProperties.tunnelIPAddress' : 'properties.connection.tunnelIPAddressString');
+  }
+});

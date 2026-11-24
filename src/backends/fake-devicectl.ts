@@ -3,7 +3,7 @@
 // Run as a script by that xcrun; imported by tests for `fakeDevicectl()`.
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export interface FakePhone {
@@ -12,6 +12,8 @@ export interface FakePhone {
   /** An idle phone: its tunnel is down until `device info details` brings it up at this address. That answer carries
    *  the address unless `detailsOmitsTunnel`; `list devices` shows it only `listLag` lists later (as on a real Mac). */
   wakesTo?: string; listLag?: number; detailsOmitsTunnel?: boolean;
+  /** Only the deprecated `connectionProperties` (devicectl before Xcode 27), without `properties.connection`. */
+  legacyOnly?: boolean;
 }
 export interface FakeScenario {
   phones: FakePhone[];
@@ -44,16 +46,26 @@ export function fakeDevicectl(scenario: FakeScenario) {
   };
 }
 
+/** A real `devicectl list devices` entry from Xcode 27 (keys only, values scrubbed): the fake fills it in, so code
+ *  that reads a key devicectl doesn't send fails here too. */
+const SHAPE = JSON.parse(readFileSync(join(dirname(here), 'fixtures', 'devicectl-list-entry.json'), 'utf8'));
+
 function device(p: FakePhone) {
-  return {
-    identifier: p.coreDeviceId,
-    hardwareProperties: { udid: p.udid, platform: 'iOS', reality: 'physical', marketingName: 'iPhone XS', productType: 'iPhone11,2' },
-    connectionProperties: {
-      pairingState: 'paired', tunnelState: p.tunnelIp ? 'connected' : 'disconnected', transportType: p.transport ?? 'localNetwork',
-      ...(p.tunnelIp ? { tunnelIPAddress: p.tunnelIp } : {}),
-    },
-    deviceProperties: { name: p.name ?? 'Test iPhone', osVersionNumber: p.osVersion ?? '18.7', developerModeStatus: 'enabled' },
-  };
+  const d = JSON.parse(JSON.stringify(SHAPE));
+  const up = !!p.tunnelIp, transport = p.transport ?? 'localNetwork';
+  d.identifier = p.coreDeviceId;
+  Object.assign(d.hardwareProperties, { udid: p.udid, platform: 'iOS', reality: 'physical', marketingName: 'iPhone XS', productType: 'iPhone11,2' });
+  const legacy = d.connectionProperties;
+  Object.assign(legacy, { pairingState: 'paired', tunnelState: up ? 'connected' : 'disconnected', transportType: transport, tunnelTransportProtocol: 'tcp',
+    authenticationType: 'manualPairing', lastConnectionDate: '2026-11-24T00:00:00Z', localHostnames: [], potentialHostnames: [] });
+  const current = d.properties.connection;
+  Object.assign(current, { pairingState: 'paired', state: up ? 'connected' : 'disconnected', transportType: transport, tunnelTransportProtocol: 'tcp',
+    authenticationType: 'manualPairing' });
+  // devicectl leaves the address out while the tunnel is down.
+  if (up) { legacy.tunnelIPAddress = p.tunnelIp; current.tunnelIPAddressString = p.tunnelIp; } else { delete legacy.tunnelIPAddress; delete current.tunnelIPAddressString; }
+  if (p.legacyOnly) delete d.properties;
+  d.deviceProperties = { name: p.name ?? 'Test iPhone', osVersionNumber: p.osVersion ?? '18.7', developerModeStatus: 'enabled' };
+  return d;
 }
 
 async function main(file: string, log: string, argv: string[]): Promise<number> {

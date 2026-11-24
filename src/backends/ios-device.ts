@@ -777,7 +777,9 @@ function setUp(udid: string): boolean {
 }
 
 function tunnelIpOf(d: DcDevice): string | undefined {
-  const v = (d.properties?.connection ?? d.connectionProperties ?? {}).tunnelIPAddress;
+  // Xcode 27's devicectl names it tunnelIPAddressString under properties.connection; only the deprecated
+  // connectionProperties has tunnelIPAddress (the same in `device info details`).
+  const v = d.properties?.connection?.tunnelIPAddressString ?? d.connectionProperties?.tunnelIPAddress;
   return typeof v === 'string' && v ? v : undefined;
 }
 
