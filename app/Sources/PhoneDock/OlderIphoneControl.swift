@@ -332,6 +332,7 @@ struct OlderIphoneControlPanel: View {
             note(!device.isRunning ? "Connect and unlock the iPhone first."
                  : device.wdaTeam != nil ? "Set Up Control takes about 8 seconds."
                  : "Needs Developer Mode on the iPhone. The first time builds for a few minutes.")
+            note("Stop Control ends any WebDriverAgent already on the iPhone, also one started elsewhere.")
         }
     }
 

@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   ComponentManager, getComponentManager, isolatedPythonEnv, resolveWdaSource, safeExtractTarGz, setComponentManager,
   tarExtractArgv, verifyExtractedTree,
@@ -1345,24 +1346,22 @@ test('manifest validation: a source archive needs sourceDir and safe requiredFil
   }
 });
 
-test('#10: main’s manifest (no "wda") still loads; WebDriverAgent is reported unavailable only when asked for', async () => {
-  const { execFileSync } = await import('node:child_process');
-  const { mkdtempSync: mk, mkdirSync: mkd, writeFileSync: wf, rmSync: rm } = await import('node:fs');
-  const { tmpdir: td } = await import('node:os');
-  const { join: j } = await import('node:path');
-  const dir = mk(j(td(), 'pd-main-manifest-'));
+test('#10: main’s manifest (no "wda") still loads; WebDriverAgent is reported unavailable only when asked for', () => {
+  // fixtures/components-main.json is tools/components.json as on main before 0.7.0 (no git at test time: CI checkouts
+  // have no origin/main). The files it names are unchanged since, so they come from this checkout's tools/.
+  const repoTools = fileURLToPath(new URL('../../tools/', import.meta.url));
+  const manifest = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/components-main.json', import.meta.url)), 'utf8'));
+  assert.equal(manifest.components.wda, undefined, 'main’s manifest has no wda');
+  const dir = mkdtempSync(join(tmpdir(), 'pd-main-manifest-'));
   try {
-    const show = (path: string) => execFileSync('git', ['show', `origin/main:${path}`], { encoding: 'utf8' });
-    const manifest = JSON.parse(show('tools/components.json'));
-    assert.equal(manifest.components.wda, undefined, 'main’s manifest has no wda');
-    wf(j(dir, 'components.json'), JSON.stringify(manifest));
+    writeFileSync(join(dir, 'components.json'), JSON.stringify(manifest));
     for (const c of Object.values(manifest.components) as { licenseFile?: string; lockFile?: string }[]) {
-      for (const f of [c.licenseFile, c.lockFile]) if (f) { mkd(j(dir, f, '..'), { recursive: true }); wf(j(dir, f), show(`tools/${f}`)); }
+      for (const f of [c.licenseFile, c.lockFile]) if (f) { mkdirSync(join(dir, f, '..'), { recursive: true }); writeFileSync(join(dir, f), readFileSync(join(repoTools, f))); }
     }
     const { manifest: loaded } = loadManifest(dir);
     assert.deepEqual(Object.keys(loaded.components).sort(), ['axe', 'ios-tools']);
-    const mgr = new ComponentManager({ rootDir: j(dir, 'root'), toolsDir: dir, platformKey: 'darwin-arm64', externalLookup: () => undefined, envOverride: () => undefined });
+    const mgr = new ComponentManager({ rootDir: join(dir, 'root'), toolsDir: dir, platformKey: 'darwin-arm64', externalLookup: () => undefined, envOverride: () => undefined });
     assert.deepEqual(mgr.listStatuses().map((x) => x.id).sort(), ['axe', 'ios-tools']);
     assert.throws(() => mgr.status('wda'), (e: { code?: string }) => e.code === 'component_unavailable');
-  } finally { rm(dir, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
