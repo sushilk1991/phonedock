@@ -65,7 +65,8 @@ Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <co
             connect [<host:port>] [--serial S]   (no address: the one phone with Wireless debugging)
             (Android Wi-Fi commands take --restart-adb to restart a blocked adb server; see docs/API.md)
             connect --ios <ip|wda-url> [--name N] [--udid U] | discover --ios
-            ios wda-setup --udid <id> [--team TEAMID] [--name N]   (older iPhones: set up control once; see docs/IPHONE-WIFI.md)
+            ios wda-setup --udid <id> [--team TEAMID] [--name N] [--share | --no-share]   (older iPhones: set up control once;
+                          --share lets other Macs on the Wi-Fi control it too, without a password; see docs/IPHONE-WIFI.md)
               [--api-key-path AuthKey.p8 --api-key-id KEYID --api-key-issuer ISSUER]   (instead of an Apple ID in Xcode)
             ios wda-stop --udid <id>   (stop control; the iPhone stays paired and listed, wda-setup starts it again)
             ios wda-teams   (the signing teams Xcode is signed in to)
@@ -1005,6 +1006,7 @@ export async function run(argv: string[]): Promise<number> {
       const job = await c.wdaSetup(udid, {
         team: str(a.flags, 'team'), destination: str(a.flags, 'destination'), name: str(a.flags, 'name'),
         apiKeyPath: str(a.flags, 'apiKeyPath'), apiKeyId: str(a.flags, 'apiKeyId'), apiKeyIssuerId: str(a.flags, 'apiKeyIssuer') ?? str(a.flags, 'apiKeyIssuerId'),
+        ...(a.flags.share === true || a.flags.share === 'true' ? { share: true } : a.flags.share === false || a.flags.share === 'false' ? { share: false } : {}),
         wait: wantWait(a), onProgress: progressPrinter(quiet),
       });
       out(job, () => job.state === 'done' ? `WebDriverAgent running at ${(job.result as { wdaUrl?: string })?.wdaUrl}. PhoneDock keeps it running (after reboots and restarts too); \`phonedock ios wda-stop --udid ${udid}\` stops it.` : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);

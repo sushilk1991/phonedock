@@ -69,7 +69,7 @@ test('ios-device no-control error: iOS 26 and older, or an unknown version, poin
   }
   // PhoneDock already manages it and is waiting on something: say what, as wda_not_ready.
   const waiting = noControlError('UDID-1', '18.7', { pymd3: false, hid: false, control: {
-    managed: true, state: 'waiting_unlock', message: 'Unlock the iPhone so PhoneDock can start WebDriverAgent', attempts: 0, updatedAt: '2026-11-24T00:00:00Z' } });
+    managed: true, state: 'waiting_unlock', message: 'Unlock the iPhone so PhoneDock can start WebDriverAgent', attempts: 0, updatedAt: '2026-11-24T00:00:00Z', shared: false } });
   assert.equal(waiting.code, 'wda_not_ready');
   assert.equal(waiting.status, 503);
   assert.match(waiting.message, /Unlock the iPhone/);

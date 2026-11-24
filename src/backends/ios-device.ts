@@ -8,9 +8,9 @@
 //   `wda` marks a phone whose WebDriverAgent PhoneDock builds, starts and keeps running (ios-wda.ts).
 // - Wi-Fi: devicectl lists network-paired devices (transportType "localNetwork"); iPhones reachable only via a
 //   WDA URL (http://<iphone-ip>:8100) are "manual" entries (nativeId = udid if known, else wda-<host>-<port>).
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { run, runBuffer, type RunOptions } from '../core/exec.ts';
 import { assertInputFence } from '../core/input-fence.ts';
@@ -30,9 +30,11 @@ import { pasteUnicode, resolveForegroundApp } from './ios-input.ts';
 import { lockGuard } from './ios-lock.ts';
 import { abortXctrace, startXctrace, stopXctrace } from './ios-trace.ts';
 import {
-  LOCAL_NETWORK_HINT, WdaSupervisor, chooseTeam, isDeviceDestination, launchWda, parseApiKey, preflight, readXcodeInfo, readXcodeTeams, runnerBundleId,
-  type PhoneFacts, type WdaApiKey, type WdaBuildDeps, type WdaConfig, type WdaControl, type XcodeInfo, type XcodeTeam,
+  HostClaims, LOCAL_NETWORK_HINT, WdaSupervisor, hostOf, isDeviceDestination, launchWda, parseApiKey, readXcodeInfo, readXcodeTeams, sameHost, setupPhone,
+  type PhoneFacts, type ProbeResult, type SetupDeps, type SetupEntry, type WdaBuildDeps, type WdaConfig, type WdaControl, type WdaEndpoint,
+  type WdaSetupResult, type XcodeInfo, type XcodeTeam,
 } from './ios-wda.ts';
+import { connect as netConnect } from 'node:net';
 import { iosFeedStats, iosHevcFeed, iosVideoFrameStream, iosVideoStats, iosVideoStream, startHevcRecording, warmVideoHelper, type HevcRecording, type HevcVideoFeed, type VideoDeps } from './ios-video.ts';
 
 const ID = 'ios-device';
@@ -148,6 +150,24 @@ export interface DevCfg {
   wda?: WdaConfig & { since: string };
   /** The setup Stop Control ended: Set Up Control reuses its team (and so its build). */
   wdaStopped?: WdaConfig & { stoppedAt: string };
+  /** A manual connection: the iPhone's identifierForVendor (WebDriverAgent's /wda/device/info) when it was connected,
+   *  so a different iPhone answering at the same address later is noticed. */
+  wdaDeviceId?: string;
+}
+
+/** What device info shows of a phone's entry: no API key path or IDs, ever. */
+export function publicConfig(cf: DevCfg | undefined): Record<string, unknown> | null {
+  if (!cf) return null;
+  const pub = (w: WdaConfig | undefined) => w && {
+    team: w.team, free: w.free, bundleId: w.bundleId, shared: !!w.share, signing: w.apiKey ? 'api-key' : 'xcode-account',
+    ...(w.destination ? { destination: w.destination } : {}),
+  };
+  return {
+    ...(cf.name ? { name: cf.name } : {}), ...(cf.address ? { address: cf.address } : {}), ...(cf.wdaUrl ? { wdaUrl: cf.wdaUrl } : {}),
+    ...(cf.udid ? { udid: cf.udid } : {}), ...(cf.savedAt ? { savedAt: cf.savedAt } : {}),
+    ...(cf.wda ? { wda: { ...pub(cf.wda), since: cf.wda.since } } : {}),
+    ...(cf.wdaStopped ? { wdaStopped: { ...pub(cf.wdaStopped), stoppedAt: cf.wdaStopped.stoppedAt } } : {}),
+  };
 }
 const cfgState = new JsonState<Record<string, DevCfg>>('ios-device.json');
 
@@ -278,8 +298,44 @@ function transportOf(d: DcDevice): string | undefined { return conn(d).transport
 // ── WebDriverAgent ─────────────────────────────────────────────────────────
 
 function wdaUrl(udid: string): string | undefined {
-  const u = cfgFor(udid)?.wdaUrl ?? process.env.PHONEDOCK_WDA_URL;
-  return u?.replace(/\/+$/, '');
+  const cf = cfgFor(udid);
+  if (cf?.wda) {
+    const d = listCache?.list.find((x) => hw(x).udid === udid || x.identifier === udid);
+    return trustedWdaUrl(udid, cf, d);
+  }
+  const u = (cf?.wdaUrl ?? process.env.PHONEDOCK_WDA_URL)?.replace(/\/+$/, '');
+  return u && otherPhoneAt.has(u) ? undefined : u;
+}
+
+/** Addresses where a manual entry's iPhone was replaced by another one (fingerprint mismatch): no input goes there. */
+const otherPhoneAt = new Set<string>();
+
+function tunnelIpOf(d: DcDevice): string | undefined {
+  const v = conn(d).tunnelIPAddress ?? d.connectionProperties?.tunnelIPAddress;
+  return typeof v === 'string' && v ? v : undefined;
+}
+
+/** A managed phone's WebDriverAgent address, only while it is on that phone's own tunnel (devicectl's entry for this
+ *  udid): after the tunnel changed, the saved address could reach nothing, or another device. */
+function trustedWdaUrl(udid: string, cf: DevCfg | undefined, d: DcDevice | undefined): string | undefined {
+  const u = (cf?.wdaUrl ?? (cf ? undefined : process.env.PHONEDOCK_WDA_URL))?.replace(/\/+$/, '');
+  if (!u || !cf?.wda) return u;
+  const dest = cf.wda.destination;
+  if (dest && !isDeviceDestination(dest)) return u;
+  const ip = d ? tunnelIpOf(d) : undefined;
+  const host = hostOf(u);
+  if (d && (!ip || !host || !sameHost(ip, host))) return undefined;
+  return u;
+}
+
+/** The iPhone's identifierForVendor as WebDriverAgent reports it (stable for that phone while the runner stays installed). */
+async function wdaDeviceId(base: string): Promise<string | undefined> {
+  return cachedCall(`wda-device-id:${base}`, 30_000, async () => {
+    const r = await fetch(`${base}/wda/device/info`, { signal: AbortSignal.timeout(4000) });
+    const j: any = r.ok ? await r.json() : undefined;
+    const id = j?.value?.uuid;
+    return typeof id === 'string' && id !== 'unknown' ? id : undefined;
+  }).catch(() => undefined);
 }
 
 /** devicectl id for a nativeId (manual WDA-only entries have none unless a udid was given). */
@@ -771,8 +827,14 @@ function wdaBuildDeps(): WdaBuildDeps {
       const src = resolveWdaSource(mgr);
       if (!src) throw new PhoneDockError('Couldn’t find WebDriverAgent', 'install_failed', 500, ['Retry it in PhoneDock Settings › Advanced › Components, or run `phonedock components install wda`.']);
       // PHONEDOCK_WDA_SOURCE (a checkout): builds are keyed "local"; delete <state>/wda-builds to rebuild after editing it.
-      return { path: src.path, version: src.version ?? 'local' };
+      // A managed install lives in <version>-<sha256 prefix>/<top dir>: that directory names the exact artifact.
+      return { path: src.path, version: src.version ?? 'local', key: src.source === 'managed' ? basename(dirname(src.path)) : 'local' };
     },
+    endpoint: wdaEndpoint,
+    async getJson(url) {
+      try { const r = await fetch(url, { signal: AbortSignal.timeout(4000) }); return r.ok ? await r.json() : undefined; } catch { return undefined; }
+    },
+    probe: tcpProbe,
     xcode: xcodeInfo,
     copyTree: async (from, to) => { await run('/usr/bin/ditto', [from, to], { timeoutMs: 300_000, failureMessage: 'Couldn’t copy WebDriverAgent' }); },
     writeFile: (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, text); },
@@ -783,17 +845,83 @@ function wdaBuildDeps(): WdaBuildDeps {
 
 let wdaChanged: () => void = () => {};
 
+/** The phone's end of this Mac's CoreDevice tunnel (devicectl `tunnelIPAddress`). A tunnel that isn't up is brought up
+ *  with a devicectl query of the phone. Never the address WebDriverAgent prints, never a saved one: the phone's own
+ *  entry in devicectl is what proves the address is this phone. */
+async function wdaEndpoint(udid: string, cfg: WdaConfig): Promise<WdaEndpoint> {
+  if (cfg.destination && !isDeviceDestination(cfg.destination)) return { host: '127.0.0.1' };
+  const look = async (): Promise<WdaEndpoint | undefined> => {
+    const d = (await physicalDevices(true)).find((x) => hw(x).udid === udid || x.identifier === udid);
+    const c = d ? { ...(d.connectionProperties ?? {}), ...conn(d) } : undefined;
+    const ip = typeof c?.tunnelIPAddress === 'string' ? c.tunnelIPAddress : undefined;
+    const names = Array.isArray(c?.localHostnames) ? c.localHostnames.filter((n: unknown) => typeof n === 'string') : [];
+    return ip ? { host: ip, ...(names[0] ? { lanName: names[0] } : {}) } : undefined;
+  };
+  const now = await look();
+  if (now) return now;
+  await devicectl(['device', 'info', 'details', '--device', udid], { timeoutMs: 30_000 }).catch(() => undefined);
+  const after = await look();
+  if (after) return after;
+  throw new PhoneDockError('The iPhone’s developer connection isn’t up', 'no_device', 409,
+    ['Plug it in by USB, or wake it on the same Wi-Fi as this Mac; PhoneDock tries again.'], `devicectl reports no tunnel address for ${udid}`);
+}
+
+/** TCP connect with a short timeout: something listens ('open'), the host said no ('refused'), or nothing conclusive. */
+function tcpProbe(host: string, port: number): Promise<ProbeResult> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host, port });
+    const done = (r: ProbeResult) => { sock.destroy(); resolve(r); };
+    sock.setTimeout(3000, () => done('unknown'));
+    sock.once('connect', () => done('open'));
+    sock.once('error', (e: NodeJS.ErrnoException) => done(e.code === 'ECONNREFUSED' ? 'refused' : 'unknown'));
+  });
+}
+
+/** WebDriverAgent runner processes on the phone (the runner app is "WebDriverAgentRunner-Runner" whatever its bundle id). */
+async function runnersOnPhone(udid: string): Promise<number[]> {
+  const r = await devicectl<{ runningProcesses?: { executable?: string; processIdentifier?: number }[] }>(['device', 'info', 'processes', '--device', udid], { timeoutMs: 30_000 });
+  return (r?.runningProcesses ?? [])
+    .filter((p) => /\/WebDriverAgentRunner-Runner\.app\//.test(String(p.executable ?? '')))
+    .map((p) => Number(p.processIdentifier)).filter((n) => Number.isInteger(n) && n > 0);
+}
+
+/** End every WebDriverAgent runner on the phone (SIGTERM, then SIGKILL) and confirm: resolves with how many are left.
+ *  xcodebuild ending doesn't end the runner app on a phone (seen on Wi-Fi), so every stop comes here. */
+async function stopRunnersOnPhone(udid: string): Promise<number> {
+  const dest = cfgFor(udid)?.wda?.destination ?? cfgFor(udid)?.wdaStopped?.destination;
+  if (dest && !isDeviceDestination(dest)) return 0;    // a simulator's runner ends with its xcodebuild
+  for (let round = 0; round < 3; round++) {
+    const pids = await runnersOnPhone(udid);
+    if (!pids.length) return 0;
+    for (const pid of pids) {
+      await devicectl(['device', 'process', 'terminate', '--device', udid, '--pid', String(pid), ...(round > 0 ? ['--kill'] : [])], { timeoutMs: 30_000 }).catch(() => undefined);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return (await runnersOnPhone(udid)).length;
+}
+
+/** One PhoneDock process per phone on this Mac, whatever its state directory (per user, in Library/Caches). */
+const wdaClaims = new HostClaims(process.env.PHONEDOCK_WDA_CLAIMS_DIR || join(homedir(), 'Library', 'Caches', 'PhoneDock', 'wda-claims'), {
+  // Only ever an xcodebuild a dead PhoneDock left behind (the pid could have been reused by anything else).
+  stopOrphan(pid) {
+    try { if (/xcodebuild/.test(execFileSync('/bin/ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8' }))) process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+  },
+});
+
 /** The phones PhoneDock keeps WebDriverAgent running on. Started by the daemon (startWdaSupervisor), never in tests. */
 const wdaSup = new WdaSupervisor({
   now: Date.now,
   managed: () => Object.entries(cfgState.read()).filter(([, c]) => c.wda).map(([k, c]) => c.udid ?? k),
-  savedUrl: (udid) => cfgFor(udid)?.wdaUrl?.replace(/\/+$/, ''),
+  shared: (udid) => !!cfgFor(udid)?.wda?.share,
+  stopOnPhone: (udid) => stopRunnersOnPhone(udid),
+  claims: wdaClaims,
   saveUrl(udid, url) {
     cfgState.update((all) => {
       const k = cfgKey(all, udid);
       const old = all[k]?.wdaUrl?.replace(/\/+$/, '');
       if (old && old !== url) { sessions.delete(old); statusCache.delete(old); }
-      all[k] = { ...all[k], udid, wdaUrl: url, address: new URL(url).hostname, savedAt: new Date().toISOString() };
+      all[k] = { ...all[k], udid, wdaUrl: url, address: hostOf(url) ?? url, savedAt: new Date().toISOString() };
     });
     sessions.delete(url); statusCache.delete(url); scaleCache.delete(udid);
   },
@@ -820,94 +948,86 @@ function controlFor(base: string): WdaControl | undefined {
   return hit ? wdaSup.info(hit[1].udid ?? hit[0]) : undefined;
 }
 
-export interface WdaSetupOptions {
-  team?: string; destination?: string; name?: string;
-  /** App Store Connect API key, instead of an Apple ID signed in to Xcode. */
-  apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string;
-}
-export interface WdaSetupResult { udid: string; wdaUrl: string; pid?: number; team: string; managed: true }
 
 /** Setups running now, by udid: one at a time per phone, so two can't overwrite each other's "previous" config. */
 const setupsRunning = new Set<string>();
 
-/** One-step setup: preflight with plain errors, pick the team, build the pinned WebDriverAgent if needed, start it,
- *  and from then on keep it running (ios-device.json `wda`). */
+/** Stop Control and Disconnect mark the phone, so a setup that began before them changes nothing and starts nothing. */
+let markClock = 0;
+const lastMark = new Map<string, number>();
+function markStopped(...ids: (string | undefined)[]): void {
+  const t = ++markClock;
+  for (const id of ids) if (id) lastMark.set(id, t);
+}
+
+export interface WdaSetupOptions {
+  team?: string; destination?: string; name?: string;
+  /** App Store Connect API key, instead of an Apple ID signed in to Xcode. */
+  apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string;
+  /** Also listen on the phone's Wi-Fi address, so other Macs can control it. Omitted: the phone's current setting. */
+  share?: boolean;
+}
+
+/** One-step setup (setupPhone): preflight with plain errors, pick the team, build the pinned WebDriverAgent if needed,
+ *  start it, and from then on keep it running (ios-device.json `wda`). */
 async function wdaSetup(udid: string, opts: WdaSetupOptions, onProgress: (l: string) => void): Promise<WdaSetupResult> {
   if (!/^[A-Za-z0-9-]+$/.test(udid) || udid.startsWith('wda-')) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400, ['Pass the iPhone’s UDID (phonedock devices --backend ios-device).']);
   if (setupsRunning.has(udid)) throw new PhoneDockError('This iPhone is already being set up', 'busy', 409, ['Wait for that setup to finish.']);
+  const apiKey = parseApiKey({ path: opts.apiKeyPath, keyId: opts.apiKeyId, issuerId: opts.apiKeyIssuerId });
   setupsRunning.add(udid);
-  try { return await wdaSetupOnce(udid, opts, onProgress); } finally { setupsRunning.delete(udid); }
+  try {
+    return await setupPhone(setupDeps(), udid, {
+      team: opts.team, destination: opts.destination, name: opts.name, ...(apiKey ? { apiKey } : {}), ...(opts.share !== undefined ? { share: opts.share } : {}),
+    }, onProgress);
+  } finally { setupsRunning.delete(udid); }
 }
 
-async function wdaSetupOnce(udid: string, opts: WdaSetupOptions, progress: (l: string) => void): Promise<WdaSetupResult> {
-  let lastLine = '';
-  const onProgress = (l: string) => { if (l !== lastLine) { lastLine = l; progress(l); } };
-  const given: WdaApiKey | undefined = parseApiKey({ path: opts.apiKeyPath, keyId: opts.apiKeyId, issuerId: opts.apiKeyIssuerId });
-  // Nothing asked for: reuse this phone's last setup (running, or stopped with Stop Control), so its build is reused.
-  const priorCfg = cfgFor(udid);
-  const prior = opts.team === undefined && !given ? priorCfg?.wda ?? priorCfg?.wdaStopped : undefined;
-  const priorKey = prior?.apiKey && existsSync(prior.apiKey.path) ? prior.apiKey : undefined;
-  const apiKey = given ?? priorKey;
-  onProgress('Checking Xcode and the iPhone…');
+function setupDeps(): SetupDeps {
   const exec = (c: string, a: string[], o?: RunOptions) => run(c, a, { env: toolEnv(), ...o });
-  const [xcode, teams] = await Promise.all([xcodeInfo(), readXcodeTeams(exec)]);
-  const device = !opts.destination || !/simulator/i.test(opts.destination);
-  if (device) {
-    const facts = await phoneFacts(udid, true).catch(() => ({ found: false }) as PhoneFacts);
-    if (facts.found && facts.developerMode == null) {
-      // `devicectl device info details` reports "Developer Mode Status" when the list doesn't.
-      // Fresh-ish (15 s): someone who just turned Developer Mode on and retries must not see the old answer.
+  return {
+    xcode: xcodeInfo,
+    teams: () => readXcodeTeams(exec),
+    async phone(id) {
+      const f = await phoneFacts(id, true);
+      if (!f.found) return f;
+      const d = (await physicalDevices()).find((x) => hw(x).udid === id || x.identifier === id);
+      return { ...f, ...(d && hw(d).udid ? { udid: String(hw(d).udid) } : {}) };
+    },
+    async developerMode(udid) {
+      // `devicectl device info details` reports "Developer Mode Status" when the list doesn't. Fresh-ish (15 s):
+      // someone who just turned Developer Mode on and retries must not see the old answer.
       const det = await cachedCall(`setup-details:${udid}`, 15_000, () => devicectl(['device', 'info', 'details', '--device', udid], { timeoutMs: 25_000 })).catch(() => undefined);
       const v = (det as any)?.deviceProperties?.developerModeStatus;
-      if (v !== undefined) facts.developerMode = typeof v === 'string' ? v === 'enabled' : typeof v === 'object' && v ? 'enabled' in v : null;
-    }
-    const err = preflight(xcode, facts, udid);
-    if (err) throw err;
-  } else if (!xcode) throw preflight(undefined, undefined, udid)!;
-  const team = chooseTeam(teams, { team: opts.team ?? (priorKey ? prior?.team : undefined), apiKey, udid, remembered: prior?.team });
-  onProgress(`Signing with team ${team.id}${team.free ? ' (a personal team: its signing lasts 7 days, and PhoneDock renews it)' : ''}`);
-  const cfg: WdaConfig = { team: team.id, free: team.free, bundleId: runnerBundleId(team.id, team.free), ...(apiKey ? { apiKey } : {}), ...(opts.destination ? { destination: opts.destination } : {}) };
-  let previous: DevCfg['wda'];
-  cfgState.update((all) => {
-    const k = cfgKey(all, udid);
-    previous = all[k]?.wda;
-    all[k] = { ...all[k], udid, ...(opts.name ? { name: opts.name } : {}), wda: { ...cfg, since: previous?.since ?? new Date().toISOString() } };
-  });
-  try {
-    const r = await wdaSup.setup(udid, onProgress);
-    cfgState.update((all) => { const k = cfgKey(all, udid); if (all[k]?.wda) delete all[k].wdaStopped; });
-    wdaChanged();
-    return { udid, wdaUrl: r.url, ...(r.pid ? { pid: r.pid } : {}), team: cfg.team, managed: true };
-  } catch (e) {
-    const info = wdaSup.info(udid);
-    if (e instanceof PhoneDockError && e.code === 'cancelled') {
-      // Disconnected during setup: the entry is gone and must stay gone.
-    } else if (info?.state.startsWith('waiting')) {
-      // Waiting for the person (unlock, trust): keep the new setup and carry on once that's done.
-      if (e instanceof PhoneDockError) e.hints = [...(e.hints ?? []), 'PhoneDock keeps trying: it starts WebDriverAgent as soon as that’s done.'];
-    } else {
-      // Nothing to wait for: go back to the setup that worked before (its WebDriverAgent may still be running), or
-      // stop managing the phone.
-      cfgState.update((all) => { const k = cfgKey(all, udid); if (!all[k]) return; if (previous) all[k].wda = previous; else delete all[k].wda; });
-      if (!previous) wdaSup.unmanage(udid);
-      else wdaSup.resume(udid, 'setup failed; back to the previous setup');
-    }
-    wdaChanged();
-    throw e;
-  }
+      if (v === undefined) return null;
+      return typeof v === 'string' ? v === 'enabled' : typeof v === 'object' && v ? 'enabled' in v : null;
+    },
+    exists: existsSync,
+    marks: { now: () => markClock, since: (id, t) => (lastMark.get(id) ?? 0) > t },
+    store: {
+      get: (udid) => { const all = cfgState.read(); return all[cfgKey(all, udid)] as SetupEntry | undefined; },
+      set(udid, entry) {
+        cfgState.update((all) => { const k = cfgKey(all, udid); if (entry) all[k] = entry as DevCfg; else delete all[k]; });
+      },
+    },
+    sup: wdaSup,
+    running: setupsRunning,
+    changed: () => wdaChanged(),
+  };
 }
 
-/** Stop Control: stop WebDriverAgent and stop keeping it running. The phone stays paired and listed (screenshots, apps
- *  and installs work as before), and its setup is remembered, so Set Up Control starts it again with the same build.
- *  Also cancels a setup in flight. Idempotent: `stopped` is false when nothing was running. */
-function wdaStop(udid: string): { udid: string; stopped: boolean } {
+/** Stop Control: stop WebDriverAgent (on the Mac and on the phone) and stop keeping it running. The phone stays paired
+ *  and listed (screenshots, apps and installs work as before), and its setup is remembered, so Set Up Control starts
+ *  it again with the same build. Also cancels a setup in flight. Idempotent: `stopped` is false when nothing ran. */
+async function wdaStop(udid: string): Promise<{ udid: string; stopped: boolean }> {
   if (!/^[A-Za-z0-9-]+$/.test(udid)) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400);
   let stopped = false;
   let url: string | undefined;
+  let hwUdid: string | undefined;
   cfgState.update((all) => {
     const k = cfgKey(all, udid);
     const e = all[k];
     if (!e?.wda) return;
+    hwUdid = e.udid ?? k;
     const { since: _since, ...cfg } = e.wda;
     url = e.wdaUrl?.replace(/\/+$/, '');
     const next: DevCfg = { ...e, wdaStopped: { ...cfg, stoppedAt: new Date().toISOString() } };
@@ -915,11 +1035,12 @@ function wdaStop(udid: string): { udid: string; stopped: boolean } {
     all[k] = next;
     stopped = true;
   });
+  markStopped(udid, hwUdid);
   if (url) { sessions.delete(url); statusCache.delete(url); }
   scaleCache.delete(udid);
-  wdaSup.unmanage(udid);
+  await wdaSup.unmanage(hwUdid ?? udid);
   wdaChanged();
-  return { udid, stopped };
+  return { udid: hwUdid ?? udid, stopped };
 }
 
 /** The teams Xcode is signed in to, for the app's team picker and `phonedock ios wda-teams`. */
@@ -935,7 +1056,8 @@ export function startWdaSupervisor(onChange?: () => void): void {
   if (onChange) wdaChanged = onChange;
   wdaSup.start();
 }
-export function stopWdaSupervisor(): void { wdaSup.stop(); }
+/** Daemon exit: stop every runner this process started, on the Mac and on the phone (bounded). */
+export function stopWdaSupervisor(): Promise<void> { return wdaSup.stop(); }
 
 // ── the backend ────────────────────────────────────────────────────────────
 
@@ -999,7 +1121,7 @@ export const backend: Backend & {
     let listed = true;
     const devs = await physicalDevices(true).catch(() => { listed = false; return [] as DcDevice[]; });
     // A managed phone that reappears (USB, or Wi-Fi in devicectl) gets WebDriverAgent started again.
-    if (listed) wdaSup.observe(devs.map((d) => ({ udid: hw(d).udid ?? d.identifier, reachable: mapState(d) === 'running' })));
+    if (listed) wdaSup.observe(devs.map((d) => ({ udid: hw(d).udid ?? d.identifier, reachable: mapState(d) === 'running', tunnelIp: tunnelIpOf(d) })));
     const cfg = cfgState.read();
     const out: Device[] = [];
     const seen = new Set<string>();
@@ -1008,7 +1130,7 @@ export const backend: Backend & {
       const udid: string = h.udid ?? d.identifier;
       seen.add(udid); seen.add(d.identifier);
       const cf = cfgFor(udid);
-      const url = (cf?.wdaUrl ?? process.env.PHONEDOCK_WDA_URL)?.replace(/\/+$/, '');
+      const url = trustedWdaUrl(udid, cf, d);
       const ws = url ? await wdaStatus(url) : undefined;
       const readiness = cachedReadiness(d);
       const osv = s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
@@ -1041,7 +1163,16 @@ export const backend: Backend & {
     await Promise.all(Object.entries(cfg).map(async ([key, cf]) => {
       if (!cf.wdaUrl || seen.has(key) || (cf.udid && seen.has(cf.udid))) return;
       const nativeId = cf.udid ?? key;
-      const ws = await wdaStatus(cf.wdaUrl.replace(/\/+$/, ''));
+      const base = cf.wdaUrl.replace(/\/+$/, '');
+      let ws = await wdaStatus(base);
+      // The address may now belong to another iPhone running WebDriverAgent (DHCP): check it's the same one.
+      if (ws.ok && cf.wdaDeviceId) {
+        const id = await wdaDeviceId(base);
+        if (id && id !== cf.wdaDeviceId) {
+          otherPhoneAt.add(base);
+          ws = { ok: false, error: 'a different iPhone answers at this address; connect to it again if that is intended' };
+        } else if (id) otherPhoneAt.delete(base);
+      }
       const v = ws.status ?? {};
       out.push({
         id: `${ID}:${nativeId}`, backend: ID, nativeId,
@@ -1074,10 +1205,12 @@ export const backend: Backend & {
     const managedHere = Object.entries(cfgState.read()).find(([, v]) => v.wda && v.wdaUrl?.replace(/\/+$/, '') === url);
     const nativeId = opts.udid ?? (managedHere ? managedHere[1].udid ?? managedHere[0] : wdaNativeId(url));
     const address = /^https?:/i.test(input.trim()) ? new URL(url).hostname : input.trim();
+    const deviceId = managedHere ? undefined : await wdaDeviceId(url);
+    otherPhoneAt.delete(url);
     cfgState.update((all) => {
       for (const [k, v] of Object.entries(all)) if (k !== nativeId && !v.wda && v.wdaUrl?.replace(/\/+$/, '') === url) delete all[k];
       const key = managedHere && !opts.udid ? managedHere[0] : nativeId;
-      all[key] = { ...all[key], wdaUrl: url, address, ...(opts.name ? { name: opts.name } : {}), ...(opts.udid ? { udid: opts.udid } : {}), savedAt: new Date().toISOString() };
+      all[key] = { ...all[key], wdaUrl: url, address, ...(opts.name ? { name: opts.name } : {}), ...(opts.udid ? { udid: opts.udid } : {}), ...(deviceId ? { wdaDeviceId: deviceId } : {}), savedAt: new Date().toISOString() };
     });
     sessions.delete(url); scaleCache.delete(nativeId);
     return { nativeId, wdaUrl: url, status: ws.status };
@@ -1092,10 +1225,12 @@ export const backend: Backend & {
       for (const [k, v] of Object.entries(all)) if (k === nativeId || v.udid === nativeId) {
         if (v.wdaUrl) sessions.delete(v.wdaUrl.replace(/\/+$/, ''));
         if (v.wda) unmanaged.push(v.udid ?? k);
+        markStopped(k, v.udid);
         delete all[k]; hit = true;
       }
     });
-    for (const u of unmanaged) wdaSup.unmanage(u);
+    markStopped(nativeId);
+    await Promise.all(unmanaged.map((u) => wdaSup.unmanage(u)));
     scaleCache.delete(nativeId);
     return hit;
   },
@@ -1570,6 +1705,6 @@ export const backend: Backend & {
     const summary = live ? infoSummary(d as DcDevice, details as any, displays as any, readiness) : undefined;
     // liveVideo: what the screen stream is doing right now (null while nobody watches)
     const liveVideo = udid ? { frames: iosVideoStats(udid) ?? null, feed: iosFeedStats(udid) ?? null } : null;
-    return { summary, device: d, details, readiness, displays, wdaUrl: base ?? null, wda: wdaInfo, config: cfgFor(nid) ?? null, liveVideo, experimental: false };
+    return { summary, device: d, details, readiness, displays, wdaUrl: base ?? null, wda: wdaInfo, config: publicConfig(cfgFor(nid)), liveVideo, experimental: false };
   },
 };

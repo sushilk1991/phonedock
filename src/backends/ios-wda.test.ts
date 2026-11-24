@@ -11,8 +11,11 @@ import { PhoneDockError, type ExecResult } from '../core/types.ts';
 import {
   UPSTREAM_RUNNER_BUNDLE_ID, WdaSupervisor, buildArgv, buildKey, chooseTeam, classifyXcodebuild, ensureBuild, launchArgv, runBuild,
   launchWda, parseApiKey, parseXcodeTeams, preflight, pruneBuilds, readProfile, readXcodeInfo, readXcodeTeams, rebuildReason,
-  runnerBundleId, startRunner, type ChildLike, type Exec, type PhoneFacts, type Runner, type SupervisorDeps, type WdaBuildDeps, type XcodeInfo,
+  runnerBundleId, startRunner, type ChildLike, type Exec, type PhoneFacts, type ProbeResult, type Runner, type SupervisorDeps, type WdaBuildDeps, type XcodeInfo,
 } from './ios-wda.ts';
+
+export const TUNNEL_IP = 'fd00:0:0:1::1';
+export const WIFI_IP = '192.0.2.10';
 
 const TEAM_A = 'AAAAA11111', TEAM_B = 'BBBBB22222', TEAM_FREE = 'FFFFF33333';
 const UDID = '00008020-0000AAAA0000BBBB';
@@ -220,7 +223,9 @@ test('xcodebuild failures become plain errors; unknown ones keep the old wda_set
   assert.equal(c('error: Failed to register bundle identifier: The app identifier "com.facebook.WebDriverAgentRunner.xctrunner" cannot be registered to your development team'), 'bundle_id_unavailable');
   assert.equal(c('error: Your maximum App ID limit has been reached. You may create up to 10 App IDs every 7 days.'), 'signing_limit');
   assert.equal(c('The application could not be launched because the Developer App Certificate is not trusted. Verify the Developer App certificate for your account is trusted on your device.', 'launch'), 'wda_untrusted');
-  assert.equal(c('Unable to launch com.facebook.WebDriverAgentRunner.xctrunner because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user.', 'launch'), 'wda_untrusted');
+  // iOS's generic sentence alone doesn't say which: kept apart from the trust prompt (#9).
+  assert.equal(c('Unable to launch com.facebook.WebDriverAgentRunner.xctrunner because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user.', 'launch'), 'signature_invalid');
+  assert.equal(c('Untrusted Developer: Your device management settings do not allow apps from developer "Apple Development: X" on this iPhone.', 'launch'), 'wda_untrusted');
   assert.equal(c('error: The provisioning profile has expired.', 'launch'), 'signing_expired');
   assert.equal(c('Unlock Phone to Continue: The device is passcode protected.', 'launch'), 'device_locked');
   assert.equal(c('Developer Mode disabled. To use Phone for development, enable Developer Mode in Settings', 'launch'), 'developer_mode_off');
@@ -265,7 +270,7 @@ test('progress says each step once: signing several targets, several test suites
   kids[1].say('Testing started');
   kids[1].say('ServerURLHere->http://192.0.2.10:8100<-ServerURLHere');
   const { runner } = await r;
-  assert.deepEqual(progress, ['Starting WebDriverAgent on the iPhone…', 'WebDriverAgent is running at http://192.0.2.10:8100']);
+  assert.deepEqual(progress, ['Starting WebDriverAgent on the iPhone…']);
   runner.kill();
 });
 
@@ -281,7 +286,7 @@ test('startRunner resolves at ServerURLHere and keeps xcodebuild running; an ear
   assert.equal(url, 'http://192.0.2.10:8100');
   assert.deepEqual(argv[0], ['xcodebuild', 'test-without-building', '-xctestrun', '/b/x.xctestrun', '-destination', `id=${UDID}`]);
   assert.ok(runner.alive());
-  assert.ok(progress.some((l) => /Starting WebDriverAgent/.test(l)) && progress.some((l) => /running at http:\/\/192\.0\.2\.10:8100/.test(l)));
+  assert.ok(progress.some((l) => /Starting WebDriverAgent/.test(l)));
   kids[0].exit(0);
   await runner.exited;
   assert.equal(runner.alive(), false);
@@ -289,7 +294,7 @@ test('startRunner resolves at ServerURLHere and keeps xcodebuild running; an ear
   const q = startRunner(spawn, { xctestrun: '/b/x.xctestrun', destination: `id=${UDID}`, env: {}, now: () => 1000 }, () => undefined);
   kids[1].say('Unable to launch com.facebook.WebDriverAgentRunner.xctrunner because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user.');
   kids[1].exit(65);
-  await assert.rejects(q, (e: PhoneDockError) => e.code === 'wda_untrusted');
+  await assert.rejects(q, (e: PhoneDockError) => e.code === 'signature_invalid');
 
   const r = startRunner(spawn, { xctestrun: '/b/x.xctestrun', destination: `id=${UDID}`, env: {}, now: () => 1000, timeoutMs: 30 }, () => undefined);
   await assert.rejects(r, (e: PhoneDockError) => e.status === 504);
@@ -306,9 +311,12 @@ function buildFixture() {
   const launches: string[][] = [];
   const kids: FakeChild[] = [];
   let expiry = now + 6 * 86_400_000;
-  let launchSays: string[] = ['ServerURLHere->http://192.0.2.10:8100<-ServerURLHere'];
+  // undefined: behave like WebDriverAgent (print the address it was told to bind, else its Wi-Fi address).
+  let launchSays: string[] | undefined;
   let launchExit: number | undefined;
-  const spawn = (cmd: string, args: string[]) => {
+  const launchEnvs: NodeJS.ProcessEnv[] = [];
+  const probes = new Map<string, ProbeResult>();
+  const spawn = (cmd: string, args: string[], o: { env?: NodeJS.ProcessEnv } = {}) => {
     const k = new FakeChild(); kids.push(k);
     if (args[0] === 'build-for-testing') {
       builds.push(args);
@@ -321,8 +329,10 @@ function buildFixture() {
         k.say('** TEST BUILD SUCCEEDED **'); k.exit(0);
       });
     } else {
-      launches.push(args);
-      setImmediate(() => { for (const l of launchSays) k.say(l); if (launchExit !== undefined) k.exit(launchExit); });
+      launches.push(args); launchEnvs.push(o.env ?? {});
+      const ip = o.env?.TEST_RUNNER_USE_IP ?? WIFI_IP;
+      const says = launchSays ?? [`ServerURLHere->http://${ip}:${o.env?.TEST_RUNNER_USE_PORT ?? 8100}<-ServerURLHere`];
+      setImmediate(() => { for (const l of says) k.say(l); if (launchExit !== undefined) k.exit(launchExit); });
     }
     return k;
   };
@@ -341,14 +351,18 @@ function buildFixture() {
     writeFile: (p, t) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, t); },
     mkdir: (p) => mkdirSync(p, { recursive: true }),
     remove: (p) => rmSync(p, { recursive: true, force: true }),
+    endpoint: async () => ({ host: TUNNEL_IP, lanName: 'Old-iPhone.local' }),
+    getJson: async () => ({ value: { ready: true, ios: { ip: WIFI_IP } } }),
+    probe: async (host, port) => probes.get(`${host}:${port}`) ?? 'refused',
+    lockPollMs: 5,
   };
   return {
-    root, d, builds, launches, kids,
+    root, d, builds, launches, kids, launchEnvs, probes,
     get installs() { return installs; },
     advance(ms: number) { now += ms; },
     setExpiry(t: number) { expiry = t; },
     get now() { return now; },
-    launchWith(says: string[], exit?: number) { launchSays = says; launchExit = exit; },
+    launchWith(says: string[] | undefined, exit?: number) { launchSays = says; launchExit = exit; },
   };
 }
 
@@ -387,7 +401,7 @@ test('launchWda launches the built runner; a launch refused for expired signing 
   try {
     const cfg = { team: TEAM_A, free: false, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
     const a = await launchWda(f.d, UDID, cfg, () => undefined);
-    assert.equal(a.url, 'http://192.0.2.10:8100');
+    assert.equal(a.url, `http://[${TUNNEL_IP}]:8100`, 'this Mac reaches it through the phone’s tunnel address');
     assert.equal(f.builds.length, 1);
     assert.equal(f.launches.length, 1);
     a.runner.kill();
@@ -400,16 +414,16 @@ test('launchWda launches the built runner; a launch refused for expired signing 
     f.launchWith(['error: The provisioning profile has expired.'], 65);
     let n = 0;
     const origSpawn = f.d.spawn;
-    f.d.spawn = (cmd, args, o) => { if (args[0] === 'test-without-building' && ++n === 2) f.launchWith(['ServerURLHere->http://192.0.2.11:8100<-ServerURLHere']); return origSpawn(cmd, args, o); };
+    f.d.spawn = (cmd, args, o) => { if (args[0] === 'test-without-building' && ++n === 2) f.launchWith(undefined); return origSpawn(cmd, args, o); };
     const c = await launchWda(f.d, UDID, cfg, () => undefined);
-    assert.equal(c.url, 'http://192.0.2.11:8100');
+    assert.equal(c.url, `http://[${TUNNEL_IP}]:8100`);
     assert.equal(c.built, true);
     assert.equal(f.builds.length, 2, 'rebuilt once for the expired signing');
     c.runner.kill();
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('an "untrusted" launch from an old build rebuilds once; from a fresh build it waits for the person', async () => {
+test('a signature the phone refuses: from an old build it rebuilds once; from a fresh build it is reported', async () => {
   const f = buildFixture();
   try {
     const cfg = { team: TEAM_A, free: false, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
@@ -419,13 +433,13 @@ test('an "untrusted" launch from an old build rebuilds once; from a fresh build 
     f.launchWith([untrusted], 65);
     // Ten minutes later: still the person's move (a just-built runner needs trusting once).
     f.advance(10 * 60_000);
-    await assert.rejects(launchWda(f.d, UDID, cfg, () => undefined), (e: PhoneDockError) => e.code === 'wda_untrusted');
+    await assert.rejects(launchWda(f.d, UDID, cfg, () => undefined), (e: PhoneDockError) => e.code === 'signature_invalid');
     assert.equal(f.builds.length, 1);
     // Two hours later the phone refuses a build it ran before (a certificate revoked from another Mac): rebuild once.
     f.advance(2 * 3_600_000);
     let n = 0;
     const orig = f.d.spawn;
-    f.d.spawn = (cmd, args, o) => { if (args[0] === 'test-without-building' && ++n === 2) f.launchWith(['ServerURLHere->http://192.0.2.12:8100<-ServerURLHere']); return orig(cmd, args, o); };
+    f.d.spawn = (cmd, args, o) => { if (args[0] === 'test-without-building' && ++n === 2) f.launchWith(undefined); return orig(cmd, args, o); };
     const r = await launchWda(f.d, UDID, cfg, () => undefined);
     assert.equal(r.built, true);
     assert.equal(f.builds.length, 2);
@@ -511,23 +525,25 @@ class FakeRunner implements Runner {
   die(code = 0) { if (!this.live) return; this.live = false; this.resolveExit(code); }
 }
 
-function world(opts: { managed?: string[]; saved?: Record<string, string> } = {}) {
+function world(opts: { managed?: string[] } = {}) {
   let now = 1_000_000;
   const managed = new Set(opts.managed ?? [UDID]);
-  const saved = new Map(Object.entries(opts.saved ?? {}));
+  const saved = new Map<string, string>();
   const answering = new Set<string>();
   const phones = new Map<string, PhoneFacts>([[UDID, { found: true, paired: true, reachable: true, osVersion: '18.7', developerMode: true, locked: false }]]);
   const runners: FakeRunner[] = [];
   const launches: string[] = [];
   const signals: AbortSignal[] = [];
+  /** What runs on the phone: runner app instances, which can outlive xcodebuild. */
+  const onPhone = new Set<number>();
   let nextLaunch: (() => Promise<{ runner: FakeRunner; url: string }>) | undefined;
   let buildGate: Promise<void> | undefined;
-  let ip = 10;
   const events: string[] = [];
+  const claimsHeld = new Map<string, number>();
+  let otherOwner: number | undefined;
   const deps: SupervisorDeps = {
     now: () => now,
     managed: () => [...managed],
-    savedUrl: (u) => saved.get(u),
     saveUrl: (u, url) => { saved.set(u, url); },
     status: async (url) => answering.has(url),
     phone: async (u) => phones.get(u) ?? { found: false },
@@ -536,26 +552,35 @@ function world(opts: { managed?: string[]; saved?: Record<string, string> } = {}
       events.push('build');
       if (buildGate) await buildGate;                     // "building"
       if (ctl.signal.aborted) throw new PhoneDockError('Setup was stopped', 'cancelled', 409);
-      if (nextLaunch) { const f = nextLaunch; return f().then(async (r) => { await ctl.beforeStart(); return r; }); }
+      if (nextLaunch) { const f = nextLaunch; await ctl.beforeStart(); return f(); }
       await ctl.beforeStart();
       events.push('start');
       const r = new FakeRunner(5000 + runners.length, now); runners.push(r);
-      const url = `http://192.0.2.${ip++}:8100`;
+      onPhone.add(r.pid);
+      const url = `http://[${TUNNEL_IP}]:8100`;
       void r.exited.then(() => answering.delete(url));    // a dead runner's address stops answering
       return { runner: r, url };
+    },
+    stopOnPhone: async () => { events.push('stopOnPhone'); onPhone.clear(); return 0; },
+    claims: {
+      acquire: (u) => { if (otherOwner !== undefined) return { ok: false, pid: otherOwner }; claimsHeld.set(u, 1); return { ok: true }; },
+      setChild: () => undefined,
+      release: (u) => { claimsHeld.delete(u); },
     },
     log: () => undefined,
   };
   const sup = new WdaSupervisor(deps, { tickMs: 15_000, graceMs: 45_000, backoffMs: [5_000, 15_000, 60_000], maxAttempts: 3, personPollMs: 30_000,
-    personBackoffMs: [30_000, 60_000], maxPersonAttempts: 3, minUptimeMs: 60_000, autoTick: false });
-  const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
+    personBackoffMs: [30_000, 60_000], maxPersonAttempts: 3, minUptimeMs: 60_000, stopWaitMs: 200, autoTick: false });
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
   return {
-    sup, deps, managed, saved, answering, phones, runners, launches, signals, events, settle,
+    sup, deps, managed, saved, answering, phones, runners, launches, signals, events, settle, onPhone, claimsHeld,
     advance(ms: number) { now += ms; },
     get now() { return now; },
     failNext(err: PhoneDockError) { nextLaunch = async () => { nextLaunch = undefined; throw err; }; },
     failAlways(err: PhoneDockError) { nextLaunch = async () => { throw err; }; },
+    launchWith(f: () => Promise<{ runner: FakeRunner; url: string }>) { nextLaunch = f; },
     succeed() { nextLaunch = undefined; },
+    ownedElsewhere(pid: number | undefined) { otherOwner = pid; },
     gate() { let open!: () => void; buildGate = new Promise((r) => { open = r; }); return () => { buildGate = undefined; open(); }; },
     async tickAfter(ms: number) { now += ms; await sup.tick(); await this.settle(); },
   };
@@ -570,7 +595,6 @@ test('nothing launches before start(): a filtered or stopped service only report
   // …then the phone comes and goes, and time passes: without start() nothing launches on its own.
   w.sup.observe([{ udid: UDID, reachable: false }]);
   w.sup.observe([{ udid: UDID, reachable: true }]);
-  await w.sup.tick(); await w.settle();
   await w.tickAfter(3_600_000);
   w.sup.resume(UDID, 'test');
   await w.settle();
@@ -578,29 +602,22 @@ test('nothing launches before start(): a filtered or stopped service only report
   assert.equal(w.sup.isStarted, false);
 });
 
-test('daemon start launches WebDriverAgent for a managed phone and saves its new address; stop() stops it', async () => {
+test('daemon start ends any runner left on the phone, then starts its own (nothing is adopted); stop() ends both', async () => {
   const w = world();
+  w.onPhone.add(999);                                    // an orphan from an earlier service, maybe exposed
+  w.answering.add(`http://[${TUNNEL_IP}]:8100`);
   w.sup.start();
   await w.settle();
-  assert.deepEqual(w.launches, [UDID]);
-  assert.equal(w.saved.get(UDID), 'http://192.0.2.10:8100');
+  assert.deepEqual(w.events, ['build', 'stopOnPhone', 'start'], 'the orphan is ended before the new runner starts');
+  assert.ok(!w.onPhone.has(999));
+  assert.equal(w.saved.get(UDID), `http://[${TUNNEL_IP}]:8100`);
   assert.equal(w.sup.info(UDID)?.state, 'running');
-  assert.equal(w.sup.info(UDID)?.wdaUrl, 'http://192.0.2.10:8100');
-  assert.equal(w.sup.info('00008020-NOT-MANAGED'), undefined);
-  w.sup.stop();
-  assert.equal(w.runners[0].kills, 1, 'no runner is left behind untracked when the daemon exits');
-  w.sup.observe([{ udid: UDID, reachable: false }]); w.sup.observe([{ udid: UDID, reachable: true }]);
-  await w.settle();
-  assert.equal(w.launches.length, 1);
-});
-
-test('daemon start adopts a WebDriverAgent that already answers instead of starting a second one', async () => {
-  const w = world({ saved: { [UDID]: 'http://192.0.2.50:8100' } });
-  w.answering.add('http://192.0.2.50:8100');
-  w.sup.start();
-  await w.settle();
-  assert.deepEqual(w.launches, []);
-  assert.equal(w.sup.info(UDID)?.state, 'running');
+  assert.equal(w.sup.info(UDID)?.shared, false);
+  await w.sup.stop();
+  assert.equal(w.runners[0].kills, 1, 'xcodebuild stopped');
+  assert.equal(w.events.at(-1), 'stopOnPhone', 'and the runner on the phone, after xcodebuild');
+  assert.equal(w.onPhone.size, 0);
+  assert.equal(w.claimsHeld.size, 0, 'claim released');
 });
 
 test('one launcher per phone: concurrent triggers share one launch; setup waits, then restarts once', async () => {
@@ -625,42 +642,38 @@ test('setup builds before it stops the running WebDriverAgent; a failed build le
   const w = world();
   w.sup.start(); await w.settle();
   const first = w.runners[0];
-  // The build for the new setup takes a while: the old runner keeps serving meanwhile.
   const open = w.gate();
   const s = w.sup.setup(UDID, () => undefined);
   await w.settle();
   assert.ok(first.alive(), 'still serving during the build');
-  assert.equal(first.kills, 0);
   open(); await s;
   assert.equal(first.kills, 1);
-  assert.deepEqual(w.events, ['build', 'start', 'build', 'start']);
+  assert.deepEqual(w.events, ['build', 'stopOnPhone', 'start', 'build', 'stopOnPhone', 'start']);
 
-  // A setup whose build fails (e.g. another team can't sign): the working runner stays and the state says running.
   const second = w.runners[1];
-  w.failNext(new PhoneDockError('Team X can’t register WebDriverAgent’s app ID', 'bundle_id_unavailable', 409));
+  // A build failure throws before beforeStart: nothing on the phone or the Mac is touched.
+  w.deps.launch = async () => { throw new PhoneDockError('Team X can’t register WebDriverAgent’s app ID', 'bundle_id_unavailable', 409); };
   await assert.rejects(w.sup.setup(UDID, () => undefined), (e: PhoneDockError) => e.code === 'bundle_id_unavailable');
   assert.ok(second.alive());
-  assert.equal(second.kills, 0);
   assert.equal(w.sup.info(UDID)?.state, 'running');
 });
 
 test('a runner that exits is relaunched; a crash loop gives up, even when each runner answers once before dying', async () => {
   const w = world();
   w.sup.start(); await w.settle();
-  // Healthy for ten minutes: the tick forgives everything, so the reboot-style exit gets the shortest pause.
   w.answering.add(w.saved.get(UDID)!);
   await w.tickAfter(10 * 60_000);
   w.runners[0].die(0);
   await w.settle();
   assert.equal(w.sup.info(UDID)?.state, 'retrying');
   assert.equal(w.sup.info(UDID)?.attempts, 1);
+  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 2, 'the exit is followed by a cleanup on the phone');
   await w.tickAfter(4_000);
   assert.equal(w.launches.length, 1, 'not before the pause');
   await w.tickAfter(1_000);
   assert.equal(w.launches.length, 2);
   assert.equal(w.sup.info(UDID)?.state, 'running');
 
-  // Now each runner answers /status once and dies 30 s later: never healthy long enough to be forgiven.
   for (let i = 0; ; i++) {
     w.answering.add(w.saved.get(UDID)!);
     await w.tickAfter(15_000);
@@ -682,7 +695,7 @@ test('a runner that exits is relaunched; a crash loop gives up, even when each r
   assert.equal(w.launches.length, before + 1, 'a reconnect starts over');
 });
 
-test('a devicectl flap while running restarts nothing and forgives nothing', async () => {
+test('a devicectl flap while running restarts nothing and forgives nothing; a changed tunnel address relaunches', async () => {
   const w = world();
   w.sup.start(); await w.settle();
   w.runners[0].die(1); await w.settle();
@@ -694,9 +707,14 @@ test('a devicectl flap while running restarts nothing and forgives nothing', asy
   assert.equal(w.launches.length, 2);
   assert.equal(w.sup.info(UDID)?.attempts, 1);
   w.sup.observe([{ udid: UDID, reachable: false }]);
-  w.sup.observe([{ udid: UDID, reachable: true }]);    // running: nothing
+  w.sup.observe([{ udid: UDID, reachable: true, tunnelIp: TUNNEL_IP }]);    // running, same tunnel: nothing
   await w.settle();
   assert.equal(w.launches.length, 2);
+  // CoreDevice brought the tunnel back with another address: the runner listens on the old one.
+  w.sup.observe([{ udid: UDID, reachable: true, tunnelIp: 'fd00:0:0:2::1' }]);
+  await w.settle();
+  assert.equal(w.launches.length, 3);
+  assert.equal(w.sup.info(UDID)?.attempts, 1, 'not the runner’s fault: not counted');
 });
 
 test('launch failures retry with backoff, bounded', async () => {
@@ -713,9 +731,10 @@ test('launch failures retry with backoff, bounded', async () => {
   await w.tickAfter(1_000);
   assert.equal(w.launches.length, 3);
   assert.equal(w.sup.info(UDID)?.state, 'failed');
+  assert.ok(w.events.filter((x) => x === 'stopOnPhone').length >= 3, 'each failed launch leaves nothing on the phone');
 });
 
-test('/status going quiet relaunches; a runner that never answered is a Local Network problem, not relaunched', async () => {
+test('/status going quiet relaunches; a runner that never answered is a connection problem, not relaunched', async () => {
   const w = world();
   w.sup.start(); await w.settle();
   const url1 = w.saved.get(UDID)!;
@@ -730,14 +749,13 @@ test('/status going quiet relaunches; a runner that never answered is a Local Ne
   assert.equal(w.runners[0].kills, 1, 'the stuck runner is replaced');
   assert.equal(w.sup.info(UDID)?.attempts, 1, 'a hang counts');
 
-  // The new runner printed its address but this Mac never reaches it.
   await w.tickAfter(50_000);
   const info = w.sup.info(UDID)!;
   assert.equal(info.state, 'unreachable');
   assert.match(info.hint!, /Local Network/);
   assert.equal(w.launches.length, 2, 'a working runner is not killed over a network problem');
   assert.equal(w.runners[1].kills, 0);
-  w.answering.add(w.saved.get(UDID)!);       // the person allowed Local Network
+  w.answering.add(w.saved.get(UDID)!);
   await w.sup.tick();
   assert.equal(w.sup.info(UDID)?.state, 'running');
 });
@@ -758,13 +776,11 @@ test('a locked phone waits for unlock without launching or spending retries, the
 });
 
 test('waits that only a launch reveals back off and give up (no launch every 30 s all night)', async () => {
-  // devicectl sees nothing wrong, xcodebuild keeps saying "untrusted" (or locked, or unreachable).
   const w = world();
   w.phones.set(UDID, { ...w.phones.get(UDID)!, locked: null });
-  w.failAlways(new PhoneDockError('Trust the developer on the iPhone', 'wda_untrusted', 409, ['On the iPhone open Settings › General › VPN & Device Management…']));
+  w.failAlways(new PhoneDockError('The iPhone can’t be reached', 'no_device', 409));
   w.sup.start(); await w.settle();
-  assert.equal(w.sup.info(UDID)?.state, 'waiting_trust');
-  assert.match(w.sup.info(UDID)!.hint!, /VPN & Device Management/);
+  assert.equal(w.sup.info(UDID)?.state, 'waiting_phone');
   assert.equal(w.sup.info(UDID)?.attempts, 0, 'waiting for a person is not a failure');
   await w.tickAfter(30_000);
   assert.equal(w.launches.length, 2);
@@ -778,12 +794,22 @@ test('waits that only a launch reveals back off and give up (no launch every 30 
   assert.ok(n <= 5, `bounded (${n} launches)`);
   await w.tickAfter(8 * 3_600_000);
   assert.equal(w.launches.length, n);
-
-  // The person trusts it, then the phone reconnects (or setup runs again): it starts.
   w.succeed();
   w.sup.observe([{ udid: UDID, reachable: false }]);
   w.sup.observe([{ udid: UDID, reachable: true }]);
   await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+});
+
+test('an untrusted developer waits for Retry or a reconnect, never relaunching on a timer (each launch asks again)', async () => {
+  const w = world();
+  w.failNext(new PhoneDockError('Trust the developer on the iPhone', 'wda_untrusted', 409, ['On the iPhone open Settings › General › VPN & Device Management…']));
+  w.sup.start(); await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'waiting_trust');
+  assert.equal(w.sup.info(UDID)?.nextRetryAt, undefined);
+  for (let i = 0; i < 20; i++) await w.tickAfter(15 * 60_000);
+  assert.equal(w.launches.length, 1, 'five hours: no second prompt');
+  await w.sup.setup(UDID, () => undefined);              // the person pressed Retry
   assert.equal(w.sup.info(UDID)?.state, 'running');
 });
 
@@ -813,12 +839,13 @@ test('a disconnected phone waits for it to come back; the reconnect starts WebDr
   assert.equal(w.sup.info(UDID)?.state, 'running');
 });
 
-test('unmanage (Disconnect) cancels a build in flight, stops the runner, and setup reports it was stopped', async () => {
+test('unmanage (Stop, Disconnect) cancels a build in flight, stops the runner on the Mac and the phone; setup reports it', async () => {
   const w = world();
   w.sup.start(); await w.settle();
   w.managed.delete(UDID);
-  w.sup.unmanage(UDID);
+  await w.sup.unmanage(UDID);
   assert.equal(w.runners[0].kills, 1);
+  assert.equal(w.onPhone.size, 0, 'the runner on the phone is gone too');
   assert.equal(w.sup.info(UDID), undefined);
   await w.tickAfter(60_000);
   assert.equal(w.launches.length, 1);
@@ -829,11 +856,12 @@ test('unmanage (Disconnect) cancels a build in flight, stops the runner, and set
   const s = v.sup.setup(UDID, () => undefined);
   await v.settle();
   v.managed.delete(UDID);
-  v.sup.unmanage(UDID);
+  const stopping = v.sup.unmanage(UDID);
   assert.ok(v.signals.at(-1)!.aborted, 'the build in flight is told to stop');
   open();
+  await stopping;
   await assert.rejects(s, (e: PhoneDockError) => e.code === 'cancelled');
-  assert.equal(v.runners.length, 1, 'no new runner started after Disconnect');
+  assert.equal(v.runners.length, 1, 'no new runner started after Stop');
   assert.equal(v.runners[0].kills, 1);
   v.sup.resume(UDID, 'setup failed; back to the previous setup');
   await v.tickAfter(60_000);

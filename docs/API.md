@@ -4,7 +4,7 @@ The daemon (`phonedockd`, `node src/daemon/main.ts`) listens on `127.0.0.1:${PHO
 On start it writes `$PHONEDOCK_HOME/daemon.json` (`daemon-<port>.json` when `PHONEDOCK_PORT` is not 47420) = `{ "port": 47420, "token": "<hex>", "pid": 123, "version": "0.1.0", "startedAt": "…" }`
 (`PHONEDOCK_HOME` defaults to `~/Library/Application Support/PhoneDock`). File mode 0600.
 
-`PHONEDOCK_DEVICE_FILTER=<prefix>` (optional) limits a daemon to devices whose name starts with `<prefix>`: other devices aren't listed and requests for them return `not_found`, create/clone/rename require the prefix (`bad_request`), and physical-phone routes (`/v1/connect`, `/v1/pair`, `/v1/ios/discover`, `/v1/ios/wda-setup`) return `not_supported`. Use it for tests and CI on a Mac with devices they must not touch.
+`PHONEDOCK_DEVICE_FILTER=<prefix>` (optional) limits a daemon to devices whose name starts with `<prefix>`: other devices aren't listed and requests for them return `not_found`, create/clone/rename require the prefix (`bad_request`), physical-phone backends aren't listed at all, and physical-phone routes (`/v1/connect`, `/v1/pair`, `/v1/ios/discover`, `/v1/ios/wda-setup`, `/v1/ios/wda-stop`) return `not_supported`. Use it for tests and CI on a Mac with devices they must not touch.
 
 **Auth:** every request except `GET /v1/health` needs `Authorization: Bearer <token>` (or `?token=` for
 `<img>`/MJPEG URLs). **Agent identity:** clients send `X-PhoneDock-Owner: <name>` (e.g. `claude-code:1234`, `app:human`).
@@ -704,61 +704,94 @@ note?, resolvedAt?, resolvedBy?, leaseHolder?, returnLease?, leaseReturned? }`.
 - `502 local_network_denied`: the daemon can't reach it either. PhoneDock (or, when the daemon runs from a terminal, that terminal app) lacks permission: System Settings › Privacy & Security › Local Network.
 
 | GET | /v1/ios/discover | – | `[{ name, host?, udid?, mac?, source: 'bonjour'\|'devicectl', service?, deviceId?, transport? }]` – ~3 s Bonjour browse (`_apple-mobdev2._tcp`, `_remotepairing._tcp`) + devicectl network-paired devices. Discovery only; nothing is connected |
-| POST | /v1/ios/wda-setup | `{ udid, team?, destination?, name?, apiKeyPath?, apiKeyId?, apiKeyIssuerId? }` | `202 { job }` (`job.deviceId` = `ios-device:<udid>`). Sets up control for an iPhone on iOS 26 or older, and from then on PhoneDock keeps WebDriverAgent running on it (see *Older iPhones: WebDriverAgent* below). The job is `done` when WebDriverAgent prints `ServerURLHere->http://<ip>:8100<-ServerURLHere`; `job.result` = `{ udid, wdaUrl, pid?, team, managed: true }` (`team` and `managed` added in 0.7.0). `team` is required when Xcode is signed in to several teams (`team_required`). `apiKeyPath`/`apiKeyId`/`apiKeyIssuerId` (added in 0.7.0): an App Store Connect API key instead of an Apple ID in Xcode (all three, plus `team`). `destination` overrides the xcodebuild destination (e.g. `platform=iOS Simulator,id=<udid>`) |
+| POST | /v1/ios/wda-setup | `{ udid, team?, destination?, name?, apiKeyPath?, apiKeyId?, apiKeyIssuerId?, share? }` | `202 { job }` (`job.deviceId` = `ios-device:<udid>`). Sets up control for an iPhone on iOS 26 or older, and from then on PhoneDock keeps WebDriverAgent running on it (see *Older iPhones: WebDriverAgent* below). The job is `done` once WebDriverAgent runs and its listening address was checked; `job.result` = `{ udid, wdaUrl, pid?, team, managed: true, shared, sharedUrl? }` (`team`, `managed`, `shared` and `sharedUrl` added in 0.7.0; `udid` is the hardware UDID also when the request named the CoreDevice identifier). With no `team`, the phone's current or last team (Stop Control) is reused when Xcode still has it; otherwise `team` is required when Xcode is signed in to several teams (`team_required`). `apiKeyPath`/`apiKeyId`/`apiKeyIssuerId` (added in 0.7.0): an App Store Connect API key instead of an Apple ID in Xcode (all three, plus `team`). `share` (added in 0.7.0): also let other Macs on the Wi-Fi control the phone (omitted: the phone's current setting, off by default). `destination` overrides the xcodebuild destination and must name the same device (`id=<udid>`, else `400 bad_request`); a simulator destination builds unsigned, without a team |
+| POST | /v1/ios/wda-stop | `{ udid }` | Added in 0.7.0. Stop Control: ends WebDriverAgent (xcodebuild on the Mac and the runner app on the phone, confirmed with devicectl) and stops keeping it running; cancels a setup in flight. The phone stays paired and listed (screenshots, apps, installs), and its setup is remembered (`meta.wdaStopped`), so `wda-setup` with no team starts it again with the same build. `{ ok, udid, stopped }`; `stopped: false` when PhoneDock wasn't running it (idempotent). `not_supported` on a `PHONEDOCK_DEVICE_FILTER` service |
 | GET | /v1/ios/wda-teams | – | Added in 0.7.0. `{ teams: [{ id, name, type?, free }], xcode, xcodeVersion?, minIos? }`: the signing teams Xcode is signed in to on this Mac (`free`: a personal team, whose signing lasts 7 days), whether Xcode is installed, and the lowest iOS its XCTest runs on. Reads Xcode's settings only, so it also answers on a `PHONEDOCK_DEVICE_FILTER` service |
 
 **ios-device Wi-Fi devices:** `connection: 'wifi'` for devicectl devices with `transportType: 'localNetwork'` and for manual WDA
 entries. Manual entries without a known udid have `nativeId = wda-<host>-<port>` and capabilities limited to what WDA
-can do (no install/apps list); `state` is `running` when `GET /status` answers, else `offline`. `meta.wdaUrl`, `meta.wdaReady`,
-`meta.wdaControl` (below). `DELETE /v1/connect/:id` on a phone PhoneDock manages also stops managing it: its runner is
-stopped and nothing relaunches it.
+can do (no install/apps list); `state` is `running` when `GET /status` answers, else `offline`. A manual connection
+remembers which iPhone answered (WebDriverAgent's `/wda/device/info` `uuid`): if another iPhone answers at that
+address later (DHCP), the entry goes `offline` and takes no input until it is connected again. `meta.wdaUrl`,
+`meta.wdaReady`, `meta.wdaControl`, `meta.wdaStopped` (below). `DELETE /v1/connect/:id` on a phone PhoneDock manages
+also stops managing it and forgets its saved settings (Stop Control keeps them).
 
 **Older iPhones: WebDriverAgent (iOS 26 and older; changed in 0.7.0).** `POST /v1/ios/wda-setup` replaces the old
 clone-and-`xcodebuild test`:
-1. *Preflight*, before any build, each a plain error: `xcode_missing` (409), `not_found` (404: not connected or not
-   paired), `not_paired` (409), `no_device` (409: listed but unreachable), `ios_unsupported` (409: older than the pinned
-   WebDriverAgent's iOS 15, or than this Xcode's XCTest, e.g. iOS 17 for Xcode 27), `developer_mode_off` (409),
-   `device_locked` (409). Then the signing team: `xcode_account_missing` (409: Xcode has no account; hints name Xcode ›
-   Settings › Accounts and the API-key alternative), `team_required` (409: several teams, `detail` lists them),
-   `team_unknown` (400). Teams come from the `com.apple.dt.Xcode` defaults (`IDEProvisioningTeamByIdentifier`).
+1. *Preflight*, before anything is written or built, each a plain error: `xcode_missing` (409), `not_found` (404: not
+   connected or not paired), `not_paired` (409), `no_device` (409: listed but unreachable), `ios_unsupported` (409:
+   older than the pinned WebDriverAgent's iOS 15, or than this Xcode's XCTest, e.g. iOS 17 for Xcode 27),
+   `developer_mode_off` (409), `device_locked` (409). Then the signing team: `xcode_account_missing` (409: Xcode has no
+   account; hints name Xcode › Settings › Accounts and the API-key alternative), `team_required` (409: several teams,
+   `detail` lists them), `team_unknown` (400). Teams come from the `com.apple.dt.Xcode` defaults
+   (`IDEProvisioningTeamByIdentifier`). Nobody retries a preflight rejection: fix it, then set up again.
 2. *Build once* with `xcodebuild build-for-testing -allowProvisioningUpdates -allowProvisioningDeviceRegistration
    DEVELOPMENT_TEAM=<team> CODE_SIGN_STYLE=Automatic` (+ `-authenticationKey*` with an API key) into
-   `<state>/wda-builds/<WebDriverAgent version>-<team>-<Xcode build>-<bundle id hash>`. It is rebuilt only when that key
-   changes, when the built runner's provisioning profile expires within a day (personal teams sign for 7 days), or when
-   the phone isn't in that profile. Paid teams keep upstream's `com.facebook.WebDriverAgentRunner`; a personal team
-   gets `dev.phonedock.wda.<team>` (another team owns upstream's id). Builds unused for 30 days are deleted.
-3. *Launch* with `xcodebuild test-without-building -xctestrun <file> -destination id=<udid>`. A launch refused for
-   expired signing, or called untrusted by a build more than an hour old (a certificate revoked from another Mac reads
-   the same), rebuilds once. Build/launch failures: `xcode_account_missing`, `bundle_id_unavailable`,
-   `signing_limit`, `device_not_registered`, `wda_untrusted` (trust the developer under Settings › General › VPN &
-   Device Management), `signing_expired`, `device_locked`, `developer_mode_off`, `no_device`, else `wda_setup_failed`
-   with Xcode's last lines in `detail` (a failure to start xcodebuild at all is also `wda_setup_failed`, no longer
-   `exec_failed`).
+   `<state>/wda-builds/<WebDriverAgent version>-<team>-<Xcode build>-<hash of bundle id, component artifact and
+   platform>`. It is rebuilt only when that key changes, when the built runner's provisioning profile expires within a
+   day (personal teams sign for 7 days), or when the phone isn't in that profile. Paid teams use upstream's
+   `com.facebook.WebDriverAgentRunner`; a team that can't sign it (`bundle_id_unavailable`) falls back once, and from
+   then on, to `dev.phonedock.wda.<team>`, which a personal team always uses. One build at a time per build directory,
+   also across PhoneDock processes sharing the state directory. When Apple refuses a team for quota (`signing_limit`),
+   that team isn't asked again for 24 hours. Builds unused for 30 days are deleted.
+3. *Launch* with `xcodebuild test-without-building -xctestrun <file> -destination id=<udid>`, first ending any
+   WebDriverAgent runner already on the phone (devicectl). Build/launch failures: `xcode_account_missing`,
+   `bundle_id_unavailable`, `signing_limit`, `device_not_registered`, `wda_untrusted` (trust the developer under Settings
+   › General › VPN & Device Management, then retry), `signing_expired`, `signature_invalid` (the phone refused the
+   signature for another reason; a build more than an hour old is rebuilt once, like an expired one), `device_locked`,
+   `developer_mode_off`, `no_device`, `wda_exposed` (below), `exec_failed` (500: xcodebuild couldn't be started at
+   all), else `wda_setup_failed` with Xcode's last lines in `detail`. Signing details (an API key's path and IDs) are
+   replaced in every progress line and `detail`.
+
+**Who can reach it.** By default WebDriverAgent listens only on the phone's end of this Mac's paired CoreDevice tunnel
+(devicectl's `tunnelIPAddress`; USB or Wi-Fi), for both its HTTP port (8100) and its screen stream (9100): it is
+launched with `TEST_RUNNER_USE_IP=<that address>`, which the pinned WebDriverAgent binds both listeners to. Nothing
+else on the network can reach it, and no other Mac can. This Mac's `wdaUrl` is `http://[<tunnel address>]:8100`, taken
+from devicectl's entry for that udid at each launch (never from what the runner prints, never from an old save), and
+input only goes there while devicectl still lists that address for the phone. It fails closed: a runner that didn't
+print the address it was told to bind, or whose ports answer on the phone's Wi-Fi address after launch, is stopped and
+the setup fails with `wda_exposed` (502). `meta.wdaControl.lanCheck` says what that Wi-Fi check found: `refused` (both
+ports refused), `unverified` (this Mac couldn't tell, for example without Local Network permission; the binding itself
+was confirmed), or `none` (no Wi-Fi address). **Sharing** (`share: true`, the person's choice per phone) launches it on
+every address instead, so other Macs on the Wi-Fi can use `phonedock connect --ios <sharedUrl>`: anyone on that
+network can then control the phone, without a password. `sharedUrl` uses the phone's local hostname (devicectl's
+`localHostnames`) when known, so it survives DHCP; turning sharing on or off relaunches without a rebuild.
 
 A WebDriverAgent already running keeps serving until the new build is ready, so a setup that fails to build (another
-team, say) leaves it running and puts the previous configuration back. One setup at a time per phone: another gets
-`409 busy`. `DELETE /v1/connect/:id` during a setup stops its build or launch, and the job fails with `cancelled` (409).
+team, say) leaves it running and puts the phone's whole previous entry back (a new name too). One setup at a time per
+phone: another gets `409 busy`. Stop Control or `DELETE /v1/connect/:id` during a setup, even during preflight, wins:
+the setup changes nothing, starts nothing, and fails with `cancelled` (409).
 
-PhoneDock then keeps WebDriverAgent running (`wda` in `ios-device.json`): it relaunches it when the daemon starts (a
-WebDriverAgent already answering at the saved URL is adopted instead), when the phone reappears in devicectl (USB or
-Wi-Fi), when the runner exits, and when `GET /status` stops answering for 45 s, with one launcher per phone and one
-build at a time per build directory. Failed launches, exits and hangs count toward giving up (pauses of 5 s, 15 s,
-1 min, 5 min, 15 min; it gives up after 6, until the phone reconnects or setup runs again); the count is forgiven once a
-runner has answered for a minute. Each launch saves the address WebDriverAgent prints (DHCP can change it). A runner
-that started but never answered is left running and reported `unreachable` (a network or Local Network problem). Waits
-devicectl can see (not connected, not trusted, Developer Mode off, locked) are checked every 30 s without launching;
-waits only a launch reveals (xcodebuild says untrusted, locked or unreachable) are retried after 30 s, 1 min, 5 min and
-15 min, and given up after 8. When the daemon exits it stops the runners it started; the next daemon starts them again
-without a rebuild. A filtered service (`PHONEDOCK_DEVICE_FILTER`) never supervises or launches on its own.
+PhoneDock then keeps WebDriverAgent running (`wda` in `ios-device.json`). Only one PhoneDock process on this Mac runs
+it for a given phone, whatever its state directory (a claim per phone under `~/Library/Caches/PhoneDock/wda-claims`;
+another process's setup gets `409 busy` and its supervision waits; a dead owner's leftover xcodebuild is stopped). It
+starts WebDriverAgent when the daemon starts (ending any runner left on the phone; nothing is adopted), when the phone
+reappears in devicectl (USB or Wi-Fi), when the runner exits, when the phone's tunnel address changes, and when
+`GET /status` stops answering for 45 s, with one launcher per phone. Failed launches, exits (also one right after the
+runner printed its address) and hangs count toward giving up (pauses of 5 s, 15 s, 1 min, 5 min, 15 min; it gives up
+after 6, until the phone reconnects or setup runs again); the count is forgiven once a runner has answered for a minute.
+A runner that started but never answered is left running and reported `unreachable`. Waits devicectl can see (not
+connected, not trusted, Developer Mode off, locked) are checked every 30 s without launching; waits only a launch
+reveals (locked, unreachable) are retried after 30 s, 1 min, 5 min and 15 min, and given up after 8. An untrusted
+developer certificate waits for a retry (setup) or the phone reconnecting, never a timer (each launch asks again).
+Failures only a person can fix (`xcode_account_missing`, `bundle_id_unavailable`, `device_not_registered`,
+`signing_limit`, `wda_exposed`, ...) aren't retried at all, not even on reconnect. Whenever PhoneDock stops a runner
+(Stop Control, Disconnect, daemon exit, a replacement, a runner that died), it also ends the runner app on the phone
+with devicectl and confirms it's gone: on a phone the runner can outlive xcodebuild. When the daemon exits it waits
+(bounded) for that; the next daemon starts them again without a rebuild. A filtered service (`PHONEDOCK_DEVICE_FILTER`)
+never supervises or launches on its own, and doesn't list physical backends at all.
 
 `Device.meta.wdaControl` (added in 0.7.0): `null` unless PhoneDock manages the phone, else `{ managed: true, state,
-message, hint?, wdaUrl?, attempts, nextRetryAt?, updatedAt }` with `state` one of `starting`, `running`, `unreachable`
-(started, but this Mac can't reach it), `waiting_unlock` (locked, e.g. after a restart; retried once it is unlocked),
-`waiting_phone` (not connected, not trusted, or Developer Mode off), `waiting_trust` (developer certificate not trusted
-yet), `retrying`, `failed`. `attempts` counts failed launches, exits and hangs since the last healthy run; waiting
-states don't count. While it isn't `running`, its message is also
-in `meta.readiness.hints`, input on such a phone fails with `503 wda_not_ready` (that message) before a WebDriverAgent
-URL exists, and `wda_unreachable` carries it after.
+message, hint?, wdaUrl?, attempts, nextRetryAt?, updatedAt, shared, sharedUrl?, lanCheck? }` with `state` one of
+`starting`, `running`, `unreachable` (started, but this Mac can't reach it), `waiting_unlock` (locked, e.g. after a
+restart; retried once it is unlocked), `waiting_phone` (not connected, not trusted, Developer Mode off, or another
+PhoneDock on this Mac runs it), `waiting_trust` (developer certificate not trusted yet; waits for a retry), `retrying`,
+`failed`. `attempts` counts failed launches, exits and hangs since the last healthy run; waiting states don't count.
+While it isn't `running`, its message is also in `meta.readiness.hints`, input on such a phone fails with
+`503 wda_not_ready` (that message) before a WebDriverAgent URL exists, and `wda_unreachable` carries it after.
+`Device.meta.wdaStopped` (added in 0.7.0): `{ team, stoppedAt }` after Stop Control, until control is set up again,
+else `null`. `GET /v1/devices/:id/info` `config` shows a phone's setup without an API key's path or IDs
+(`signing: 'api-key' | 'xcode-account'`).
 
 `wda_unreachable` (changed in 0.7.0) now hints at macOS Local Network privacy (System Settings › Privacy & Security ›
 Local Network › PhoneDock) next to "same Wi-Fi": a `curl` from Terminal can reach the phone while PhoneDock can't.

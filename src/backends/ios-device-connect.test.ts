@@ -9,7 +9,7 @@ import { join } from 'node:path';
 
 const home = mkdtempSync(join(tmpdir(), 'pd-ios-connect-'));
 process.env.PHONEDOCK_HOME = home;
-const { backend } = await import('./ios-device.ts');
+const { backend, publicConfig } = await import('./ios-device.ts');
 after(() => rmSync(home, { recursive: true, force: true }));
 
 const UDID = '00008020-0000FAKE0000FAKE';
@@ -18,8 +18,9 @@ const wda = { team: 'TEAMAAAAAA', free: false, bundleId: 'com.facebook.WebDriver
 
 test('connect --ios to a managed phone’s address keeps its entry and its wda setup', async () => {
   const srv = createServer((req, res) => {
-    res.writeHead(req.url === '/status' ? 200 : 404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ value: { ready: true } }));
+    const known = req.url === '/status' || req.url === '/wda/device/info';
+    res.writeHead(known ? 200 : 404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ value: req.url === '/wda/device/info' ? { uuid: 'AAAAAAAA-0000-0000-0000-000000000001' } : { ready: true } }));
   });
   await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
   const port = (srv.address() as { port: number }).port;
@@ -53,4 +54,27 @@ test('Stop Control ends management but keeps the phone’s entry, name and setup
   assert.ok(Date.parse(e.wdaStopped.stoppedAt));
   assert.deepEqual(await backend.wdaStop(UDID), { udid: UDID, stopped: false }, 'idempotent');
   await assert.rejects(backend.wdaStop('bad/udid'), (err: { code?: string }) => err.code === 'bad_request');
+});
+
+test('#2: a manual connection remembers which iPhone answered, so another phone at that address later is noticed', async () => {
+  const srv = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ value: req.url === '/wda/device/info' ? { uuid: 'BBBBBBBB-0000-0000-0000-000000000002' } : { ready: true } }));
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    writeFileSync(cfgFile, '{}');
+    const r = await backend.connectWda(`http://127.0.0.1:${port}`);
+    assert.equal(JSON.parse(readFileSync(cfgFile, 'utf8'))[r.nativeId].wdaDeviceId, 'BBBBBBBB-0000-0000-0000-000000000002');
+  } finally { await new Promise<void>((r) => srv.close(() => r())); }
+});
+
+test('#12: device info shows a phone’s setup without the API key’s path or IDs', () => {
+  const key = { path: '/private/keys/AuthKey_KEYID12345.p8', keyId: 'KEYID12345', issuerId: '69a6de70-0000-47e3-e053-5b8c7c11a4d1' };
+  const pub = publicConfig({ udid: UDID, name: 'Old iPhone', wda: { ...wda, apiKey: key }, wdaStopped: { ...wda, apiKey: key, stoppedAt: '2026-11-02T00:00:00Z' } });
+  const text = JSON.stringify(pub);
+  for (const v of Object.values(key)) assert.ok(!text.includes(v), `${v} leaked`);
+  assert.equal((pub as any).wda.signing, 'api-key');
+  assert.equal((pub as any).wda.team, wda.team);
 });

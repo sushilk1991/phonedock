@@ -85,8 +85,8 @@ server.listen(port, '127.0.0.1', () => {
 });
 
 /** The iPhone backend's WebDriverAgent supervisor hooks (through the loaded backend, so a broken module stays non-fatal). */
-function iosSupervision(): { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => void } | undefined {
-  return backends.find((b) => b.id === 'ios-device') as { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => void } | undefined;
+function iosSupervision(): { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => Promise<void> } | undefined {
+  return backends.find((b) => b.id === 'ios-device') as { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => Promise<void> } | undefined;
 }
 
 async function autoStart() {
@@ -110,8 +110,9 @@ const shutdown = (sig: string) => {
   if (exiting) return; exiting = true;
   console.log(`[phonedockd] ${sig} – exiting (devices keep running)`); server.close();
   const stopTraces = traces.size ? Promise.race([abortAllTraces(`daemon exiting (${sig})`), new Promise((r) => setTimeout(r, 25_000))]) : Promise.resolve();
-  iosSupervision()?.stopWdaSupervisor?.();
-  void stopTraces.finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
+  // WebDriverAgent runners this daemon started end with it, on the Mac and on the phone (bounded, in parallel).
+  const stopWda = Promise.race([Promise.resolve(iosSupervision()?.stopWdaSupervisor?.()).catch(() => undefined), new Promise((r) => setTimeout(r, 25_000))]);
+  void Promise.all([stopTraces, stopWda]).finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
 };
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

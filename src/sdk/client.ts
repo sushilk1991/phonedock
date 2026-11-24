@@ -1005,8 +1005,9 @@ export class PhoneDockClient {
   discoverIos(): Promise<{ name: string; host?: string; udid?: string; source: string; service?: string; deviceId?: string }[]> { return this.request('GET', '/v1/ios/discover'); }
   /** Set up control for an iPhone on iOS 26 or older (Job): build the pinned WebDriverAgent once for the team, start
    *  it, and keep it running. Resolves when WDA prints its URL, which is saved for the device. `team` is needed when
-   *  Xcode is signed in to several teams (wdaTeams); `apiKey*` stand in for an Apple ID in Xcode. */
-  async wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string } & WaitOptions = {}): Promise<Job> {
+   *  Xcode is signed in to several teams (wdaTeams); `apiKey*` stand in for an Apple ID in Xcode. `share`: also let
+   *  other Macs on the Wi-Fi control it (anyone on that network can; omitted keeps the phone's setting, off by default). */
+  async wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string; share?: boolean } & WaitOptions = {}): Promise<Job> {
     const { wait, timeoutMs, onProgress, ...body } = opts;
     const r = await this.request<{ job: Job }>('POST', '/v1/ios/wda-setup', { body: { udid, ...body } });
     return wait === false ? r.job : this.waitJob(r.job.id, { timeoutMs: timeoutMs ?? 30 * 60_000, onProgress });

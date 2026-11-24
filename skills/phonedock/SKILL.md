@@ -168,7 +168,11 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   Control). `team_required`: ask which team (`phonedock ios wda-teams`), then pass `--team`. `xcode_account_missing`,
   `developer_mode_off`, `not_paired` and `wda_untrusted` are the person's to fix: `request_human` with the error's
   hint. After that PhoneDock keeps it running across reboots; `wda_not_ready` means it is restarting or waiting (its
-  message says on what, such as an unlock), so wait or ask, don't run setup again.
+  message says on what, such as an unlock), so wait or ask, don't run setup again. It is reachable only from this Mac;
+  never pass `--share` (it lets anyone on the Wi-Fi control the phone) unless the user asks for another Mac to drive
+  it. To stop control: `phonedock ios wda-stop --udid <nativeId>` (HTTP `POST /v1/ios/wda-stop`; the app's Stop
+  Control). It ends the runner on the phone too and keeps the phone paired and listed; don't unpair the phone for
+  this, and don't use `disconnect`, which also forgets its settings.
 - **App Store screenshots.** Create the required model (`list_profiles backend="ios-simulator" filter="Pro Max"`),
   set the scene (`set_appearance`, sample data, `open_url` deep links), then `screenshot save_to=… format="png"`
   at full resolution (no `max_size`). On a simulator/emulator, `device_environment` can override the status bar;

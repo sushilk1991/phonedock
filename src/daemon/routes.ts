@@ -809,7 +809,7 @@ type IosConnector = {
   connectWda: (input: string, o?: { name?: string; udid?: string }) => Promise<{ nativeId: string; wdaUrl: string; status: unknown }>;
   disconnect: (nid: string) => Promise<boolean>;
   discover: () => Promise<unknown[]>;
-  wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string }, p?: (l: string) => void) => Promise<unknown>;
+  wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string; share?: boolean }, p?: (l: string) => void) => Promise<unknown>;
   wdaTeams: () => Promise<unknown>;
   wdaStop: (udid: string) => Promise<{ udid: string; stopped: boolean }>;
 };
@@ -864,6 +864,7 @@ r.post('/v1/ios/wda-setup', async (c) => {
     const res = await b.wdaSetup(udid, {
       team: opt('team'), destination: opt('destination'), name: opt('name'),
       apiKeyPath: opt('apiKeyPath'), apiKeyId: opt('apiKeyId'), apiKeyIssuerId: opt('apiKeyIssuerId'),
+      ...(typeof body.share === 'boolean' ? { share: body.share } : {}),
     }, p);
     invalidateDevices();
     return res;

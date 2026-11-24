@@ -52,6 +52,11 @@ function filteredOut(id: string) {
   return new PhoneDockError("Couldn’t find the device", 'not_found', 404, ["Check the list of available devices."],
     `No device ${id} (this service only shows devices named ${deviceFilter}…)`);
 }
+/** Backends whose devices are real phones. A filtered service never even lists them: listing probes the phones
+ *  (lock state, WebDriverAgent) and can start downloads for them. */
+export const PHYSICAL_BACKENDS = new Set(['ios-device', 'android-device']);
+/** The backends this service lists devices from. */
+export const listedBackends = (): Backend[] => deviceFilter ? backends.filter((b) => !PHYSICAL_BACKENDS.has(b.id)) : backends;
 function applyFilter(list: Device[]): Device[] {
   if (!deviceFilter) return list;
   const out = list.filter((d) => d.name.startsWith(deviceFilter) && d.kind !== 'physical');
@@ -374,12 +379,12 @@ export function noteScreen(id: string, width?: number, height?: number) {
 }
 export async function listDevices(fresh = false, backend?: string): Promise<Device[]> {
   if (!backend && !fresh && devCache && Date.now() - devCache.at < 2000) return applyFilter(decorate(devCache.list));
-  let raw = await inventory.list(backends, { fresh, backend, ...(backend && fresh ? { waitMs: 30_000 } : {}) });
+  let raw = await inventory.list(listedBackends(), { fresh, backend, ...(backend && fresh ? { waitMs: 30_000 } : {}) });
   // A read invalidated while in flight is discarded. An explicit target waits for its replacement, without
   // making an unrelated local device wait on a slow cloud provider.
   const status = backend && fresh ? inventory.status()[backend] : undefined;
   if (backend && fresh && !status?.refreshing && status?.at === undefined && !status?.error) {
-    raw = await inventory.list(backends, { fresh: true, backend, waitMs: 30_000 });
+    raw = await inventory.list(listedBackends(), { fresh: true, backend, waitMs: 30_000 });
   }
   if (!backend) devCache = { at: Date.now(), list: raw };
   pruneLaunchSecrets(raw, backend);
