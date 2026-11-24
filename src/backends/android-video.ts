@@ -110,6 +110,7 @@ export class ScreenSource {
   }
 
   get subscribers(): number { return this.subs.size; }
+  get isAsleep(): boolean { return this.asleep; }
 
   /** `sink` gets what a decoder needs to start, then every packet. `onFail`: the device can't stream (no frames). */
   subscribe(sink: VideoSink, maxSize: number | undefined, onFail: (e: Error) => void): void {
@@ -494,5 +495,6 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
       for (const cb of endCbs) cb();
     },
     restart() { if (!pollMode) src?.restart(); },
+    asleep() { return !pollMode && !!src?.isAsleep; },
   };
 }

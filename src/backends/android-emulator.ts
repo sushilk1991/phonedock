@@ -10,7 +10,8 @@ import { stateDir, toolEnv, which } from '../core/paths.ts';
 import {
   PhoneDockError,
   type Availability, type Backend, type BootOptions, type Device, type DeviceSpec, type DeviceState,
-  type HardwareProfile, type OsImage, type ScreenInfo, type Snapshot, type VideoPacket, type VideoStream,
+  type HardwareProfile, type OsImage, type ScreenInfo, type SleepState, type Snapshot, type VideoPacket, type VideoStream,
+  type WakeReport,
 } from '../core/types.ts';
 import * as A from './android-common.ts';
 import * as T from './android-trace.ts';
@@ -503,61 +504,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   },
 
   async boot(name: string, opts: BootOptions & { onProgress?: (l: string) => void } = {}): Promise<void> {
-    const a = requireAvd(name);
-    const p = opts.onProgress;
-    if (await serialFor(name)) { p?.('already running'); return; }
-    if (booting.has(name)) throw new PhoneDockError(`"${name}" is already booting`, 'busy', 409);
-    booting.set(name, Date.now());
-    let port = 0;
-    try {
-      const disguiseBoot = await resolveDisguiseBoot(a, {
-        adbBin: A.adbPath(),
-        sdkRootDir: A.sdkRoot(),
-        onProgress: p,
-        withBootstrapSerial: (fn) => runTransientBootstrap(a, p, fn),
-      });
-      port = await pickPort(); reservedPorts.add(port);
-      const headless = opts.window ? false : opts.headless ?? true;
-      const args = ['-avd', name, '-port', String(port), '-no-audio', '-no-boot-anim'];
-      if (headless) args.push('-no-window');
-      // Headless defaults to SwiftShader (software GL) which makes screencap/streaming CPU-bound.
-      // Host GPU (Metal via gfxstream) works headless on Apple Silicon; override with PHONEDOCK_EMULATOR_GPU.
-      args.push('-gpu', process.env.PHONEDOCK_EMULATOR_GPU ?? 'host');
-      if (opts.coldBoot || disguiseBoot?.forceColdBoot) args.push('-no-snapshot-load');
-      if (disguiseBoot?.ramdiskPath) args.push('-ramdisk', disguiseBoot.ramdiskPath);
-      // Vulkan: an app that uses it (Chrome does) makes the emulator refuse to save a snapshot (UNSUPPORTED_VK_APP).
-      // Without it Chrome renders through OpenGL ES and snapshots save fine (measured; screenshots as fast).
-      if (!vulkanEnabled(a)) args.push('-feature', '-Vulkan');
-      // Experiments only (e.g. "-feature -Vulkan"); whitespace-separated.
-      if (process.env.PHONEDOCK_EMULATOR_EXTRA_ARGS) args.push(...process.env.PHONEDOCK_EMULATOR_EXTRA_ARGS.split(/\s+/).filter(Boolean));
-      const logFile = join(stateDir('logs'), `emulator-${name}.log`);
-      const fd = openSync(logFile, 'a');
-      p?.(`spawning emulator ${args.join(' ')} (log: ${logFile})`);
-      const child = spawn(emulatorBin(), args, {
-        detached: true, stdio: ['ignore', fd, fd],
-        env: { ...toolEnv(), ANDROID_AVD_HOME: a.home },
-      });
-      closeSync(fd);
-      child.unref();
-      children.set(name, child);
-      let exited: string | undefined;
-      child.on('exit', (code, sig) => { exited = `emulator exited (${code ?? sig}) – see ${logFile}: ${tail(logFile)}`; children.delete(name); });
-      const serial = `emulator-${port}`;
-      const t0 = Date.now();
-      // wait for adb to see it, then for boot_completed
-      await A.waitBootCompleted(serial, 240_000, () => exited);
-      disguiseBoot?.commit();
-      p?.(`boot completed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-      // Wake and unlock like a snapshot restore does. Not KEYCODE_MENU (82), the old emulator unlock: with no lock
-      // screen up, the launcher takes it and opens its Wallpaper/Widgets/Home settings menu on every fresh boot.
-      await A.adb(serial, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], { allowFail: true });
-      await A.adb(serial, ['shell', 'wm', 'dismiss-keyguard'], { allowFail: true });
-      if (a.managed) await presetChrome(serial);
-      serialCache.delete(serial);
-    } finally {
-      booting.delete(name);
-      if (port) reservedPorts.delete(port);
-    }
+    await bootAvd(name, opts);
   },
 
   async shutdown(name: string) {
@@ -682,7 +629,10 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       inner.onFrame((j, si) => fcb.forEach((c) => c(j, si)));
       inner.onEnd((e) => ecb.forEach((c) => c(e)));
     }, (e) => ecb.forEach((c) => c(e)));
-    return { onFrame: (cb) => { fcb.push(cb); }, onEnd: (cb) => { ecb.push(cb); }, stop: () => { stopped = true; inner?.stop(); }, restart: () => inner?.restart?.() };
+    return {
+      onFrame: (cb) => { fcb.push(cb); }, onEnd: (cb) => { ecb.push(cb); }, stop: () => { stopped = true; inner?.stop(); },
+      restart: () => inner?.restart?.(), asleep: () => !!inner?.asleep?.(),
+    };
   },
   video(name, opts) {
     let inner: VideoStream | undefined; let stopped = false;
@@ -749,7 +699,154 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     };
   },
   runningSerial: serialFor,
+  // ── idle sleep (src/daemon/idle-sleep.ts) ──
+  async saveSleep(name: string): Promise<SleepState> {
+    const a = requireAvd(name);
+    if (!a.managed) throw new PhoneDockError('PhoneDock only puts phones it created to sleep', 'forbidden', 403, undefined, `"${name}" lives in ${a.home}, outside PhoneDock's own emulators`);
+    const s = await requireSerial(name);
+    const id = await guestIdentity(s);
+    const t0 = Date.now();
+    await emuSnapshot(name, 'save', SLEEP_SNAPSHOT);
+    // The console said OK; check the files are really there and new before anything stops the phone.
+    const dir = join(a.avdDir, 'snapshots', SLEEP_SNAPSHOT);
+    let written = false;
+    try {
+      const pb = statSync(join(dir, 'snapshot.pb')), ram = statSync(join(dir, 'ram.bin'));
+      written = pb.mtimeMs >= t0 - 2000 && ram.size > 0;
+    } catch { /* missing */ }
+    if (!written) throw new PhoneDockError('Couldn’t save the phone’s state', 'snapshot_failed', 500, ['It keeps running; PhoneDock tries again after it has been idle for another while.'], `${dir}: snapshot.pb or ram.bin missing or older than the save`);
+    return { snapshot: SLEEP_SNAPSHOT, savedAt: new Date(t0).toISOString(), ...id };
+  },
+
+  async stopAfterSleep(name: string): Promise<void> {
+    const s = await serialFor(name);
+    if (!s) return;
+    const pid = (await emulatorProcess(name))?.pid ?? children.get(name)?.pid;
+    // The emulator saves its own quick-boot state on the way out (a few seconds); its memory is free only once the
+    // process is gone, not when adb drops the serial.
+    await A.adb(s, ['emu', 'kill'], { allowFail: true, timeoutMs: 10_000 });
+    const deadline = Date.now() + 180_000;
+    if (pid) {
+      while (Date.now() < deadline && processAlive(pid)) await sleep(250);
+      if (processAlive(pid)) throw new PhoneDockError('The phone didn’t stop', 'sleep_failed', 500, ['Shut it down from PhoneDock, or quit the emulator process.'], `emulator pid ${pid} still running 180 s after emu kill`);
+    }
+    // adb lists the serial for a moment after the process is gone: wait, so the device list says stopped at once.
+    const adbDeadline = Date.now() + (pid ? 15_000 : 180_000);
+    while (Date.now() < adbDeadline && (await A.adbDevices().catch(() => [])).some((d) => d.serial === s)) await sleep(250);
+    processCache = undefined;
+    serialCache.delete(s);
+  },
+
+  async wakeFromSleep(name: string, saved: SleepState, opts: { onProgress?: (l: string) => void } = {}): Promise<WakeReport> {
+    const p = opts.onProgress;
+    const started = await bootAvd(name, { headless: true, onProgress: p });
+    const s = await requireSerial(name);
+    let report: WakeReport;
+    if (started.coldBoot) {
+      // A virtual phone whose disguise changed (a PhoneDock update) must start cold, or the saved state would bring
+      // the old identity back. Its apps and data are kept; what was open is not.
+      report = { resumed: false, via: 'cold', note: 'This virtual phone’s setup changed in this PhoneDock version, so it started fresh (apps and data are kept).' };
+    } else if (resumedFrom(await guestIdentity(s).catch(() => ({})), saved)) {
+      report = { resumed: true, via: 'quickboot' };
+    } else if (started.alreadyRunning) {
+      // Someone started it while it slept (another tool, or an older PhoneDock): it may be in use. Leave it as it is.
+      report = { resumed: false, via: 'cold', note: 'It was started elsewhere while it slept, so it kept the state it has now.' };
+    } else {
+      // The quick-boot state the emulator saved on its way out didn't load (or was older): load the one PhoneDock
+      // saved and checked before it stopped the phone.
+      p?.('loading the state saved before it slept');
+      await emuSnapshot(name, 'load', SLEEP_SNAPSHOT);
+      await A.waitBootCompleted(s, 60_000).catch(() => undefined);
+      await A.adb(s, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], { allowFail: true });
+      await A.adb(s, ['shell', 'wm', 'dismiss-keyguard'], { allowFail: true });
+      report = resumedFrom(await guestIdentity(s).catch(() => ({})), saved)
+        ? { resumed: true, via: 'snapshot' }
+        : { resumed: false, via: 'cold', note: 'The saved state didn’t load, so the phone started fresh (apps and data are kept).' };
+    }
+    await emuSnapshot(name, 'del', SLEEP_SNAPSHOT).catch(() => undefined);   // ~3 GB per phone on disk: not kept
+    report.clock = await setGuestClock(s);
+    return report;
+  },
+
+  async discardSleep(name: string): Promise<void> {
+    try {
+      if (await serialFor(name)) { await emuSnapshot(name, 'del', SLEEP_SNAPSHOT); return; }
+      const a = findAvd(name);
+      if (a?.managed) rmSync(join(a.avdDir, 'snapshots', SLEEP_SNAPSHOT), { recursive: true, force: true });
+    } catch { /* best effort */ }
+  },
+
+  async keepAwake(name: string): Promise<string | undefined> {
+    // The person may be using the phone where PhoneDock sees no input: the emulator's own window, or scrcpy.
+    const proc = await emulatorProcess(name);
+    if (proc && !hasArg(proc.args, '-no-window')) return 'its emulator window is open';
+    const s = await serialFor(name).catch(() => undefined);
+    if (s && (await processes()).some((x) => /(^|\/)scrcpy(\s|$)/.test(x.args) && hasArgPair(x.args, '-s', s))) return 'it is open in a separate window';
+    return undefined;
+  },
 };
+
+/** Boot an AVD (backend.boot). `coldBoot`: it started without its quick-boot state (asked for, or forced because a
+ *  virtual phone's disguise changed). */
+async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: string) => void } = {}): Promise<{ coldBoot: boolean; alreadyRunning?: boolean }> {
+  const a = requireAvd(name);
+  const p = opts.onProgress;
+  if (await serialFor(name)) { p?.('already running'); return { coldBoot: false, alreadyRunning: true }; }
+  if (booting.has(name)) throw new PhoneDockError(`"${name}" is already booting`, 'busy', 409);
+  booting.set(name, Date.now());
+  let port = 0; let coldBoot = false;
+  try {
+    const disguiseBoot = await resolveDisguiseBoot(a, {
+      adbBin: A.adbPath(),
+      sdkRootDir: A.sdkRoot(),
+      onProgress: p,
+      withBootstrapSerial: (fn) => runTransientBootstrap(a, p, fn),
+    });
+    coldBoot = !!(opts.coldBoot || disguiseBoot?.forceColdBoot);
+    port = await pickPort(); reservedPorts.add(port);
+    const headless = opts.window ? false : opts.headless ?? true;
+    const args = ['-avd', name, '-port', String(port), '-no-audio', '-no-boot-anim'];
+    if (headless) args.push('-no-window');
+    // Headless defaults to SwiftShader (software GL) which makes screencap/streaming CPU-bound.
+    // Host GPU (Metal via gfxstream) works headless on Apple Silicon; override with PHONEDOCK_EMULATOR_GPU.
+    args.push('-gpu', process.env.PHONEDOCK_EMULATOR_GPU ?? 'host');
+    if (coldBoot) args.push('-no-snapshot-load');
+    if (disguiseBoot?.ramdiskPath) args.push('-ramdisk', disguiseBoot.ramdiskPath);
+    // Vulkan: an app that uses it (Chrome does) makes the emulator refuse to save a snapshot (UNSUPPORTED_VK_APP).
+    // Without it Chrome renders through OpenGL ES and snapshots save fine (measured; screenshots as fast).
+    if (!vulkanEnabled(a)) args.push('-feature', '-Vulkan');
+    // Experiments only (e.g. "-feature -Vulkan"); whitespace-separated.
+    if (process.env.PHONEDOCK_EMULATOR_EXTRA_ARGS) args.push(...process.env.PHONEDOCK_EMULATOR_EXTRA_ARGS.split(/\s+/).filter(Boolean));
+    const logFile = join(stateDir('logs'), `emulator-${name}.log`);
+    const fd = openSync(logFile, 'a');
+    p?.(`spawning emulator ${args.join(' ')} (log: ${logFile})`);
+    const child = spawn(emulatorBin(), args, {
+      detached: true, stdio: ['ignore', fd, fd],
+      env: { ...toolEnv(), ANDROID_AVD_HOME: a.home },
+    });
+    closeSync(fd);
+    child.unref();
+    children.set(name, child);
+    let exited: string | undefined;
+    child.on('exit', (code, sig) => { exited = `emulator exited (${code ?? sig}) – see ${logFile}: ${tail(logFile)}`; children.delete(name); });
+    const serial = `emulator-${port}`;
+    const t0 = Date.now();
+    // wait for adb to see it, then for boot_completed
+    await A.waitBootCompleted(serial, 240_000, () => exited);
+    disguiseBoot?.commit();
+    p?.(`boot completed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    // Wake and unlock like a snapshot restore does. Not KEYCODE_MENU (82), the old emulator unlock: with no lock
+    // screen up, the launcher takes it and opens its Wallpaper/Widgets/Home settings menu on every fresh boot.
+    await A.adb(serial, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], { allowFail: true });
+    await A.adb(serial, ['shell', 'wm', 'dismiss-keyguard'], { allowFail: true });
+    if (a.managed) await presetChrome(serial);
+    serialCache.delete(serial);
+    return { coldBoot };
+  } finally {
+    booting.delete(name);
+    if (port) reservedPorts.delete(port);
+  }
+}
 
 export interface DisguiseBootResult {
   ramdiskPath: string;
@@ -871,7 +968,60 @@ function vulkanEnabled(a: AvdEntry): boolean {
   return vulkan;
 }
 const INTERNAL_SNAPSHOT = 'default_boot';   // the emulator's own quick-boot snapshot: not the person's
-function userSnapshotNames(avdDir: string): string[] { return safeLs(join(avdDir, 'snapshots')).filter((n) => n !== INTERNAL_SNAPSHOT); }
+/** The state PhoneDock saves before it puts an idle phone to sleep (saveSleep): not the person's either. */
+export const SLEEP_SNAPSHOT = 'phonedock_sleep';
+function userSnapshotNames(avdDir: string): string[] { return safeLs(join(avdDir, 'snapshots')).filter((n) => n !== INTERNAL_SNAPSHOT && n !== SLEEP_SNAPSHOT); }
+
+// ── idle sleep helpers ───────────────────────────────────────────────────────
+/** Who the guest is right now: its kernel boot id and uptime. A guest resumed from a save has the same boot id and is
+ *  at least as old as it was just before the save; a cold boot (or an older quick-boot state) is not. */
+async function guestIdentity(serial: string): Promise<{ bootId?: string; uptimeSec?: number }> {
+  const r = await A.adb(serial, ['shell', 'cat', '/proc/sys/kernel/random/boot_id', '/proc/uptime'], { allowFail: true, timeoutMs: 10_000 });
+  const [boot, up] = r.stdout.trim().split('\n').map((l) => l.trim());
+  const uptimeSec = Number.parseFloat(up ?? '');
+  return { ...(/^[0-9a-f-]{36}$/.test(boot ?? '') ? { bootId: boot } : {}), ...(Number.isFinite(uptimeSec) ? { uptimeSec } : {}) };
+}
+export function resumedFrom(now: { bootId?: string; uptimeSec?: number }, saved: Pick<SleepState, 'bootId' | 'uptimeSec'>): boolean {
+  if (!saved.bootId || now.bootId !== saved.bootId) return false;
+  return saved.uptimeSec === undefined || (now.uptimeSec ?? -1) >= saved.uptimeSec - 1;
+}
+/** A phone resumed from a save keeps the time it had then until something corrects it. The emulator corrects it only
+ *  through its modem, which a virtual phone often boots without, so set it from the Mac's clock. The shell user may
+ *  (`cmd alarm set-time`, AlarmManager's shell command); no root needed. */
+async function setGuestClock(serial: string): Promise<{ skewSec: number; set: boolean; error?: string }> {
+  const read = async () => {
+    const r = await A.adb(serial, ['shell', 'date', '+%s'], { allowFail: true, timeoutMs: 10_000 });
+    const g = Number.parseInt(r.stdout.trim(), 10);
+    return Number.isFinite(g) ? g - Math.round(Date.now() / 1000) : NaN;
+  };
+  const skew = await read();
+  if (!Number.isFinite(skew)) return { skewSec: 0, set: false, error: 'could not read the phone’s clock' };
+  if (Math.abs(skew) <= 2) return { skewSec: skew, set: false };
+  await A.adb(serial, ['shell', 'cmd', 'alarm', 'set-time', String(Date.now())], { allowFail: true, timeoutMs: 10_000 });
+  const after = await read();
+  return Number.isFinite(after) && Math.abs(after) <= 2 ? { skewSec: skew, set: true } : { skewSec: skew, set: false, error: `the clock is still ${after} s off after setting it` };
+}
+interface Proc { pid: number; args: string }
+let processCache: { at: number; list: Promise<Proc[]> } | undefined;
+/** `ps` once every few seconds, shared by every check in that time. */
+function processes(): Promise<Proc[]> {
+  if (processCache && Date.now() - processCache.at < 3000) return processCache.list;
+  const list = run('/bin/ps', ['-axww', '-o', 'pid=,args='], { allowFail: true, timeoutMs: 10_000 }).then((r) => r.stdout.split('\n').map((l) => {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(l);
+    return m ? { pid: Number(m[1]), args: m[2] } : undefined;
+  }).filter((x): x is Proc => !!x), () => [] as Proc[]);
+  processCache = { at: Date.now(), list };
+  return list;
+}
+const hasArg = (args: string, a: string) => (' ' + args + ' ').includes(` ${a} `);
+const hasArgPair = (args: string, a: string, v: string) => (' ' + args + ' ').includes(` ${a} ${v} `);
+/** The emulator (qemu) process running this AVD, if any. */
+async function emulatorProcess(name: string): Promise<Proc | undefined> {
+  return (await processes()).find((x) => /(^|\/)(qemu-system-[\w-]+|emulator)(\s|$)/.test(x.args.split(' -')[0] + ' ') && hasArgPair(x.args, '-avd', name));
+}
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
 /** Space a snapshot takes on disk (ram.bin is a sparse file as big as the guest's RAM: count allocated blocks). */
 function snapshotDiskMB(dir: string): number {
   let bytes = 0;
@@ -909,3 +1059,4 @@ async function emuSnapshot(name: string, op: 'save' | 'load' | 'del', snap: stri
 function tail(file: string): string {
   try { const t = readFileSync(file, 'utf8'); return t.slice(-600).replace(/\s+/g, ' '); } catch { return ''; }
 }
+

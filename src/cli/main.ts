@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { PhoneDockClient, PhoneDockApiError, checkAppId, jobErrorText, matchName, tapMeta, readDaemonInfo, resolveDaemonEntry, daemonLogFile, phonedockHome } from '../sdk/client.ts';
+import { PhoneDockClient, PhoneDockApiError, checkAppId, jobErrorText, matchName, tapMeta, readDaemonInfo, resolveDaemonEntry, daemonLogFile, phonedockHome, wakeNoticeText, SLEEPING_NOTE } from '../sdk/client.ts';
 import type { Device, Job, DeviceSpec, Expect, ExpectReport, InputAction, OsImage, ElementMatch, Handoff, HandoffState, SystemGesture, SystemPrompt } from '../sdk/client.ts';
 import { GLOBAL_ALIAS, GLOBAL_BOOLEAN, parseArgs, str, num, bool, table, type ParsedArgs } from './args.ts';
 import { localTime } from '../backends/ios-common.ts';
@@ -36,6 +36,8 @@ Devices:    devices|ls [--backend B --platform P --state S]
                    --width W --height H --dpi D --disguise [PROFILE] --carrier C --seed HEX
                    --boot --auto-start --no-wait]
             boot <id> [--window] [--cold] [--no-wait] | shutdown <id> | rm <id> [--force]
+            idle-sleep [off|10m|15m|30m|1h]   (no value: show it) put idle virtual phones to sleep after that long:
+              their memory is freed and any use wakes them where they left off (default 15m)
             clone <id> <name> | window <id> | update <id> [--name N] [--auto-start true|false]
             snapshot ls|save|restore|rm <id> [name] | info <id>
 Observe:    screenshot <id> [-o file] [--max-size N] [--format png|jpeg] | ui <id> [--json] [--no-ocr]
@@ -216,15 +218,22 @@ export function humanCell(d: Device): string {
   const r = h.reason.length > 40 ? h.reason.slice(0, 39) + '…' : h.reason;
   return `WAITING (${h.requestedBy}): "${r}"`;
 }
+const quietFlag = (a: ParsedArgs) => !!a.flags.quiet;
+
 export function devicesTable(list: Device[]): string {
   const rows = list.map((d) => ({
-    name: d.name, id: d.id, platform: d.platform, kind: d.kind, state: d.state,
+    name: d.name, id: d.id, platform: d.platform, kind: d.kind, state: d.sleep ? `${d.state} (sleeping)` : d.state,
     os: d.osVersion ?? '', screen: d.screen ? `${d.screen.width}x${d.screen.height}` : '',
     lease: leaseCell(d.lease), human: humanCell(d), managed: d.managed ? 'yes' : '',
   }));
   const cols = ['name', 'id', 'platform', 'state', 'os', 'screen', 'lease', ...(rows.some((r) => r.human) ? ['human'] : []), 'managed'];
   const waiting = list.filter((d) => humanCell(d));
-  return table(rows, cols) + (waiting.length
+  const sleeping = list.filter((d) => d.sleep);
+  const notSleeping = list.filter((d) => d.sleepFailure && d.state === 'running');
+  return table(rows, cols)
+    + (sleeping.length ? `\n\n${sleeping.map((d) => `${d.name} is ${SLEEPING_NOTE}.`).join('\n')}` : '')
+    + (notSleeping.length ? `\n\n${notSleeping.map((d) => `${d.name} couldn’t go to sleep, so it keeps running: ${d.sleepFailure!.message}`).join('\n')}` : '')
+    + (waiting.length
     ? `\n\n${waiting.map((d) => `${d.name} is waiting for a person: ${d.handoff!.reason}\n  Do it on the device (as the person: --owner app:human, no lease needed), then: phonedock handoff done ${d.handoff!.id} [--note "…"]   (or: phonedock handoff cancel ${d.handoff!.id})`).join('\n')}`
     : '');
 }
@@ -391,7 +400,9 @@ export async function run(argv: string[]): Promise<number> {
   if (a.flags.help) { process.stdout.write(await helpText() + '\n'); return 0; }
 
   const owner = str(a.flags, 'owner') ?? process.env.PHONEDOCK_OWNER ?? `cli:${userInfo().username}`;
-  const c = new PhoneDockClient({ owner, baseUrl: str(a.flags, 'url'), token: str(a.flags, 'token'), autoStart: a.flags.autoStartDaemon !== false });
+  const c = new PhoneDockClient({ owner, baseUrl: str(a.flags, 'url'), token: str(a.flags, 'token'), autoStart: a.flags.autoStartDaemon !== false,
+    // A sleeping phone woke for this command (idle sleep): say so on stderr, so stdout stays the command's output.
+    onWake: (w) => { if (!quietFlag(a)) process.stderr.write(`${wakeNoticeText(w)}\n`); } });
   const p = a.positionals;
   const quiet = !!a.flags.quiet;
   const dev = async (i = 1): Promise<Device> => { need(p, i + 1, '<device>'); return c.resolveDevice(p[i]); };
@@ -522,6 +533,12 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     case 'show': case 'device': { const d = await dev(); out(d); return 0; }
+    case 'idle-sleep': {
+      // phonedock idle-sleep [off|10m|15m|30m|1h]: when idle virtual phones go to sleep (docs/API.md "Idle sleep").
+      const st = p[1] ? await c.setIdleSleep(p[1]) : await c.idleSleep();
+      out(st, () => idleSleepText(st));
+      return 0;
+    }
     case 'info': {
       const d = await dev(); const i = await c.info(d.id) as Record<string, any>;
       out(i, () => {
@@ -549,7 +566,7 @@ export async function run(argv: string[]): Promise<number> {
     case 'boot': {
       const d = await dev();
       const job = await c.boot(d.id, { window: a.flags.window === true, coldBoot: a.flags.cold === true, headless: a.flags.window === true ? false : undefined, wait: wantWait(a), onProgress: progressPrinter(quiet) });
-      out(job ?? { ok: true }, () => `${d.name}: ${wantWait(a) ? 'booted' : `booting (job ${job?.id})`}`);
+      out(job ?? { ok: true }, () => `${d.name}: ${wantWait(a) ? (d.sleep && !a.flags.cold && a.flags.window !== true ? 'woke where it left off' : 'booted') : `booting (job ${job?.id})`}`);
       return 0;
     }
     case 'shutdown': case 'stop': { const d = await dev(); out(await c.shutdown(d.id), () => `${d.name}: shut down`); return 0; }
@@ -1092,3 +1109,21 @@ function isMainModule(): boolean {
   try { return pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url; } catch { return false; }
 }
 if (isMainModule()) void main();
+
+/** `phonedock idle-sleep` without --json. */
+export function idleSleepText(st: import('../sdk/client.ts').IdleSleepStatus): string {
+  const words = (s: number | null) => (s === null ? 'never' : s % 3600 === 0 ? `${s / 3600} hour${s === 3600 ? '' : 's'}` : s % 60 === 0 ? `${s / 60} minute${s === 60 ? '' : 's'}` : `${s} seconds`);
+  const head = st.timeoutSec === null
+    ? 'Idle virtual phones never go to sleep.'
+    : `Idle virtual phones go to sleep after ${words(st.timeoutSec)} without use: their memory is freed, and any use wakes them where they left off.`;
+  const src = st.source === 'env' ? `\n(Set by PHONEDOCK_IDLE_SLEEP for this service${st.saved !== undefined ? `; the saved setting is ${words(st.saved)}` : ''}.)` : '';
+  const lines = st.devices.map((d) => {
+    if (!d.eligible) return `  ${d.name}: never sleeps (${d.why})`;
+    if (d.sleep) return `  ${d.name}: sleeping since ${d.sleep.since}`;
+    if (d.state !== 'running') return `  ${d.name}: ${d.state}`;
+    if (d.sleepFailure) return `  ${d.name}: couldn’t go to sleep, keeps running (${d.sleepFailure.message})`;
+    if (d.keptAwakeBy?.length) return `  ${d.name}: awake (${d.keptAwakeBy.join('; ')})`;
+    return `  ${d.name}: idle ${words(d.idleSec ?? 0)}${d.sleepsInSec != null ? `, sleeps in ${words(d.sleepsInSec)}` : ''}`;
+  });
+  return head + src + (lines.length ? `\n${lines.join('\n')}` : '');
+}

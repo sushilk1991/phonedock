@@ -67,6 +67,18 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(len(seen), 1)
                 start.assert_not_called()
 
+    def test_idle_sleep_reads_and_sets_the_daemon_setting(self):
+        seen = []
+        def reply(handler, body):
+            seen.append((handler.command, handler.path, json.loads(body) if body else None))
+            json_reply(handler, {"timeoutSec": 1800, "source": "setting", "choices": [None, 600, 900, 1800, 3600], "devices": []})
+        with serve(reply) as url:
+            c = self.client(url)
+            self.assertEqual(c.idle_sleep()["timeoutSec"], 1800)
+            c.set_idle_sleep("30m")
+            c.set_idle_sleep(None)
+        self.assertEqual(seen, [("GET", "/v1/idle-sleep", None), ("POST", "/v1/idle-sleep", {"after": "30m"}), ("POST", "/v1/idle-sleep", {"timeoutSec": None})])
+
     def test_canonical_device_resolution_does_not_use_partial_inventory(self):
         c = PhoneDock(auto_start=False)
         device = {"id": "ios-simulator:pdtest-cold", "nativeId": "pdtest-cold", "name": "test-phone"}

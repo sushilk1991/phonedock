@@ -385,7 +385,8 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   if (flowIn.platform && device.platform !== flowIn.platform) return { result: { ...base, status: 'skip', message: `for ${flowIn.platform}; ${device.name} is ${device.platform}`, ms: 0 }, device };
   const os = osVersionNumber(device.osVersion);
   if (flowIn.minOS && os && compareVersions(os, flowIn.minOS) < 0) return { result: { ...base, status: 'skip', message: `needs ${device.platform} ${flowIn.minOS} or later; ${device.name} has ${os}`, ms: 0 }, device };
-  if (device.state !== 'running') return { result: { ...base, status: 'fail', message: `${device.name} is ${device.state}; boot it first (phonedock boot ${device.id})`, ms: 0 }, device };
+  // A sleeping phone (idle sleep) is usable: taking its lease below wakes it.
+  if (device.state !== 'running' && !device.sleep) return { result: { ...base, status: 'fail', message: `${device.name} is ${device.state}; boot it first (phonedock boot ${device.id})`, ms: 0 }, device };
 
   if (attempt === 1) log(`Flow: ${name} on ${device.name} (${device.osVersion ?? device.platform})`);
   const env = { ...flowIn.env, ...process.env, ...(o.env ?? {}) };
@@ -397,6 +398,7 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   const held = device.lease?.owner === c.owner;
   try { await c.lease(device.id); }
   catch (e) { return { result: { ...base, status: 'fail', message: `Could not lease ${device.name}: ${errInfo(e).message}${errInfo(e).detail ? ` (${errInfo(e).detail!.split('\n')[0]})` : ''}`, ms: Date.now() - t0 }, device }; }
+  if (device.sleep) device = await c.device(device.id).catch(() => device!);   // the lease woke it: its screen, state
 
   const ctx = new Ctx(c, device, flowIn, o);
   ctx.artifactDir = join(o.artifactsDir, `${slug(flowIn.name)}${attempts > 1 ? `-attempt${attempt}` : ''}`);

@@ -123,3 +123,12 @@ test('parseLaunchFlags: --arg (including leading dash), --extra, --args-json, --
     );
   }
 });
+
+test('devices: a sleeping phone says so, and that using it wakes it', () => {
+  const d = { id: 'android-emulator:pdtest-s24', backend: 'android-emulator', nativeId: 'pdtest-s24', name: 'pdtest-s24', platform: 'android', kind: 'virtual',
+    state: 'stopped', managed: true, capabilities: [], sleep: { since: '2026-11-24T10:00:00.000Z', reason: 'idle' } } as Device;
+  const out = devicesTable([d]);
+  assert.match(out, /stopped \(sleeping\)/);
+  assert.match(out, /pdtest-s24 is sleeping: memory freed; any use wakes it where it left off \(no need to start or create another\)\./);
+  assert.doesNotMatch(devicesTable([{ ...d, sleep: null }]), /sleeping/);
+});

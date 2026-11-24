@@ -54,6 +54,9 @@ struct DaemonClient: Sendable {
         req.timeoutInterval = timeout
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue(AppIdentity.owner, forHTTPHeaderField: "X-PhoneDock-Owner")
+        // Idle sleep: every read the app makes is it looking (list polling, the inspector, live views), so it never
+        // keeps a phone awake or wakes a sleeping one. What the person does (taps, keys, Resume) is a POST.
+        if method == "GET" { req.setValue("1", forHTTPHeaderField: "X-PhoneDock-Observe") }
         if let body {
             req.httpBody = try JSONEncoder().encode(AnyEncodable(body))
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")

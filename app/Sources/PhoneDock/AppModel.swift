@@ -35,7 +35,17 @@ final class AppModel {
     var components: [ComponentStatus] = []
     private var componentsPinnedBySelfTest = false
     private var devicesPinnedBySelfTest = false
-    var selection: String? { didSet { if let selection { UserDefaults.standard.set(selection, forKey: "lastSelection") } } }
+    var selection: String? {
+        didSet {
+            if let selection { UserDefaults.standard.set(selection, forKey: "lastSelection") }
+            // Choosing a sleeping phone is using it: it wakes. Not when the app picks it by itself (the last selection
+            // restored at launch, the next row after a delete), or an open app would wake every phone it shows.
+            if selection != oldValue, !automaticSelection, let d = selectedDevice, d.isSleeping, pending[d.id] == nil, deviceJobs[d.id] == nil { boot(d) }
+        }
+    }
+    /// Set while the app itself changes `selection` (see its didSet).
+    private var automaticSelection = false
+    private func selectAutomatically(_ id: String?) { automaticSelection = true; selection = id; automaticSelection = false }
     private var restoredSelection = false
     var jobs: [String: Job] = [:]           // tracked jobs by id
     var deviceJobs: [String: String] = [:]  // deviceId -> active job id (boot etc.)
@@ -339,7 +349,7 @@ final class AppModel {
         if let device {
             devicesPinnedBySelfTest = true
             devices = [device]
-            selection = device.id
+            selectAutomatically(device.id)
         } else {
             devicesPinnedBySelfTest = false
             Task { await refresh() }
@@ -383,7 +393,7 @@ final class AppModel {
         if !restoredSelection, !devices.isEmpty {
             restoredSelection = true
             let want = ProcessInfo.processInfo.environment["PHONEDOCK_SELECT"] ?? UserDefaults.standard.string(forKey: "lastSelection")
-            if let want, let d = devices.first(where: { $0.id == want || $0.name == want }) { selection = d.id }
+            if let want, let d = devices.first(where: { $0.id == want || $0.name == want }) { selectAutomatically(d.id) }
         }
         if let s = selection, !devices.contains(where: { $0.id == s }) { selection = nil }
         clearLeaseToastIfControlChanged()
@@ -765,7 +775,9 @@ final class AppModel {
 
     func boot(_ d: Device, cold: Bool = false, window: Bool = false) {
         guard let c = client else { return }
-        pending[d.id] = "Starting…"   // until the service has the job: the click answers at once
+        // A sleeping phone resumes where it left off (the service wakes it); anything else starts.
+        let resume = d.isSleeping && !cold && !window
+        pending[d.id] = resume ? SleepWords.resuming : "Starting…"   // until the service has the job: the click answers at once
         Task {
             do {
                 var body: [String: Any] = [:]
@@ -773,8 +785,8 @@ final class AppModel {
                 if window { body["window"] = true; body["headless"] = false }
                 let job = try await c.sendJob("POST", c.dev(d.id, "/boot"), json: body)
                 pending[d.id] = nil
-                await track(job, device: d.id, failure: "Couldn’t start \(d.name)")
-            } catch { pending[d.id] = nil; fail("Couldn’t start \(d.name)", error, device: d) }
+                await track(job, device: d.id, failure: resume ? "Couldn’t resume \(d.name)" : "Couldn’t start \(d.name)")
+            } catch { pending[d.id] = nil; fail(resume ? "Couldn’t resume \(d.name)" : "Couldn’t start \(d.name)", error, device: d) }
         }
     }
 
@@ -790,7 +802,7 @@ final class AppModel {
                     let order = self.devices.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                     let i = order.firstIndex { $0.id == d.id } ?? 0
                     let rest = order.filter { $0.id != d.id }
-                    self.selection = rest.isEmpty ? nil : rest[min(i, rest.count - 1)].id
+                    self.selectAutomatically(rest.isEmpty ? nil : rest[min(i, rest.count - 1)].id)
                 }
                 self.toast = Toast(kind: .success, title: "Deleted \(d.name)")
             }

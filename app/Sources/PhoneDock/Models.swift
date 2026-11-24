@@ -97,8 +97,15 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     var error: String?
     var meta: JSONValue?
     var handoff: Handoff?
+    /// Set while PhoneDock has put this phone to sleep after it sat unused (idle sleep): `state` is "stopped", its
+    /// memory is freed, and any use wakes it where it left off. Older services never send it.
+    var sleep: DeviceSleep?
+    /// The last time PhoneDock tried to put it to sleep and couldn't (it kept running).
+    var sleepFailure: SleepFailure?
 
     var caps: [String] { capabilities ?? [] }
+    /// Asleep in the idle-sleep sense (stopped to free memory), not a screen that is off: see `SleepWords`.
+    var isSleeping: Bool { sleep != nil && state == "stopped" }
     func can(_ c: String) -> Bool { caps.contains(c) }
     var isRunning: Bool { state == "running" }
     var leasedByAgent: Bool { if let l = lease { return l.owner != AppIdentity.owner }; return false }
@@ -119,6 +126,18 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
         default: return "desktopcomputer"
         }
     }
+}
+
+struct DeviceSleep: Codable, Hashable, Sendable { var since: String?; var reason: String? }
+struct SleepFailure: Codable, Hashable, Sendable { var at: String?; var code: String?; var message: String? }
+
+/// Idle sleep's words. "Asleep" and "Wake" already mean a phone whose screen is off ("The phone is asleep · Wake"),
+/// so a phone stopped to free its memory is "Sleeping", and starting it again is "Resume". The CLI and MCP say the same.
+enum SleepWords {
+    static let state = "Sleeping · memory freed · wakes when used"
+    static let short = "Sleeping · memory freed"
+    static let resume = "Resume"
+    static let resuming = "Resuming…"
 }
 
 /// An agent asking the human to do something it can't (Face ID, passcode, Apple ID sign-in, CAPTCHA…).

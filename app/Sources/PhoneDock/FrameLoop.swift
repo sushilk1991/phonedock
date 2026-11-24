@@ -69,6 +69,12 @@ final class FrameLoop {
 
     func stop() { cancelTask(); deviceId = nil; asleep = false; darkChecks = 0 }
 
+    /// The window can't be seen: stop fetching but keep the picture, so it is there at once when the window is back
+    /// (`run` with the same device carries on). A live view nobody sees must not keep a phone awake (idle sleep).
+    func pause() { cancelTask() }
+    /// Self-tests run on a Space nobody looks at; they keep streaming unless PHONEDOCK_APP_SELFTEST_OCCLUSION=1.
+    static let pauseWhenHidden = !SelfTest.enabled || ProcessInfo.processInfo.environment["PHONEDOCK_APP_SELFTEST_OCCLUSION"] == "1"
+
     private func cancelTask() { task?.cancel(); task = nil; generation += 1 }
 
     private func clearPicture() {

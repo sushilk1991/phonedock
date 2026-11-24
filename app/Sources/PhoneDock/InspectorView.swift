@@ -417,9 +417,18 @@ struct InfoTab: View {
                         ProgressView().controlSize(.mini)
                         Text(operation)
                     } else {
-                        StatusDot(status: PDStatus(deviceState: device.state))
-                        Text(PDStatus(deviceState: device.state).label)
+                        StatusDot(status: PDStatus(device: device))
+                        Text(PDStatus(device: device).label)
                     }
+                }
+            }
+            if device.isRunning, let failure = device.sleepFailure {
+                GridRow {
+                    label("Idle sleep")
+                    Text("Couldn’t go to sleep, so it keeps running: \(failure.message ?? "the save failed")")
+                        .foregroundStyle(Theme.Ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .testAnchor("sleep-failure")
                 }
             }
             if let who = device.controllerName {
@@ -1608,7 +1617,7 @@ enum ActivitySentence {
         switch kind {
         case "snapshot.save": return Mark(symbol: "square.and.arrow.down", tint: quiet)
         case "snapshot.restore": return Mark(symbol: "clock.arrow.circlepath", tint: quiet)
-        case "device.start", "device.shutdown": return Mark(symbol: "power", tint: quiet)
+        case "device.start", "device.shutdown", "device.sleep", "device.wake": return Mark(symbol: "power", tint: quiet)
         case "device.restart": return Mark(symbol: "arrow.clockwise", tint: quiet)
         case "device.crashed", "device.disconnected": return Mark(symbol: "exclamationmark.triangle.fill", tint: Theme.Status.error)
         default: return nil
@@ -1686,6 +1695,10 @@ enum ActivitySentence {
         case "device.restart": return "Restarted the device"
         case "device.restart_failed": return "Couldn’t restart the device: \(a["error"]?.stringValue ?? "it failed")"
         case "device.crashed": return a["summary"]?.stringValue ?? "The device stopped unexpectedly"
+        case "device.sleep": return a["summary"]?.stringValue ?? "Went to sleep after sitting unused (memory freed)"
+        case "device.wake": return a["summary"]?.stringValue ?? "Woke where it left off"
+        case "device.sleep_failed": return a["summary"]?.stringValue ?? "Couldn’t go to sleep, so it keeps running"
+        case "device.wake_failed": return "Couldn’t wake the device: \(a["error"]?.stringValue ?? "it failed")"
         case "device.disconnected": return a["summary"]?.stringValue ?? "The device disconnected"
         case "appData.export": return "Saved app data for \(app)"
         case "appData.import": return "Restored app data for \(app)"

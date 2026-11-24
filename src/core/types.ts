@@ -86,6 +86,34 @@ export interface Device {
   handoff?: Handoff | null;      // pending human handoff (request_human); filled in by the daemon, not backends
   error?: string;
   meta?: Record<string, unknown>; // backend extras (adb serial, console port, pid, …)
+  /** Idle sleep (added in 0.7.0; docs/API.md "Idle sleep"): set while PhoneDock has put this phone to sleep after it
+   *  sat unused. `state` is then `stopped` and the phone's memory is freed; the next request that needs it running
+   *  wakes it where it left off. Absent or null: not sleeping (a stopped phone without it was stopped on purpose).
+   *  Filled in by the daemon, not backends. */
+  sleep?: DeviceSleep | null;
+  /** The last time PhoneDock tried to put this phone to sleep and couldn't (it kept running, nothing was lost). Cleared
+   *  when the phone is next used, stopped or started. Filled in by the daemon. */
+  sleepFailure?: { at: string; code: string; message: string } | null;
+}
+
+/** Why and since when a phone is sleeping (Device.sleep). */
+export interface DeviceSleep { since: string; reason: 'idle' }
+
+/** What a backend saved to put a device to sleep, kept by the daemon (on disk) until the device wakes. */
+export interface SleepState {
+  snapshot: string;              // the backend's own name for the saved state
+  savedAt: string;               // ISO
+  bootId?: string;               // the guest kernel's boot id when it was saved (a cold boot gets a new one)
+  uptimeSec?: number;            // the guest's uptime just before the save (a resumed guest is at least this old)
+}
+
+/** How a device came back from sleep. `resumed: false` means it started fresh (`note` says why). */
+export interface WakeReport {
+  resumed: boolean;
+  via: 'quickboot' | 'snapshot' | 'cold';
+  note?: string;
+  /** Guest clock against the Mac's when it woke, and whether PhoneDock set it. */
+  clock?: { skewSec: number; set: boolean; error?: string };
 }
 
 export interface OsImage {
@@ -521,6 +549,8 @@ export interface FrameStream {
   stop(): void;
   /** Start capturing again at the screen's current size (after a rotation). Without it the daemon stops the stream. */
   restart?(): void;
+  /** True while the device's display is off (nothing to watch until it wakes), when the stream knows. */
+  asleep?(): boolean;
 }
 
 /** Codec of a live video stream. */
@@ -582,6 +612,20 @@ export interface Backend {
   restoreSnapshot?(nativeId: string, name: string): Promise<void>;
   deleteSnapshot?(nativeId: string, name: string): Promise<void>;
   openWindow?(nativeId: string): Promise<void>;                     // native low-latency viewer (Simulator.app / scrcpy / emulator window)
+
+  // ── idle sleep (optional, added in 0.7.0; the daemon only sleeps devices whose backend has all three) ──
+  /** Save the running device's whole state (memory and disks) so a later boot resumes it, and check that the save was
+   *  written. Throws when it can't (e.g. `snapshot_vulkan`); the device keeps running untouched. Refuses devices
+   *  PhoneDock didn't create (`forbidden`). */
+  saveSleep?(nativeId: string): Promise<SleepState>;
+  /** Stop a device after saveSleep. Resolves once its process has exited, so its memory is free. */
+  stopAfterSleep?(nativeId: string): Promise<void>;
+  /** Boot a device stopped after saveSleep and bring back that state. Resolves when it is usable. */
+  wakeFromSleep?(nativeId: string, saved: SleepState, opts?: { onProgress?: (line: string) => void }): Promise<WakeReport>;
+  /** Throw away a sleep save that won't be used (the sleep was cancelled, or the device woke). Never throws. */
+  discardSleep?(nativeId: string): Promise<void>;
+  /** A backend-specific reason a running device must stay awake right now (its own window is open, say), if any. */
+  keepAwake?(nativeId: string): Promise<string | undefined>;
 
   // ── observation ────────────────────────────────────────────────────────
   screenshot(nativeId: string): Promise<Buffer>;                    // PNG, full resolution

@@ -104,6 +104,7 @@ enum Clipboard {
 ///                                                       (so text can never reach the device screen)
 ///   {"op":"screenshot","path":"/tmp/x.png","sheet":false}  screencapture -l of the window (or its sheet)
 ///   {"op":"settings","tab":"general"}                    open the Settings window on a tab: general | agents | advanced
+///   {"op":"idleSleep","choice":"30 minutes"}            choose in General › Memory (its picker's own save, through the service)
 ///   {"op":"screenshotWindow","path":"/tmp/s.png","title":"Settings"}  capture another app window (title or
 ///                                                       identifier contains `title`; "Settings" matches the Settings window)
 ///   {"op":"closeWindow","title":"Settings"}             close that window
@@ -167,6 +168,8 @@ enum SelfTest {
     static var setInspector: ((Bool) -> Void)?
     /// Set by the root view: switches the inspector's tab.
     static var setInspectorTab: ((InspectorTab) -> Void)?
+    /// Settings › General › Memory's picker, while it is shown (a SwiftUI menu can't be chosen without opening it).
+    static var setIdleSleep: ((Int) -> Void)?
     /// Set by the Elements tab: selects the first row containing the text; returns that row (nil: no match).
     static var selectElement: ((String) -> String?)?
     /// Set by the Logs tab while shown: "all", "front", or an app id.
@@ -751,6 +754,13 @@ enum SelfTest {
             let p = CGPoint(x: num(s, "wx"), y: (target.contentView?.bounds.height ?? target.frame.height) - num(s, "wy"))
             log("#\(i) click window=\(p)\(target === w ? "" : " (sheet)") hit=\(String(describing: target.contentView?.hitTest(p).map { type(of: $0) }))")
             await click(target, p, allowScreen: s["screen"] as? Bool == true)
+        case "idleSleep":   // {"op":"idleSleep","choice":"30 minutes"} – choose in Settings › General › Memory, as the picker would
+            let want = s["choice"] as? String ?? ""
+            guard let v = IdleSleepSection.choices.first(where: { $0.1 == want })?.0 else { fail("#\(i) idleSleep \"\(want)\" FAIL unknown choice"); return }
+            guard let set = setIdleSleep else { fail("#\(i) idleSleep FAIL the Memory section isn't shown"); return }
+            set(v)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            log("#\(i) idleSleep \(want)")
         case "choose":
             let label = s["label"] as? String ?? "", item = s["item"] as? String ?? ""
             log("#\(i) choose \"\(label)\" → \"\(item)\": \(choose(label, item, in: w))")
