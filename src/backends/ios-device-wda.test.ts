@@ -89,3 +89,32 @@ test('a device destination other than this phone’s id is refused before anythi
   const e = await errOf(backend.wdaSetup(UDID, { destination: 'platform=iOS,name=Other iPhone' }));
   assert.equal(e?.code, 'bad_request');
 });
+
+test('a phone whose tunnel idled down: input brings it up (devicectl’s details answer has the address before the list does)', async (t) => {
+  const server = createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/status') { res.end(JSON.stringify({ value: { ready: true, ios: { ip: null } } })); return; }
+    if (req.url === '/session') { res.end(JSON.stringify({ sessionId: 's1', value: { sessionId: 's1' } })); return; }
+    res.end(JSON.stringify({ value: { width: 375, height: 812 } }));
+  });
+  const bound = await new Promise<boolean>((r) => { server.once('error', () => r(false)); server.listen(8100, '127.0.0.1', () => r(true)); });
+  if (!bound) { t.skip('port 8100 is in use on this Mac'); return; }
+  try {
+    writeCfg(setUpCfg);
+    // The details answer carries the address; the list still shows none for a while.
+    fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, wakesTo: '127.0.0.1', listLag: 5 }]; fake.scenario.runners = {}; fake.save();
+    await backend.listDevices();
+    await backend.tap!(UDID, 10, 10);
+    // The details answer has no address: the list is read again until it shows one (within ~10 s).
+    fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, wakesTo: '127.0.0.1', listLag: 2, detailsOmitsTunnel: true }]; fake.save();
+    await backend.listDevices();
+    await new Promise((r) => setTimeout(r, 3100));                     // past the list cache
+    await backend.tap!(UDID, 10, 10);
+    // Gone (not listed, devicectl can’t reach it): refused at once, not after ten seconds.
+    fake.scenario.phones = []; fake.save();
+    await backend.listDevices();
+    const t0 = Date.now();
+    assert.equal((await errOf(backend.tap!(UDID, 10, 10)))?.code, 'no_device');
+    assert.ok(Date.now() - t0 < 5000, `refused in ${Date.now() - t0} ms`);
+  } finally { server.closeAllConnections?.(); server.close(); }
+});

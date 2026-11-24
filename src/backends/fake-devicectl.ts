@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 export interface FakePhone {
   udid: string; coreDeviceId: string; name?: string; osVersion?: string;
   tunnelIp?: string; transport?: 'wired' | 'localNetwork';
+  /** An idle phone: its tunnel is down until `device info details` brings it up at this address. That answer carries
+   *  the address unless `detailsOmitsTunnel`; `list devices` shows it only `listLag` lists later (as on a real Mac). */
+  wakesTo?: string; listLag?: number; detailsOmitsTunnel?: boolean;
 }
 export interface FakeScenario {
   phones: FakePhone[];
@@ -63,7 +66,17 @@ async function main(file: string, log: string, argv: string[]): Promise<number> 
   const reply = (result: unknown) => { writeFileSync(out, JSON.stringify({ info: { outcome: 'success' }, result })); return 0; };
   const sleep = () => new Promise((r) => setTimeout(r, s.delayMs ?? 0));
   const [a, b, c] = argv.slice(1);
-  if (a === 'list' && b === 'devices') { await sleep(); return reply({ devices: s.phones.map(device) }); }
+  if (a === 'list' && b === 'devices') {
+    await sleep();
+    const shown = s.phones.map((p) => {
+      if (!p.wakesTo || p.tunnelIp) return device(p);
+      if (p.listLag !== undefined && p.listLag <= 0) { p.tunnelIp = p.wakesTo; return device(p); }   // caught up
+      if (p.listLag !== undefined) p.listLag--;                                                     // woken, list lags
+      return device(p);
+    });
+    writeFileSync(file, JSON.stringify(s));
+    return reply({ devices: shown });
+  }
   if (!phone) { writeFileSync(out, JSON.stringify({ info: { outcome: 'failed' }, error: { description: `no device ${dev}` } })); return 1; }
   if (a === 'device' && b === 'info' && c === 'processes') {
     await sleep();
@@ -80,7 +93,14 @@ async function main(file: string, log: string, argv: string[]): Promise<number> 
     return reply({});
   }
   if (a === 'device' && b === 'info' && c === 'lockState') return reply({ passcodeRequired: false, unlockedSinceBoot: true });
-  if (a === 'device' && b === 'info' && c === 'details') return reply({ deviceProperties: { developerModeStatus: 'enabled' } });
+  if (a === 'device' && b === 'info' && c === 'details') {
+    if (phone.wakesTo && !phone.tunnelIp) {
+      phone.listLag ??= 2;
+      writeFileSync(file, JSON.stringify(s));
+      return reply(device({ ...phone, tunnelIp: phone.detailsOmitsTunnel ? undefined : phone.wakesTo }));
+    }
+    return reply(device(phone));
+  }
   return reply({});
 }
 

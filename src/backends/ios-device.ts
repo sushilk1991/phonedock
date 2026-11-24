@@ -779,10 +779,8 @@ function tunnelIpOf(d: DcDevice): string | undefined {
 
 /** The set-up phone's WebDriverAgent, as of now (a devicectl list at most 3 s old; /status at most 5 s old). */
 async function setUpBase(udid: string): Promise<string> {
-  const d = (await physicalDevices()).find((x) => hw(x).udid === udid || x.identifier === udid);
-  const ip = d ? tunnelIpOf(d) : undefined;
-  if (!ip) throw new PhoneDockError('The iPhone isn’t connected', 'no_device', 409, ['Plug it in by USB, or wake it on the same Wi-Fi as this Mac.'], `devicectl reports no tunnel address for ${udid}`);
-  const base = urlFor(ip, WDA_PORT);
+  // A phone left idle drops its tunnel while devicectl still lists it: bring it up rather than call it disconnected.
+  const base = urlFor(await phoneTunnel(udid), WDA_PORT);
   if (!(await wdaStatus(base)).ok) {
     throw new PhoneDockError('WebDriverAgent isn’t running on this iPhone', 'wda_not_ready', 503,
       [`Press Set Up Control in PhoneDock, or run \`phonedock ios wda-setup --udid ${udid}\` (about 8 s). It doesn’t come back by itself after the iPhone or PhoneDock restarts.`]);
@@ -790,11 +788,30 @@ async function setUpBase(udid: string): Promise<string> {
   return base;
 }
 
-/** The phone's end of this Mac's CoreDevice tunnel; a tunnel that isn't up is brought up with a devicectl query. */
-async function phoneTunnel(udid: string): Promise<string> {
-  const look = async (fresh: boolean) => { const d = (await physicalDevices(fresh)).find((x) => hw(x).udid === udid || x.identifier === udid); return d ? tunnelIpOf(d) : undefined; };
-  const ip = (await look(false)) ?? (await look(true))
-    ?? (await devicectl(['device', 'info', 'details', '--device', udid], { timeoutMs: 30_000 }).catch(() => undefined), await look(true));
+/** The phone's end of this Mac's CoreDevice tunnel. A tunnel that idled down comes up with a devicectl query, whose
+ *  answer has the address before `list devices` does (seen on a phone idle for an hour): that answer, else the fresh
+ *  list for up to 10 s. A phone devicectl neither lists nor answers for is refused at once. One wake per phone. */
+const waking = new Map<string, Promise<string>>();
+function phoneTunnel(udid: string): Promise<string> {
+  const inFlight = waking.get(udid);
+  if (inFlight) return inFlight;
+  const p = wakeTunnel(udid).finally(() => waking.delete(udid));
+  waking.set(udid, p);
+  return p;
+}
+async function wakeTunnel(udid: string): Promise<string> {
+  const find = async (fresh: boolean) => (await physicalDevices(fresh)).find((x) => hw(x).udid === udid || x.identifier === udid);
+  const seen = (await find(false)) ?? (await find(true));
+  let ip = seen ? tunnelIpOf(seen) : undefined;
+  if (!ip) {
+    const details = await devicectl<DcDevice>(['device', 'info', 'details', '--device', udid], { timeoutMs: 30_000 }).catch(() => undefined);
+    ip = details ? tunnelIpOf(details) : undefined;
+    for (const end = Date.now() + 10_000; !ip && (details || seen) && Date.now() < end;) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const d = await find(true).catch(() => undefined);
+      ip = d ? tunnelIpOf(d) : undefined;
+    }
+  }
   if (ip) return ip;
   throw new PhoneDockError('The iPhone’s developer connection isn’t up', 'no_device', 409,
     ['Plug it in by USB, or wake it on the same Wi-Fi as this Mac, then try again.'], `devicectl reports no tunnel address for ${udid}`);
