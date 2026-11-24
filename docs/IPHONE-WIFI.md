@@ -156,8 +156,8 @@ so).
 
 **What's already running is left alone.** If WebDriverAgent already runs on the phone and is provably private to
 this Mac (it answers on this Mac's tunnel and the phone's Wi-Fi address refuses it), Set Up Control uses it. If one
-runs that isn't, or can't be shown to be (another Mac's, Xcode's, a shared one, or a phone with no Wi-Fi address to
-check), setup leaves it running and says so: **Stop Control** ends it, then Set Up Control starts PhoneDock's.
+runs that isn't, or can't be shown to be (another Mac's, Xcode's, a shared one, several at once, or a phone with no
+Wi-Fi address to check), setup leaves it running and says so: **Stop Control** ends it, then Set Up Control starts PhoneDock's.
 
 **Control doesn't come back by itself.** When the iPhone restarts, or PhoneDock restarts (an update, say), control
 may stop: taps then say `wda_not_ready`. Press Set Up Control again (about 8 seconds); if WebDriverAgent is still
@@ -173,7 +173,10 @@ keep working.
 Turn on **Let other Macs on this Wi-Fi control this iPhone** when you set up control (or pass `--share`). That launch
 listens on the phone's Wi-Fi address too, and the Info tab shows the address. **Anyone on that Wi-Fi can then control
 the iPhone, without a password, until you press Stop Control or the iPhone restarts.** Sharing isn't a setting: to
-turn it off, press Stop Control, then Set Up Control without it. While WebDriverAgent runs, setting up again (shared
+turn it off, press Stop Control, then Set Up Control without it. About once a minute PhoneDock checks whether the
+phone answers on its Wi-Fi address and says so in the app, under `phonedock devices` and in the MCP device list, also
+after a restart or a setup from the CLI; when it can't check (Local Network permission), it says that, never
+"private". While WebDriverAgent runs, setting up again (shared
 or not) says it is already running; Stop Control first. On the other Mac:
 
 ```sh
@@ -209,7 +212,11 @@ Agents use the MCP tools `discover_devices` and `connect_device`. The HTTP route
 - With a free Apple ID, the signing lasts **7 days**. Set Up Control signs it again.
 - After the iPhone restarts, or PhoneDock restarts, press Set Up Control again: nothing relaunches WebDriverAgent by
   itself.
-- Simulators: `phonedock ios wda-setup --udid <id> --destination 'platform=iOS Simulator,id=<id>'` works as before.
+- Simulators: `phonedock ios wda-setup --udid <id> --destination 'platform=iOS Simulator,id=<id>'` works as before. A
+  destination must name the same device as `--udid`.
+- A WebDriverAgent repackaged under another app name isn't recognised as one: Stop Control doesn't see it.
+- The private check asks the phone's Wi-Fi address from this Mac. If this Mac is on another network whose addresses
+  overlap the phone's (the phone on USB), another device can answer for it.
 - WebDriverAgent is © Facebook and contributors, BSD licence ([tools/licenses/WebDriverAgent-LICENSE](../tools/licenses/WebDriverAgent-LICENSE)).
 - The phone and the Mac must be on the same network. Keep the phone unlocked; Auto-Lock › Never helps.
 - Back is an edge swipe.
