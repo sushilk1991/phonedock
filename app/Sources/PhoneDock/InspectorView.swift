@@ -1071,7 +1071,7 @@ struct ElementsTab: View {
         guard available, device.isRunning, let c = model.client else { lines = []; state = .idle; return }
         state = .loading
         do {
-            let t = try await c.text(c.dev(device.id, "/ui"), query: ["format": "text"])
+            let t = try await c.text(c.dev(device.id, "/ui"), query: ["format": "text"], observe: true)
             lines = t.split(separator: "\n", omittingEmptySubsequences: true).map(String.init).filter { !$0.hasPrefix("#") }
             rows = lines.map(ElementRow.init)
             Self.lastTree[device.id] = lines
@@ -1463,7 +1463,7 @@ struct LogsTab: View {
                 guard scopedApp != nil else { text = ""; appliedFilter = f; state = .loaded; return }
             }
             if let a = scopedApp { q["app"] = a.id }
-            let t = try await c.text(c.dev(device.id, "/logs"), query: q)
+            let t = try await c.text(c.dev(device.id, "/logs"), query: q, observe: true)
             text = t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : t
             appliedFilter = f
             state = .loaded

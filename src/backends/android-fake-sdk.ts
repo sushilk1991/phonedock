@@ -8,6 +8,7 @@
 //  - a quick boot resumes `default_boot`; with `-force-snapshot-load` a missing or bad one makes the emulator delete it
 //    and exit, as the real one does;
 //  - `dumpsys power` reports the last user activity as "(N ms ago)".
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +27,8 @@ export interface FakeSdkState {
   instrument: boolean;
   shellFails: boolean;
   wakefulness: 'Awake' | 'Asleep';
+  /** How long a starting emulator takes before adb lists it. */
+  bootDelayMs: number;
 }
 
 const SCRIPT = String.raw`#!/usr/bin/env node
@@ -64,10 +67,9 @@ if (tool !== 'adb') {   // emulator (or a renamed copy of it)
     if (argv.includes('-force-snapshot-load')) { console.log('Failed to load snapshot; Emulator will delete existing snapshot and exit.'); process.exit(0); }
   } else if (!snap && argv.includes('-force-snapshot-load')) { console.log('Failed to load snapshot'); process.exit(0); }
   const guest = snap ? { bootId: snap.bootId, uptimeBase: snap.uptime, startedAt: Date.now(), token: snap.token } : { bootId: crypto.randomUUID(), uptimeBase: 0, startedAt: Date.now() };
-  s.emulators['emulator-' + port] = { name, path: dir, pid: process.pid, guest };
-  write(s);
+  setTimeout(() => { const s2 = read(); s2.emulators['emulator-' + port] = { name, path: dir, pid: process.pid, guest }; write(s2); }, s.bootDelayMs || 0);
   process.on('SIGTERM', () => process.exit(0));
-  setInterval(() => {}, 1 << 30);
+  setTimeout(() => process.exit(0), 300_000);   // never outlives a test run by long, even orphaned
 } else {
   const s = read();
   for (const [k, e] of Object.entries(s.emulators)) if (!alive(e.pid)) delete s.emulators[k];
@@ -125,13 +127,15 @@ export interface FakeSdk {
   /** Every adb/emulator command line run so far, oldest first ("adb -s emulator-5560 emu kill"). */
   log(): string[];
   clearLog(): void;
+  /** Stop every fake emulator this SDK started (also orphaned ones). */
+  killAll(): void;
 }
 
 /** A fresh fake SDK; points ANDROID_HOME and ANDROID_SDK_ROOT at it. */
 export function fakeAndroidSdk(initial: Partial<FakeSdkState> = {}): FakeSdk {
   const root = mkdtempSync(join(tmpdir(), 'pd-fake-sdk-'));
   const statePath = join(root, 'state.json');
-  const st: FakeSdkState = { emulators: {}, avdPaths: {}, badSnapshots: [], exitSave: true, ignoreKill: false, userActivityAgoMs: 3_600_000, instrument: false, shellFails: false, wakefulness: 'Awake', ...initial };
+  const st: FakeSdkState = { emulators: {}, avdPaths: {}, badSnapshots: [], exitSave: true, ignoreKill: false, userActivityAgoMs: 3_600_000, instrument: false, shellFails: false, wakefulness: 'Awake', bootDelayMs: 0, ...initial };
   writeFileSync(statePath, JSON.stringify(st));
   writeFileSync(statePath + '.log', '');
   const script = SCRIPT.replace('__STATE__', JSON.stringify(statePath));
@@ -148,6 +152,7 @@ export function fakeAndroidSdk(initial: Partial<FakeSdkState> = {}): FakeSdk {
     set(patch) { writeFileSync(statePath, JSON.stringify({ ...read(), ...patch })); },
     log: () => readFileSync(statePath + '.log', 'utf8').split('\n').filter(Boolean),
     clearLog: () => writeFileSync(statePath + '.log', ''),
+    killAll() { try { execFileSync('/usr/bin/pkill', ['-f', join(root, 'emulator')]); } catch { /* none left */ } },
   };
 }
 

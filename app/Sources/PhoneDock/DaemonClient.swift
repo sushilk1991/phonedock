@@ -126,8 +126,8 @@ struct DaemonClient: Sendable {
         return cur
     }
 
-    func text(_ path: String, query: [String: String] = [:]) async throws -> String {
-        let (data, _) = try await raw("GET", path, query: query)
+    func text(_ path: String, query: [String: String] = [:], observe: Bool = false) async throws -> String {
+        let (data, _) = try await raw("GET", path, query: query, observe: observe)
         return String(decoding: data, as: UTF8.self)
     }
 

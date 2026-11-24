@@ -9,7 +9,7 @@ import { fakeAndroidSdk } from './android-fake-sdk.ts';
 const sdk = fakeAndroidSdk({ wakefulness: 'Asleep' });
 const { adbFrameStream } = await import('./android-video.ts');
 const emu = spawn(join(sdk.root, 'emulator', 'emulator'), ['-avd', 'pdtest-v', '-port', '5580'], { stdio: 'ignore' });
-after(() => { emu.kill('SIGTERM'); });
+after(() => { emu.kill('SIGTERM'); sdk.killAll(); });
 
 test('screenshot fallback: asleep() follows the display, not the encoder (#13)', { timeout: 60_000 }, async () => {
   while (!sdk.state().emulators['emulator-5580']) await new Promise((r) => setTimeout(r, 50));

@@ -298,7 +298,7 @@ struct CrashReportSheet: View {
         }
         loadingFull = full; defer { loadingFull = false }
         do {
-            let raw = try await c.text(c.dev(device.id, "/crashes/\(DaemonClient.enc(crash.id))"), query: full ? ["full": "1"] : [:])
+            let raw = try await c.text(c.dev(device.id, "/crashes/\(DaemonClient.enc(crash.id))"), query: full ? ["full": "1"] : [:], observe: true)
             if let obj = try? JSONDecoder().decode(JSONValue.self, from: Data(raw.utf8)), let t = obj["text"]?.stringValue {
                 text = t
                 if case .bool(let b)? = obj["truncated"] { truncated = b } else { truncated = false }

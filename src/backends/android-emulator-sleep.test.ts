@@ -32,10 +32,10 @@ async function stopAll() {
   for (const c of others.splice(0)) c.kill('SIGTERM');
   for (const e of Object.values(sdk.state().emulators)) { try { process.kill(e.pid, 'SIGTERM'); } catch { /* gone */ } }
   await until(() => Object.values(sdk.state().emulators).every((e) => { try { process.kill(e.pid, 0); return false; } catch { return true; } }));
-  sdk.set({ emulators: {}, avdPaths: {}, badSnapshots: [], ignoreKill: false, exitSave: true, instrument: false, shellFails: false, userActivityAgoMs: 3_600_000 });
+  sdk.set({ emulators: {}, avdPaths: {}, badSnapshots: [], ignoreKill: false, exitSave: true, instrument: false, shellFails: false, userActivityAgoMs: 3_600_000, bootDelayMs: 0 });
 }
 beforeEach(async () => { await stopAll(); sdk.clearLog(); });
-after(stopAll);
+after(async () => { await stopAll().catch(() => undefined); sdk.killAll(); });
 
 test('a same-named emulator running another AVD is never touched by sleep, wake or cleanup (#1)', async () => {
   foreignEmulator(5570, '/opt/other-avds/pdtest-x.avd');   // another AVD home (Android Studio's)
@@ -98,6 +98,7 @@ test('public snapshot names that normalise to the checkpoint are refused; a pers
   await backend.stopAfterSleep!(NAME);
   await backend.wakeFromSleep!(NAME, saved);
   assert.ok(snaps().includes('phonedock_sleep'), 'the wake leaves the person’s snapshot alone');
+  await backend.deleteSnapshot!(NAME, 'phonedock_sleep');
 });
 
 test('use PhoneDock can’t see keeps it awake: guest input, instrumentation, adb sessions; unknown means awake (#6)', async () => {
@@ -122,4 +123,46 @@ test('use PhoneDock can’t see keeps it awake: guest input, instrumentation, ad
     await new Promise((r) => setTimeout(r, 3500));   // past the shared `ps` cache
     assert.match((await ka()) ?? '', /adb session/i);
   } finally { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
+});
+
+test('two wakes at once: one boots, the other waits for it; nothing touches the disk images of a running emulator', async () => {
+  await backend.boot!(NAME, { headless: true });
+  const saved = await backend.saveSleep!(NAME);
+  await backend.stopAfterSleep!(NAME);
+  sdk.set({ bootDelayMs: 1500 });
+  const [r1, r2] = await Promise.all([backend.wakeFromSleep!(NAME, saved), backend.wakeFromSleep!(NAME, saved)]);
+  assert.equal(r1.resumed, true); assert.equal(r2.resumed, true);
+  assert.equal(Object.keys(sdk.state().emulators).length, 1, 'one emulator');
+  assert.ok(!existsSync(join(dir, 'phonedock-sleep-recovery')));
+});
+
+test('a wake whose boot times out stops that emulator, and only then puts the saved state back', async () => {
+  await backend.boot!(NAME, { headless: true });
+  const saved = await backend.saveSleep!(NAME);
+  await backend.stopAfterSleep!(NAME);
+  sdk.set({ bootDelayMs: 60_000 });   // never reachable in time
+  await assert.rejects(backend.wakeFromSleep!(NAME, saved, { bootTimeoutMs: 1500 } as never));
+  const { execFileSync } = await import('node:child_process');
+  const left = execFileSync('/bin/ps', ['-axww', '-o', 'args=']).toString().split('\n').filter((l) => / -avd pdtest-x /.test(l) && /emulator/.test(l));
+  assert.deepEqual(left, [], 'no emulator left running');
+  assert.ok(snaps().includes('default_boot'), 'the saved state is there');
+  sdk.set({ bootDelayMs: 0 });
+  assert.equal((await backend.wakeFromSleep!(NAME, saved)).resumed, true);
+});
+
+test('enoughDiskForSleep: the guest’s RAM plus a gigabyte', async () => {
+  const { enoughDiskForSleep } = await import('./android-emulator.ts');
+  const GB = 1024 ** 3;
+  assert.equal(enoughDiskForSleep(4 * GB, 3072), true);
+  assert.equal(enoughDiskForSleep(4 * GB - 1, 3072), false);
+  assert.equal(enoughDiskForSleep(10 * GB, 8192), true);
+});
+
+test('adbSessionOn: someone’s adb session on this serial, never PhoneDock’s own live view (also when orphaned)', async () => {
+  const { adbSessionOn } = await import('./android-emulator.ts');
+  assert.equal(adbSessionOn('/opt/sdk/platform-tools/adb -s emulator-5554 logcat', 'emulator-5554'), 'logcat');
+  assert.equal(adbSessionOn('adb -s emulator-5554 shell', 'emulator-5554'), 'shell');
+  assert.equal(adbSessionOn('adb -s emulator-5556 shell', 'emulator-5554'), undefined, 'another phone');
+  assert.equal(adbSessionOn('/opt/sdk/platform-tools/adb -s emulator-5554 logcat -T 1 -v brief -s ScreenRecord:D PowerManagerService:I', 'emulator-5554'), undefined);
+  assert.equal(adbSessionOn('/opt/sdk/platform-tools/adb -s emulator-5554 exec-out screenrecord --output-format=h264 --size 720x1560 --bit-rate 6000000 --time-limit 0 -', 'emulator-5554'), undefined);
 });

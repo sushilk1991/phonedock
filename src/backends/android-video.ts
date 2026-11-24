@@ -74,6 +74,9 @@ interface Pipe {
 interface Sub { maxSize: number; onFail: (e: Error) => void }
 
 const sources = new Map<string, ScreenSource>();
+// The adb children (screenrecord, the logcat watcher) must not outlive the daemon: an orphaned `adb -s <serial> logcat`
+// follows forever, and would look like someone else's adb session to idle sleep.
+process.once('exit', () => { for (const s of [...sources.values()]) s.close(); });
 /** The serial's shared source (created on first use; it closes when its last subscriber leaves). */
 export function screenSource(serial: string): ScreenSource {
   let s = sources.get(serial);

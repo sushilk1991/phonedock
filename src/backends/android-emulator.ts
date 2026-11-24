@@ -5,7 +5,7 @@ import { constants as fsc, copyFileSync, cpSync, existsSync, mkdirSync, openSync
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { run, sleep } from '../core/exec.ts';
 import { stateDir, toolEnv, which } from '../core/paths.ts';
 import {
@@ -764,45 +764,54 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     serialCache.delete(s);
   },
 
-  async wakeFromSleep(name: string, saved: SleepState, opts: { onProgress?: (l: string) => void } = {}): Promise<WakeReport> {
+  async wakeFromSleep(name: string, saved: SleepState, opts: { onProgress?: (l: string) => void; bootTimeoutMs?: number } = {}): Promise<WakeReport> {
     const p = opts.onProgress;
     const a = requireAvd(name);
-    const already = await serialFor(name, true);
-    if (already) {
-      // Running already: an earlier attempt or another daemon woke it (it is the saved state), or someone started it
-      // elsewhere while it slept (it may be in use: left as it is).
+    // One wake of this AVD at a time, across daemons: the copy and the boot below must not race another's.
+    return withWakeLock(a, async () => {
+      const already = await serialFor(name, true);
+      if (already) {
+        // Running already: an earlier attempt or another daemon woke it (it is the saved state), or someone started it
+        // elsewhere while it slept (it may be in use: left as it is).
+        if (!(await avdInUse(a, already))) dropRecovery(a);
+        const report: WakeReport = resumedFrom(await guestIdentityRetry(already), saved)
+          ? { resumed: true, via: 'quickboot' }
+          : { resumed: false, via: 'cold', note: 'It was started elsewhere while it slept, so it kept the state it has now.' };
+        report.clock = await setGuestClock(already);
+        return report;
+      }
+      // Its disk images are copied and maybe put back below: nothing may have them open.
+      if (await avdInUse(a)) throw new PhoneDockError('The phone is starting elsewhere', 'busy', 409, ['Try again in a few seconds.'], `An emulator process for ${name} is running but adb doesn't list it yet`);
+      // A copy an earlier wake couldn't put back is the saved state: put it back first.
+      if (existsSync(join(recoveryDir(a), 'complete'))) restoreRecovery(a);
+      // The emulator deletes a quick-boot state it fails to load (both halves): keep a copy until the wake is verified.
+      await keepRecovery(a);
+      let started: { coldBoot: boolean };
+      try { started = await bootAvd(name, { headless: true, onProgress: p, forceSnapshotLoad: true, bootTimeoutMs: opts.bootTimeoutMs }); }
+      catch (err) {
+        // A boot that timed out may still be running: stop it, and put the copy back only once nothing has the images
+        // open (else the copy stays, and the next wake puts it back).
+        await stopChild(name);
+        if (!(await avdInUse(a))) restoreRecovery(a);
+        const pe = err as PhoneDockError;
+        throw new PhoneDockError('The phone’s saved state didn’t load', pe.code ?? 'boot_failed', pe.status ?? 500,
+          ['Its saved state is kept. Try again; to start it fresh instead (apps and data are kept), use Cold Boot.'], [pe.message, pe.detail].filter(Boolean).join('\n'));
+      }
+      const s = await strictSerial(name);
+      let report: WakeReport;
+      if (started.coldBoot) {
+        // A virtual phone whose disguise changed (a PhoneDock update) must start cold, or the saved state would bring
+        // the old identity back. Its apps and data are kept; what was open is not.
+        report = { resumed: false, via: 'cold', note: 'This virtual phone’s setup changed in this PhoneDock version, so it started fresh (apps and data are kept).' };
+      } else if (resumedFrom(await guestIdentityRetry(s), saved)) {
+        report = { resumed: true, via: 'quickboot' };
+      } else {
+        report = { resumed: false, via: 'cold', note: 'It came back from a different saved state than the one it slept in (it was started and stopped elsewhere meanwhile).' };
+      }
       dropRecovery(a);
-      const report: WakeReport = resumedFrom(await guestIdentityRetry(already), saved)
-        ? { resumed: true, via: 'quickboot' }
-        : { resumed: false, via: 'cold', note: 'It was started elsewhere while it slept, so it kept the state it has now.' };
-      report.clock = await setGuestClock(already);
+      report.clock = await setGuestClock(s);
       return report;
-    }
-    // The emulator deletes a quick-boot state it fails to load: keep a copy (an APFS clone, no extra disk) until the
-    // wake is verified, and put it back if the load fails, so the next attempt (or a person) still has it.
-    keepRecovery(a);
-    let started: { coldBoot: boolean };
-    try { started = await bootAvd(name, { headless: true, onProgress: p, forceSnapshotLoad: true }); }
-    catch (e) {
-      restoreRecovery(a);
-      const pe = e as PhoneDockError;
-      throw new PhoneDockError('The phone’s saved state didn’t load', pe.code ?? 'boot_failed', pe.status ?? 500,
-        ['Its saved state is kept. Try again; to start it fresh instead (apps and data are kept), use Cold Boot.'], [pe.message, pe.detail].filter(Boolean).join('\n'));
-    }
-    const s = await strictSerial(name);
-    let report: WakeReport;
-    if (started.coldBoot) {
-      // A virtual phone whose disguise changed (a PhoneDock update) must start cold, or the saved state would bring
-      // the old identity back. Its apps and data are kept; what was open is not.
-      report = { resumed: false, via: 'cold', note: 'This virtual phone’s setup changed in this PhoneDock version, so it started fresh (apps and data are kept).' };
-    } else if (resumedFrom(await guestIdentityRetry(s), saved)) {
-      report = { resumed: true, via: 'quickboot' };
-    } else {
-      report = { resumed: false, via: 'cold', note: 'It came back from a different saved state than the one it slept in (it was started and stopped elsewhere meanwhile).' };
-    }
-    dropRecovery(a);
-    report.clock = await setGuestClock(s);
-    return report;
+    });
   },
 
   async discardSleep(name: string): Promise<void> {
@@ -839,7 +848,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
 
 /** Boot an AVD (backend.boot). `coldBoot`: it started without its quick-boot state (asked for, or forced because a
  *  virtual phone's disguise changed). */
-async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: string) => void; forceSnapshotLoad?: boolean } = {}): Promise<{ coldBoot: boolean; alreadyRunning?: boolean }> {
+async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: string) => void; forceSnapshotLoad?: boolean; bootTimeoutMs?: number } = {}): Promise<{ coldBoot: boolean; alreadyRunning?: boolean }> {
   const a = requireAvd(name);
   const p = opts.onProgress;
   if (await serialFor(name)) { p?.('already running'); return { coldBoot: false, alreadyRunning: true }; }
@@ -885,7 +894,7 @@ async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: stri
     const serial = `emulator-${port}`;
     const t0 = Date.now();
     // wait for adb to see it, then for boot_completed
-    await A.waitBootCompleted(serial, 240_000, () => exited);
+    await A.waitBootCompleted(serial, opts.bootTimeoutMs ?? 240_000, () => exited);
     disguiseBoot?.commit();
     p?.(`boot completed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     // Wake and unlock like a snapshot restore does. Not KEYCODE_MENU (82), the old emulator unlock: with no lock
@@ -1073,18 +1082,64 @@ function checkpointWritten(a: AvdEntry, since: number): boolean {
 const recoveryDir = (a: AvdEntry) => join(a.avdDir, 'phonedock-sleep-recovery');
 const qcow2In = (dir: string) => { try { return readdirSync(dir).filter((f) => f.endsWith('.qcow2')); } catch { return []; } };
 const diskImages = (a: AvdEntry) => qcow2In(a.avdDir);
-function keepRecovery(a: AvdEntry) {
+async function keepRecovery(a: AvdEntry) {
   const src = join(a.avdDir, 'snapshots', QUICKBOOT_SNAPSHOT);
   const dir = recoveryDir(a);
   rmSync(dir, { recursive: true, force: true });
   if (!existsSync(src)) return;
-  // Clones where the disk can (APFS: instant, no extra space until the emulator writes), copies where it can't.
+  mkdirSync(dir, { recursive: true });
+  const images = diskImages(a).map((q) => join(a.avdDir, q));
   try {
-    mkdirSync(dir, { recursive: true });
-    for (const q of diskImages(a)) copyFileSync(join(a.avdDir, q), join(dir, q), fsc.COPYFILE_FICLONE);
-    cpSync(src, join(dir, QUICKBOOT_SNAPSHOT), { recursive: true, mode: fsc.COPYFILE_FICLONE });
+    // macOS: clonefile(2) through `cp -c` (Node's clone flag isn't implemented there and quietly copies): instant, and
+    // no extra space until the emulator writes. Elsewhere a reflink where the file system has them, else a copy.
+    if (process.platform === 'darwin') {
+      const r1 = images.length ? await run('/bin/cp', ['-c', ...images, dir], { allowFail: true, timeoutMs: 60_000 }) : { code: 0 };
+      const r2 = await run('/bin/cp', ['-c', '-R', src, join(dir, QUICKBOOT_SNAPSHOT)], { allowFail: true, timeoutMs: 60_000 });
+      if (r1.code !== 0 || r2.code !== 0) throw new Error(`cp -c failed (${r1.code}/${r2.code})`);
+    } else {
+      for (const q of images) copyFileSync(q, join(dir, basename(q)), fsc.COPYFILE_FICLONE);
+      cpSync(src, join(dir, QUICKBOOT_SNAPSHOT), { recursive: true, mode: fsc.COPYFILE_FICLONE });
+    }
     writeFileSync(join(dir, 'complete'), '');
   } catch (e) { rmSync(dir, { recursive: true, force: true }); console.error(`[phonedockd] couldn't keep a copy of ${a.name}'s saved state during its wake: ${(e as Error).message}`); }
+}
+/** An emulator process that may have this AVD open: any running `-avd <name>` except one adb positively shows is another
+ *  AVD of the same name (`except`: a serial known to be this one, already accounted for). */
+async function avdInUse(a: AvdEntry, except?: string): Promise<boolean> {
+  processCache = undefined;
+  const procs = (await processes()).filter((x) => isEmulatorArgs(x.args) && hasArgPair(x.args, '-avd', a.name));
+  if (!procs.length) return false;
+  const running = await runningEmulators().catch(() => [] as Running[]);
+  return procs.some((x) => {
+    const port = /(?:^|\s)-port\s+(\d+)/.exec(x.args)?.[1];
+    if (port && `emulator-${port}` === except) return false;
+    const r = port ? running.find((e) => e.serial === `emulator-${port}`) : undefined;
+    return !(r?.path && canonical(r.path) !== canonical(a.avdDir));
+  });
+}
+/** Stop the emulator this daemon started for an AVD (a boot that timed out), and wait for it to exit. */
+async function stopChild(name: string) {
+  const c = children.get(name);
+  if (!c || c.exitCode !== null || c.signalCode !== null) return;
+  try { c.kill('SIGTERM'); } catch { /* gone */ }
+  for (let i = 0; i < 40 && c.exitCode === null && c.signalCode === null; i++) await sleep(250);
+  if (c.exitCode === null && c.signalCode === null) { try { c.kill('SIGKILL'); } catch { /* gone */ } await sleep(500); }
+}
+/** One wake of an AVD at a time, across daemons sharing it: a lock file with the holder's pid (a dead holder's is stale). */
+async function withWakeLock<T>(a: AvdEntry, fn: () => Promise<T>): Promise<T> {
+  const lock = join(a.avdDir, 'phonedock-wake.lock');
+  const deadline = Date.now() + 360_000;
+  for (;;) {
+    try { writeFileSync(lock, String(process.pid), { flag: 'wx' }); break; }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const pid = Number.parseInt(readFileSync(lock, 'utf8'), 10);
+      if (!pid || !processAlive(pid)) { rmSync(lock, { force: true }); continue; }
+      if (Date.now() > deadline) throw new PhoneDockError('The phone is waking elsewhere', 'busy', 409, ['Try again in a few seconds.'], `${lock} held by pid ${pid}`);
+      await sleep(250);
+    }
+  }
+  try { return await fn(); } finally { rmSync(lock, { force: true }); }
 }
 function restoreRecovery(a: AvdEntry) {
   const dir = recoveryDir(a);
@@ -1141,8 +1196,10 @@ function descendsFrom(p: Proc, root: number, all: Proc[]): boolean {
   for (let i = 0; i < 32 && cur && cur > 1; i++) { if (cur === root) return true; cur = parent.get(cur); }
   return false;
 }
-/** `adb -s <serial> shell|logcat|…` in someone's terminal or IDE: its subcommand, else undefined. */
+/** `adb -s <serial> shell|logcat|…` in someone's terminal or IDE: its subcommand, else undefined. PhoneDock's own (the live
+ *  view's screenrecord and logcat watcher, also orphaned by a daemon that died) are not. */
 export function adbSessionOn(args: string, serial: string): string | undefined {
+  if (/ logcat -T 1 -v brief -s ScreenRecord:D PowerManagerService:I(\s|$)/.test(args) || / exec-out screenrecord --output-format=h264 /.test(args)) return undefined;
   const w = args.split(/\s+/);
   const i = w.findIndex((x) => /(^|\/)adb$/.test(x));
   if (i < 0) return undefined;
