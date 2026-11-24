@@ -390,7 +390,7 @@ export function adbVideoStream(serial: SerialRef, opts: { maxSize?: number } = {
 
 /** Backend.stream: JPEG frames decoded from the shared source by ffmpeg (started only for this), at most `fps` a
  *  second. Falls back to screenshots when there's no ffmpeg or the source can't stream. */
-export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?: number; capture?: () => Promise<Buffer> } = {}): FrameStream {
+export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?: number; capture?: () => Promise<Buffer>; ffmpeg?: string | null } = {}): FrameStream {
   const frameCbs: ((j: Buffer, s?: ScreenInfo) => void)[] = []; const endCbs: ((e?: Error) => void)[] = [];
   const fps = Math.max(1, Math.min(opts.fps ?? 15, 60));
   const maxSize = clampSize(opts.maxSize);
@@ -408,7 +408,16 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
     emitTimer ??= setTimeout(() => { emitTimer = undefined; const p = pending; pending = undefined; if (p && !stopped) deliver(p[0], p[1]); }, Math.max(0, wait));
   };
   const killFf = () => { try { ff?.kill('SIGKILL'); } catch { /* */ } ff = undefined; ffConfig = undefined; };
-  const ffmpeg = ffmpegPath();
+  const ffmpeg = opts.ffmpeg === null ? undefined : opts.ffmpeg ?? ffmpegPath();   // null: none (tests)
+  // Screenshots know nothing about the display: while polling them, ask the phone (every few seconds) whether it is on.
+  let displayOff = false; let powerReadAt = 0;
+  const readDisplayPower = async () => {
+    if (Date.now() - powerReadAt < 3000) return;
+    powerReadAt = Date.now();
+    const r = await adb(await resolveSerial(serial), ['shell', 'dumpsys power | grep -m1 mWakefulness='], { allowFail: true, timeoutMs: 5000 }).catch(() => undefined);
+    const w = r && /mWakefulness=(\w+)/.exec(r.stdout)?.[1];
+    if (w) displayOff = w === 'Asleep' || w === 'Dozing';
+  };
   let src: ScreenSource | undefined;
 
   const startFf = (config: Buffer) => {
@@ -470,6 +479,7 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
       } catch {
         if (!stopped) await sleep(1000);
       }
+      await readDisplayPower();
       await sleep(Math.max(0, 1000 / fps - (Date.now() - t0)));
     }
   };
@@ -495,6 +505,6 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
       for (const cb of endCbs) cb();
     },
     restart() { if (!pollMode) src?.restart(); },
-    asleep() { return !pollMode && !!src?.isAsleep; },
+    asleep() { return pollMode ? displayOff : !!src?.isAsleep; },
   };
 }

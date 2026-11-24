@@ -32,7 +32,9 @@ export function getBackend(id: string): Backend {
 // listed and can't be controlled, new devices must use the prefix, and physical phones can't be connected or
 // discovered. For test runs and CI that share a Mac with devices they must never touch.
 export const deviceFilter = process.env.PHONEDOCK_DEVICE_FILTER?.trim() || undefined;
-const filteredIds = new Set<string>();   // ids this service has listed under the filter
+/** Devices this service may control under the filter: what its latest scan of each backend listed under it. A device
+ *  renamed out of the filter leaves on the next scan that sees it; a scan that failed (lists nothing) changes nothing. */
+const filteredIds = new Set<string>();
 export function assertDeviceAllowed(id: string) {
   if (deviceFilter && !filteredIds.has(id)) throw filteredOut(id);
 }
@@ -56,8 +58,10 @@ function filteredOut(id: string) {
 }
 function applyFilter(list: Device[]): Device[] {
   if (!deviceFilter) return list;
-  const out = list.filter((d) => d.name.startsWith(deviceFilter) && d.kind !== 'physical');
-  for (const d of out) filteredIds.add(d.id);
+  const out: Device[] = [];
+  for (const d of list) {
+    if (d.name.startsWith(deviceFilter) && d.kind !== 'physical') { out.push(d); filteredIds.add(d.id); } else filteredIds.delete(d.id);
+  }
   return out;
 }
 

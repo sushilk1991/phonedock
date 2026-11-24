@@ -95,7 +95,7 @@ struct DeviceSettingsView: View {
     }
     private func load() async {
         guard device.can("settings"), device.isRunning, let client = model.client else { return }
-        do { update(try await client.get(DeviceSettingsResponse.self, client.dev(device.id, "/settings"))); loadFailed = false }
+        do { update(try await client.get(DeviceSettingsResponse.self, client.dev(device.id, "/settings"), observe: true)); loadFailed = false }
         catch { loadFailed = true; model.fail("Couldn’t read device settings", error, device: device) }
     }
     private func apply(_ values: [String: Any]) {

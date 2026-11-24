@@ -429,7 +429,7 @@ final class AppModel {
         guard let c = client, let d = selectedDevice, d.isRunning, d.can("crashes"),
               Date().timeIntervalSince(lastCrashCheck) > 6 else { return }
         lastCrashCheck = Date()
-        guard let list = try? await c.get([CrashReport].self, c.dev(d.id, "/crashes"), query: ["limit": "10"], timeout: 20) else { return }
+        guard let list = try? await c.get([CrashReport].self, c.dev(d.id, "/crashes"), query: ["limit": "10"], timeout: 20, observe: true) else { return }
         let ids = Set(list.map(\.id))
         defer { crashBaseline[d.id] = (crashBaseline[d.id] ?? []).union(ids) }
         guard let known = crashBaseline[d.id] else { return }
@@ -615,7 +615,7 @@ final class AppModel {
     func syncRecording(_ d: Device) async {
         guard let c = client, d.can("record"), !recordingUnsupported.contains(d.id) else { return }
         do {
-            let s = try await c.get(RecordingStatus.self, c.dev(d.id, "/recording"), timeout: 15)
+            let s = try await c.get(RecordingStatus.self, c.dev(d.id, "/recording"), timeout: 15, observe: true)
             if s.active {
                 let started = s.startedAt.flatMap(ISO8601DateFormatter.flexible) ?? recordings[d.id]?.startedAt ?? Date()
                 recordings[d.id] = RecordingState(path: s.path, startedAt: started)

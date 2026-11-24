@@ -14,10 +14,12 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { stateDir } from '../core/paths.ts';
 import { PhoneDockError, type Backend, type Device, type DeviceSleep, type SleepState, type WakeReport } from '../core/types.ts';
 import {
-  backends, createdByPhoneDock, deviceDecorators, deviceJobRunning, emit, expectedStops, getBackend, getDevice, invalidateDevices, isDeviceAllowed,
+  backends, createdByPhoneDock, deviceDecorators, deviceFilter, deviceJobRunning, emit, expectedStops, getBackend, getDevice, invalidateDevices, isDeviceAllowed,
   leaseView, listDevices, logAction, pendingHandoff, recordings, safeId, splitId, stopStreamsFor, uiCache, watched, withTransition,
 } from './core.ts';
 import { traces } from './trace.ts';
+import { hasReceipt } from './requests.ts';
+import { sleep } from '../core/exec.ts';
 import type { Ctx } from './http.ts';
 
 // ── the setting ─────────────────────────────────────────────────────────────
@@ -56,15 +58,22 @@ export interface IdleSleepSetting {
   saved?: number | null;
 }
 const settingFile = () => join(stateDir(), 'idle-sleep.json');
-let saved: { timeoutSec: number | null } | null | undefined;   // undefined: not read yet; null: no file
+// Read again whenever the file changes: another daemon on this state dir (the app's, or a test one) may have saved it.
+let saved: { mtimeMs: number; value: { timeoutSec: number | null } | null } | undefined;
 let warnedEnv = false;
 function readSaved(): { timeoutSec: number | null } | null {
-  if (saved !== undefined) return saved;
-  try {
-    const j = JSON.parse(readFileSync(settingFile(), 'utf8')) as { timeoutSec?: unknown };
-    saved = j && (j.timeoutSec === null || IDLE_SLEEP_CHOICES.includes(j.timeoutSec as number)) ? { timeoutSec: j.timeoutSec as number | null } : null;
-  } catch { saved = null; }
-  return saved;
+  let mtimeMs = -1;
+  try { mtimeMs = statSync(settingFile(), { throwIfNoEntry: false })?.mtimeMs ?? -1; } catch { /* unreadable: as if none */ }
+  if (saved && saved.mtimeMs === mtimeMs) return saved.value;
+  let value: { timeoutSec: number | null } | null = null;
+  if (mtimeMs >= 0) {
+    try {
+      const j = JSON.parse(readFileSync(settingFile(), 'utf8')) as { timeoutSec?: unknown };
+      value = j && (j.timeoutSec === null || IDLE_SLEEP_CHOICES.includes(j.timeoutSec as number)) ? { timeoutSec: j.timeoutSec as number | null } : null;
+    } catch { value = null; }
+  }
+  saved = { mtimeMs, value };
+  return value;
 }
 export function idleSleepSetting(): IdleSleepSetting {
   const file = readSaved();
@@ -84,7 +93,7 @@ export function setIdleSleep(timeoutSec: number | null): IdleSleepSetting {
   const f = settingFile(); const tmp = `${f}.tmp`;
   writeFileSync(tmp, JSON.stringify({ v: 1, timeoutSec, updatedAt: new Date().toISOString() }, null, 2) + '\n');
   renameSync(tmp, f);
-  saved = { timeoutSec };
+  saved = undefined;
   schedule();
   const s = idleSleepSetting();
   emit('idle-sleep', s);
@@ -93,7 +102,12 @@ export function setIdleSleep(timeoutSec: number | null): IdleSleepSetting {
 }
 
 // ── sleep markers (per device, on disk: they outlive the daemon, which the app replaces on every update) ──────────
-export interface SleepMarker { v: 1; since: string; reason: 'idle'; name: string; idleSec: number; state: SleepState }
+export interface SleepMarker {
+  v: 1; since: string; reason: 'idle'; name: string; idleSec: number; state: SleepState;
+  /** stopping: saved, and the daemon `owner` is stopping it; asleep (or absent, in older markers): it stopped. */
+  phase?: 'stopping' | 'asleep';
+  owner?: { pid: number };
+}
 const markerPath = (id: string) => join(stateDir('devices'), safeId(id), 'sleep.json');
 const markerCache = new Map<string, { mtimeMs: number; marker: SleepMarker | undefined }>();
 export function readMarker(id: string): SleepMarker | undefined {
@@ -124,6 +138,36 @@ export function clearMarker(id: string): boolean {
   return had;
 }
 export const isSleeping = (id: string) => !!readMarker(id);
+
+/** The backend gives a stop 180 s before it calls it failed; past this, a stop nobody is running any more is over. */
+const STOP_DEADLINE_MS = 200_000;
+/** A live peer daemon still stopping a phone after this long has lost track of it. */
+const PEER_STOP_GIVE_UP_MS = 600_000;
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+/** Someone may still be stopping this phone: this daemon, a live peer, or a daemon that died after `emu kill` while the
+ *  emulator saves and exits. Past the deadline, the phone itself says how the stop ended. */
+function stopUnderway(id: string, m: SleepMarker): boolean {
+  if (m.phase !== 'stopping') return false;
+  if (ops.has(id)) return true;
+  const age = Date.now() - Date.parse(m.since);
+  const peer = !!m.owner && m.owner.pid !== process.pid && pidAlive(m.owner.pid);
+  return age < (peer ? PEER_STOP_GIVE_UP_MS : STOP_DEADLINE_MS);
+}
+
+/** Boot, restart, shutdown and delete hold this for the whole operation: a wake waits for it (and then goes by what it
+ *  left), and the sweep leaves the phone alone meanwhile. */
+const lifecycles = new Map<string, Promise<void>>();
+export async function withLifecycle<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const prev = lifecycles.get(id);
+  let release!: () => void;
+  const mine = new Promise<void>((r) => { release = r; });
+  const tail = (prev ?? Promise.resolve()).then(() => mine);
+  lifecycles.set(id, tail);
+  try { await prev; return await fn(); }
+  finally { release(); if (lifecycles.get(id) === tail) lifecycles.delete(id); }
+}
 
 // ── idle clocks ─────────────────────────────────────────────────────────────
 let now = () => Date.now();
@@ -213,7 +257,7 @@ const OBSERVE = new Set([
   'GET /v1/devices/:id', 'GET /v1/devices/:id/actions', 'GET /v1/devices/:id/requests/:requestId', 'GET /v1/devices/:id/recording',
   'GET /v1/devices/:id/snapshots', 'GET /v1/devices/:id/info', 'GET /v1/devices/:id/trace', 'GET /v1/devices/:id/traces',
   'GET /v1/devices/:id/frame', 'GET /v1/devices/:id/stream', 'GET /v1/devices/:id/video', 'GET /v1/devices/:id/apps/:appId/data',
-  'POST /v1/devices/:id/flow',
+  'GET /v1/devices/:id/environment',   // the controls a kind of device supports: from its backend and kind alone
 ]);
 /** Lifecycle requests: their handlers deal with a sleeping phone themselves (boot wakes it, shutdown and delete forget
  *  its sleep). Never woken by the gate. */
@@ -221,14 +265,16 @@ const CONTROL = new Set([
   'POST /v1/devices/:id/boot', 'POST /v1/devices/:id/shutdown', 'POST /v1/devices/:id/restart', 'DELETE /v1/devices/:id',
   'PATCH /v1/devices/:id', 'POST /v1/devices/:id/clone', 'DELETE /v1/devices/:id/lease', 'DELETE /v1/devices/:id/snapshots/:name',
 ]);
-/** `X-PhoneDock-Observe: 1`: the client is only looking (the app's background refreshes). Never wakes, never counts. */
+/** `X-PhoneDock-Observe: 1` on a GET: the client is only looking (the app's background refreshes). Never wakes, never
+ *  counts. Ignored on anything but a GET: a request that changes the phone is use, whoever sends it. */
 export const OBSERVE_HEADER = 'x-phonedock-observe';
 export function classifyRequest(method: string, route: string, headers: IncomingHttpHeaders = {}): RequestKind {
   if (!route.startsWith('/v1/devices/:id')) return 'none';
   const key = `${method} ${route}`;
   if (CONTROL.has(key)) return 'control';
+  if (OBSERVE.has(key)) return 'observe';
   const h = headers[OBSERVE_HEADER];
-  if (OBSERVE.has(key) || h === '1' || h === 'true') return 'observe';
+  if (method === 'GET' && (h === '1' || h === 'true')) return 'observe';
   return 'use';
 }
 
@@ -239,12 +285,15 @@ export const wokeHeader = (w: WakeResult) => `${w.ms}; name=${encodeURIComponent
 
 /** Called before every request handler (src/daemon/main.ts). A use counts as use, waits for a sleep in progress and
  *  wakes a sleeping phone; the returned function ends it. Observe and other requests pass straight through. */
-export async function enterRequest(c: Pick<Ctx, 'params' | 'req' | 'res'>, method: string, route: string): Promise<(() => void) | undefined> {
+export async function enterRequest(c: Pick<Ctx, 'params' | 'req' | 'res'> & { owner?: string }, method: string, route: string): Promise<(() => void) | undefined> {
   const id = c.params?.id;
   if (!id) return undefined;
   const kind = classifyRequest(method, route, c.req?.headers);
   if (kind === 'observe' || kind === 'none' || !isDeviceAllowed(id)) return undefined;
   if (kind === 'control') return () => touchUse(id);
+  // A resent request (the same X-PhoneDock-Request-Id) is answered from its receipt: it needs no wake, and a wake that
+  // failed must never tell it "not sent, safe to retry" when the first one was delivered.
+  if (hasReceipt(c)) return undefined;
   touchUse(id);
   inflight.set(id, (inflight.get(id) ?? 0) + 1);
   let left = false;
@@ -276,8 +325,22 @@ export async function ensureAwake(id: string, by: string, onProgress?: (l: strin
     if (op.phase === 'saving') op.cancelled = true;
     await op.settled;
   }
-  if (wakes.has(id) || readMarker(id)) return wakeDevice(id, by, onProgress);
-  return undefined;
+  if (!wakes.has(id) && !readMarker(id)) return undefined;
+  // A boot, restart, shutdown or delete of a sleeping phone decides what it becomes: wait for it, then look again.
+  while (lifecycles.has(id)) await lifecycles.get(id);
+  let m = readMarker(id);
+  // Another daemon (or one that died) may still be stopping it: wait for that, then go by the phone itself.
+  while (m && stopUnderway(id, m)) {
+    const own = ops.get(id);
+    if (own) await own.settled; else await sleep(250);
+    m = readMarker(id);
+  }
+  if (m?.phase === 'stopping') {
+    const d = (await listDevices(true, splitId(id).backend).catch(() => [] as Device[])).find((x) => x.id === id);
+    if (d?.state === 'running') { clearMarker(id); invalidateDevices(); m = undefined; }   // that stop never happened
+  }
+  if (!wakes.has(id) && !m) return undefined;
+  return wakeDevice(id, by, onProgress);
 }
 /** Wait for a sleep or wake in progress to finish (shutdown, delete), without waking anything. */
 export async function settleSleep(id: string): Promise<void> {
@@ -303,6 +366,8 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
     const marker = readMarker(id);
     if (!marker) return undefined;
     const { backend, nativeId } = splitId(id);
+    // Under a device filter, act only on a device this daemon's latest scan still lists under it.
+    if (deviceFilter) { await listDevices(true, backend).catch(() => undefined); if (!isDeviceAllowed(id)) return undefined; }
     const b = getBackend(backend);
     if (!b.wakeFromSleep) throw new PhoneDockError('This device can’t wake from sleep', 'not_supported', 501);
     const t0 = Date.now();
@@ -326,7 +391,13 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
       action: 'device.wake', summary: report.resumed ? `Woke ${marker.name} (${secs} s)` : `Woke ${marker.name} (${secs} s), started fresh: ${report.note ?? 'its saved state didn’t load'}`,
       ms, resumed: report.resumed, via: report.via, ...(report.clock ? { clock: report.clock } : {}), ...(report.note ? { note: report.note } : {}),
     });
+    // Release the waiting requests once the inventory says running: their handlers read it (a trace refuses a phone
+    // that isn't running), and a stale read would undo the wake for them.
     invalidateDevices();
+    for (let i = 0; i < 40; i++) {
+      if ((await listDevices(true, backend).catch(() => [] as Device[])).find((x) => x.id === id)?.state === 'running') break;
+      await sleep(250);
+    }
     return { ms, name: marker.name, report };
   })().finally(() => { if (wakes.get(id) === p) wakes.delete(id); });
   wakes.set(id, p);
@@ -347,22 +418,31 @@ export async function sleepDevice(d: Pick<Device, 'id' | 'name' | 'nativeId'>, b
     try { state = await b.saveSleep!(d.nativeId); }
     catch (e) { recordFailure(id, d.name, e); return 'failed'; }
     const saveMs = Date.now() - t0;
-    // Re-check just before stopping: anything that came during the save keeps it running.
-    const extra = await b.keepAwake?.(d.nativeId).catch(() => undefined);
+    // Re-check just before stopping: anything that came during the save keeps it running, and so does a setting
+    // another daemon changed meanwhile (read again).
     const setting = idleSleepSetting().timeoutSec;
+    const extra = await b.keepAwake?.(d.nativeId, { timeoutSec: setting, guest: true }).catch((e: Error) => `can’t tell (${e.message})`);
     const still = !op.cancelled && !extra && setting !== null && idleDue({ now: now(), timeoutSec: setting, lastUseAt: lastUseOf(id), awake: keepAwakeReasons(id) }).due;
     if (!still) { void b.discardSleep?.(d.nativeId); return 'cancelled'; }
-    // From here on a request waits for the stop and then wakes the phone (ensureAwake).
+    // From here on a request waits for the stop and then wakes the phone (ensureAwake). The marker says who is stopping
+    // it, so another daemon on this state dir waits too, and a daemon started after this one died can tell.
     op.phase = 'stopping';
-    writeMarker(id, { v: 1, since: new Date(now()).toISOString(), reason: 'idle', name: d.name, idleSec, state });
+    const marker: SleepMarker = { v: 1, since: new Date().toISOString(), reason: 'idle', name: d.name, idleSec, state, phase: 'stopping', owner: { pid: process.pid } };
+    writeMarker(id, marker);
     const t1 = Date.now();
     try {
       await withTransition(id, 'stopping', async () => { stopStreamsFor(id); await b.stopAfterSleep!(d.nativeId); });
     } catch (e) {
-      clearMarker(id);
-      recordFailure(id, d.name, e);
-      return 'failed';
+      // Did it stop? The phone says: running, it keeps running (and the failure is shown); stopped, it is asleep after
+      // all; can't tell, the marker stays and the phone itself settles it later (stopUnderway).
+      const after = (await listDevices(true, b.id).catch(() => undefined))?.find((x) => x.id === id);
+      if (after?.state !== 'stopped') {
+        if (after?.state === 'running') clearMarker(id);
+        recordFailure(id, d.name, e);
+        return 'failed';
+      }
     }
+    writeMarker(id, { ...marker, phase: 'asleep' });
     uiCache.delete(id);
     const mins = Math.round(idleSec / 60);
     logAction(id, 'daemon', {
@@ -391,15 +471,19 @@ export async function sweep(): Promise<void> {
   if (sweeping) return;
   sweeping = true;
   try {
-    const timeoutSec = idleSleepSetting().timeoutSec;
+    const timeoutSec = idleSleepSetting().timeoutSec;   // read again: another daemon may have changed it
+    if (started && timeoutSec !== scheduledFor) schedule();
+    if (timeoutSec === null) return;
     const list = await sleepCapableDevices(false);   // filtered (PHONEDOCK_DEVICE_FILTER)
     for (const d of list) {
-      if (d.state !== 'running' || sleepIneligible(d) || ops.has(d.id) || wakes.has(d.id)) continue;
-      if (readMarker(d.id)) {
-        // Running with a sleep marker: the inventory hasn't caught up with a sleep yet, or someone started the phone
-        // outside PhoneDock's wake. Only a fresh read tells them apart; never sleep it again on a stale one.
-        const m = readMarker(d.id);
-        const fresh = m && Date.now() - Date.parse(m.since) > 30_000 ? await getDevice(d.id, true).catch(() => undefined) : undefined;
+      if (d.state !== 'running' || sleepIneligible(d) || ops.has(d.id) || wakes.has(d.id) || lifecycles.has(d.id)) continue;
+      const m = readMarker(d.id);
+      if (m) {
+        // Running with a sleep marker: someone is still stopping it (here, a peer, or a daemon that died during the
+        // stop), the inventory hasn't caught up with a sleep yet, or someone started it outside PhoneDock's wake. Leave
+        // a stop that may be under way alone; otherwise only a fresh read tells; never sleep it again on a stale one.
+        if (stopUnderway(d.id, m)) continue;
+        const fresh = m.phase === 'stopping' || Date.now() - Date.parse(m.since) > 30_000 ? await getDevice(d.id, true).catch(() => undefined) : undefined;
         if (fresh?.state === 'running' && !ops.has(d.id) && !wakes.has(d.id)) { clearMarker(d.id); invalidateDevices(); }
         continue;
       }
@@ -409,8 +493,13 @@ export async function sweep(): Promise<void> {
       const extra = await b.keepAwake?.(d.nativeId).catch(() => undefined);
       const awake = [...keepAwakeReasons(d.id), ...(extra ? [extra] : [])];
       if (awake.length) { lastUse.set(d.id, now()); stampUse(d.id); continue; }
-      if (timeoutSec === null || failures.has(d.id)) continue;   // a failed attempt waits for the next use or restart
+      if (failures.has(d.id)) continue;   // a failed attempt waits for the next use or restart
       if (!idleDue({ now: now(), timeoutSec, lastUseAt: lastUseOf(d.id), awake }).due) continue;
+      // Due by PhoneDock's clock. Last, the phone's own (input from adb, Android Studio or a test run PhoneDock never
+      // saw); when that can't be read, it stays awake.
+      const guest = await b.keepAwake?.(d.nativeId, { timeoutSec, guest: true })
+        .catch((e: Error) => `PhoneDock can’t tell whether it is in use (${e.message})`);
+      if (guest) { lastUse.set(d.id, now()); stampUse(d.id); continue; }
       await sleepDevice(d, b, timeoutSec);
       break;   // one at a time: each save writes the phone's whole memory to disk
     }
@@ -419,14 +508,18 @@ export async function sweep(): Promise<void> {
   } finally { sweeping = false; }
 }
 
+/** How often the sweep runs: a sixth of the timeout (2–30 s). Also with Never, every 30 s, which only reads the setting:
+ *  another daemon on this state dir may turn it on. */
+export function sweepEveryMs(timeoutSec: number | null): number {
+  return timeoutSec === null ? 30_000 : Math.max(2_000, Math.min(30_000, (timeoutSec * 1000) / 6));
+}
 let timer: NodeJS.Timeout | undefined;
+let scheduledFor: number | null | undefined;
 function schedule() {
   if (timer) { clearInterval(timer); timer = undefined; }
   if (!started) return;
-  const t = idleSleepSetting().timeoutSec;
-  if (t === null) return;
-  const every = Math.max(2_000, Math.min(30_000, (t * 1000) / 6));
-  timer = setInterval(() => { void sweep(); }, every);
+  scheduledFor = idleSleepSetting().timeoutSec;
+  timer = setInterval(() => { void sweep(); }, sweepEveryMs(scheduledFor));
   timer.unref();
 }
 let started = false;

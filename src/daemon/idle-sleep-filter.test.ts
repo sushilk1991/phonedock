@@ -16,11 +16,12 @@ const S = await import('./idle-sleep.ts');
 
 const states = new Map<string, DeviceState>([['pdtest-a', 'running'], ['someones-phone', 'running']]);
 const calls: string[] = [];
+const names = new Map<string, string>();   // display names that differ from the AVD name
 core.backends.push({
   id: 'fake-emu', displayName: 'Fake emulator', platform: 'android', kind: 'virtual', capabilities: ['boot'],
   async available() { return { ok: true }; },
   async listDevices(): Promise<Device[]> {
-    return [...states].map(([nid, state]) => ({ id: `fake-emu:${nid}`, backend: 'fake-emu', nativeId: nid, name: nid, platform: 'android', kind: 'virtual', state, managed: true, connection: 'local', capabilities: ['boot'] }));
+    return [...states].map(([nid, state]) => ({ id: `fake-emu:${nid}`, backend: 'fake-emu', nativeId: nid, name: names.get(nid) ?? nid, platform: 'android', kind: 'virtual', state, managed: true, connection: 'local', capabilities: ['boot'] }));
   },
   async screenshot() { return Buffer.alloc(0); }, async tap() {}, async swipe() {}, async type() {}, async key() {},
   async saveSleep(nid: string) { calls.push(`save:${nid}`); return { snapshot: 's', savedAt: new Date().toISOString() }; },
@@ -47,4 +48,20 @@ test('a filtered daemon only sleeps its own devices and never wakes the others',
   const c = { params: { id: 'fake-emu:someones-phone' }, req: { headers: {} }, res: { headersSent: false, setHeader() {} } } as unknown as Ctx;
   assert.equal(await S.enterRequest(c, 'POST', '/v1/devices/:id/input'), undefined);
   assert.deepEqual(calls, ['save:pdtest-a', 'stop:pdtest-a']);
+});
+
+test('a device renamed out of the filter is no longer this daemon’s: a request here does not wake it (#2)', async () => {
+  states.set('pdtest-b', 'stopped');
+  core.invalidateDevices(); await core.listDevices(true);
+  assert.ok(core.isDeviceAllowed('fake-emu:pdtest-b'));
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = join(process.env.PHONEDOCK_HOME!, 'devices', core.safeId('fake-emu:pdtest-b'));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'sleep.json'), JSON.stringify({ v: 1, since: new Date().toISOString(), reason: 'idle', name: 'pdtest-b', idleSec: 900, phase: 'asleep', state: { snapshot: 'default_boot', savedAt: new Date().toISOString() } }));
+  names.set('pdtest-b', 'personal phone');
+  core.invalidateDevices();
+  assert.equal((await core.listDevices(true)).filter((d) => d.nativeId === 'pdtest-b').length, 0, 'a fresh scan no longer lists it');
+  const c = { params: { id: 'fake-emu:pdtest-b' }, req: { headers: {} }, res: { headersSent: false, setHeader() {} } } as unknown as Ctx;
+  await S.enterRequest(c, 'POST', '/v1/devices/:id/input').then((l) => l?.(), () => undefined);
+  assert.ok(!calls.includes('wake:pdtest-b'), calls.join());
 });

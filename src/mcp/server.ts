@@ -5,6 +5,7 @@
 // convert, and the next coordinate action warns. The server converts to device pixels.
 // Leases: the server releases every lease it acquired (and cancels its pending handoffs) when its stdio closes or it
 // gets SIGTERM/SIGINT; the daemon also reclaims leases whose owner process (mcp:<client>:<pid>) has exited.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -371,20 +372,15 @@ export function createMcpServer(ctx: McpContext): McpServer {
     return ex.failed ? { content, isError: true } : { content };
   }
 
-  // Idle sleep: a tool call that had to wake a sleeping phone first says so, with the time it took ("Woke Pixel 8 (7.2 s)").
-  let wakeSeq = 0;
-  const wakeNotes: { seq: number; text: string }[] = [];
+  // Idle sleep: a tool call that had to wake a sleeping phone first says so, with the time it took ("Woke Pixel 8
+  // (7.2 s)."). The notice is its own content item, last, so a JSON result stays JSON; and it belongs to the call whose
+  // requests woke the phone (each call runs in its own scope), never to another call that overlapped it.
+  const wakeScope = new AsyncLocalStorage<string[]>();
   const prevOnWake = c.onWake;
-  c.onWake = (w) => { prevOnWake?.(w); wakeNotes.push({ seq: ++wakeSeq, text: wakeNoticeText(w) }); if (wakeNotes.length > 20) wakeNotes.shift(); };
-  function withWakeNotes(r: ToolResult, since: number): ToolResult {
-    const notes = [...new Set(wakeNotes.filter((n) => n.seq > since).map((n) => n.text))];
+  c.onWake = (w) => { prevOnWake?.(w); wakeScope.getStore()?.push(wakeNoticeText(w)); };
+  function withWakeNotes(r: ToolResult, notes: string[]): ToolResult {
     if (!notes.length) return r;
-    const line = notes.join('\n') + '.';
-    const content = [...(r.content ?? [])];
-    const first = content.findIndex((x) => x.type === 'text');
-    if (first >= 0) content[first] = { ...content[first], text: `${line}\n${(content[first] as { text: string }).text}` } as Content;
-    else content.unshift(text(line));
-    return { ...r, content };
+    return { ...r, content: [...(r.content ?? []), text([...new Set(notes)].join('\n') + '.')] };
   }
 
   /** Every registered handler by name (used by `batch` to dispatch steps). Args are validated like a real call. */
@@ -400,10 +396,10 @@ export function createMcpServer(ctx: McpContext): McpServer {
     }) as ToolFn);
     const meta = toolMeta(name);
     server.registerTool(name, { title: meta.title, description, inputSchema: shape, annotations: meta }, (async (args: z.infer<z.ZodObject<S>>, extra: ToolExtra) => {
-      const since = wakeSeq;
+      const notes: string[] = [];
       let r: ToolResult;
-      try { r = await fn(args, extra); } catch (e) { r = errorResult(e); }
-      return withWakeNotes(r, since);
+      try { r = await wakeScope.run(notes, () => fn(args, extra)); } catch (e) { r = errorResult(e); }
+      return withWakeNotes(r, notes);
     }) as never);
   }
 

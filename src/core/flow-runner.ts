@@ -41,6 +41,8 @@ export interface FlowResult {
 }
 export interface RunOptions {
   deviceId: string;
+  /** How often the run renews its lease (ms; default a third of the lease). Tests make it short. */
+  leaseRenewMs?: number;
   /** Default wait for elements and assertions (ms; default 10000, iOS 15000). A step's `timeout:` overrides it. */
   timeoutMs?: number;
   /** Run a failed flow again up to this many times (default 0). */
@@ -413,6 +415,12 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   };
   const results: StepResult[] = [];
   let failed: StepResult | undefined;
+  // Keep the lease for the whole run: a long `sleep` step or a slow app must not let it lapse (and an idle phone go to
+  // sleep under the flow). Renewals stop, and the last one has landed, before the lease is given back.
+  const renewEvery = o.leaseRenewMs ?? 200_000;
+  let renewing: Promise<unknown> = Promise.resolve();
+  const renewTimer = setInterval(() => { renewing = renewing.then(() => c.lease(device!.id).catch(() => undefined)); }, renewEvery);
+  renewTimer.unref?.();
   try {
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i]; const safeStep = redactLaunchStep(s); const desc = describeStep(s); const st = Date.now();
@@ -455,6 +463,7 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
     return { result: res, device, app, targetAppId };
   } finally {
     // Keep the lease through evidence capture and app provenance lookup; a different owner must not alter the device first.
+    clearInterval(renewTimer); await renewing;
     if (!held) await c.releaseLease(device.id).catch(() => {});
   }
 }

@@ -1,7 +1,7 @@
 // A write-ahead receipt, never a replay queue. A receipt left running by a dead daemon means delivery unknown.
 // IDs are scoped to device AND owner. The request body is hashed, never stored; secrets are masked in receipts.
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stateDir } from '../core/paths.ts';
 import { PhoneDockError, type Delivery } from '../core/types.ts';
@@ -22,6 +22,12 @@ function alive(pid?: number): boolean { if (!Number.isSafeInteger(pid) || Number
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const dir = () => stateDir('requests');
 const file = (device: string, owner: string, id: string) => join(dir(), `${hash(JSON.stringify([device, owner, id]))}.json`);
+/** A receipt exists (or is being written) for this request's X-PhoneDock-Request-Id: its handler replays or joins it. */
+export function hasReceipt(c: { params?: Record<string, string>; owner?: string; req?: { headers?: Record<string, string | string[] | undefined> } }): boolean {
+  const raw = c.req?.headers?.['x-phonedock-request-id'];
+  if (typeof raw !== 'string' || !c.params?.id) return false;
+  try { return existsSync(file(c.params.id, c.owner ?? 'anonymous', checkRequestId(raw))); } catch { return false; }
+}
 export function checkRequestId(id: string): string {
   if (!/^[A-Za-z0-9._-]{1,128}$/.test(id) || /^\.+$/.test(id)) throw new PhoneDockError('Invalid request ID', 'bad_request', 400, undefined, undefined, 'not_sent');
   return id;

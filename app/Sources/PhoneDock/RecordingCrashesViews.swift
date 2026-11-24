@@ -197,7 +197,7 @@ struct CrashesTab: View {
         guard let c = model.client else { return }
         state = .loading
         do {
-            let list = try await c.get([CrashReport].self, c.dev(device.id, "/crashes"), query: ["limit": "20"], timeout: 60)
+            let list = try await c.get([CrashReport].self, c.dev(device.id, "/crashes"), query: ["limit": "20"], timeout: 60, observe: true)
             rows = list.map { CrashRow(report: $0, date: $0.time.flatMap(ISO8601DateFormatter.flexible)) }
             state = .loaded
         } catch let e as APIError where e.status == 501 || e.code == "not_supported" {

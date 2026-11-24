@@ -104,6 +104,7 @@ export interface SleepState {
   snapshot: string;              // the backend's own name for the saved state
   savedAt: string;               // ISO
   bootId?: string;               // the guest kernel's boot id when it was saved (a cold boot gets a new one)
+  token?: string;                // written into the guest just before the save: tells this save from another of the same boot
   uptimeSec?: number;            // the guest's uptime just before the save (a resumed guest is at least this old)
 }
 
@@ -618,14 +619,18 @@ export interface Backend {
    *  written. Throws when it can't (e.g. `snapshot_vulkan`); the device keeps running untouched. Refuses devices
    *  PhoneDock didn't create (`forbidden`). */
   saveSleep?(nativeId: string): Promise<SleepState>;
-  /** Stop a device after saveSleep. Resolves once its process has exited, so its memory is free. */
-  stopAfterSleep?(nativeId: string): Promise<void>;
+  /** Stop a device after saveSleep. Resolves only with proof its process has exited (its memory is free); throws when
+   *  that can't be shown within `timeoutMs` (default 180 s). */
+  stopAfterSleep?(nativeId: string, opts?: { timeoutMs?: number }): Promise<void>;
   /** Boot a device stopped after saveSleep and bring back that state. Resolves when it is usable. */
   wakeFromSleep?(nativeId: string, saved: SleepState, opts?: { onProgress?: (line: string) => void }): Promise<WakeReport>;
-  /** Throw away a sleep save that won't be used (the sleep was cancelled, or the device woke). Never throws. */
+  /** Clean up after a sleep that won't be resumed (cancelled, or forgotten by a shutdown). Never throws, and never
+   *  removes anything the person can see. */
   discardSleep?(nativeId: string): Promise<void>;
-  /** A backend-specific reason a running device must stay awake right now (its own window is open, say), if any. */
-  keepAwake?(nativeId: string): Promise<string | undefined>;
+  /** A backend-specific reason a running device must stay awake right now (its own window is open, an adb session),
+   *  if any. `guest`: also ask the device itself (input it had within `timeoutSec`, a test run); slower, so only when
+   *  it is otherwise due to sleep. A reason, not an error, when that can't be told: an unknown is awake. */
+  keepAwake?(nativeId: string, opts?: { timeoutSec?: number | null; guest?: boolean }): Promise<string | undefined>;
 
   // ── observation ────────────────────────────────────────────────────────
   screenshot(nativeId: string): Promise<Buffer>;                    // PNG, full resolution

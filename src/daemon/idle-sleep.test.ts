@@ -21,13 +21,14 @@ const deferred = (): Deferred => { let resolve!: () => void; const promise = new
 const states = new Map<string, DeviceState>();
 const managed = new Map<string, boolean>();
 let calls: string[] = [];
-const hooks: { save?: () => Promise<void>; stop?: () => Promise<void>; wake?: () => Promise<void>; saveError?: PhoneDockError; window?: boolean } = {};
+const hooks: { save?: () => Promise<void>; stop?: () => Promise<void>; wake?: () => Promise<void>; del?: () => Promise<void>; saveError?: PhoneDockError; window?: boolean; listDelayMs?: number } = {};
 let videoListeners: ((p: VideoPacket) => void)[] = [];
 let framesAsleep = false;
 const fake = {
   id: 'fake-emu', displayName: 'Fake emulator', platform: 'android', kind: 'virtual', capabilities: ['boot', 'shutdown', 'video'],
   async available() { return { ok: true }; },
   async listDevices(): Promise<Device[]> {
+    if (hooks.listDelayMs) await new Promise((r) => setTimeout(r, hooks.listDelayMs));   // adb takes a while
     return [...states].map(([nid, state]) => ({
       id: `fake-emu:${nid}`, backend: 'fake-emu', nativeId: nid, name: nid, platform: 'android', kind: 'virtual', state,
       managed: managed.get(nid) ?? true, connection: 'local', capabilities: ['boot', 'shutdown', 'video'],
@@ -46,6 +47,8 @@ const fake = {
   async stopAfterSleep(nid: string) { calls.push(`stop:${nid}`); await hooks.stop?.(); states.set(nid, 'stopped'); },
   async wakeFromSleep(nid: string) { calls.push(`wake:${nid}`); await hooks.wake?.(); states.set(nid, 'running'); return { resumed: true, via: 'quickboot' as const }; },
   async discardSleep(nid: string) { calls.push(`discard:${nid}`); },
+  async delete(nid: string) { calls.push(`delete:${nid}`); await hooks.del?.(); states.delete(nid); },
+  async listSnapshots() { return ['phonedock_sleep', 'default_boot', 'mine'].map((name) => ({ name, createdAt: new Date().toISOString() })); },
   async keepAwake() { return hooks.window ? 'its emulator window is open' : undefined; },
   stream() { return { onFrame() {}, onEnd() {}, stop() {}, asleep: () => framesAsleep }; },
   video(): VideoStream {
@@ -416,8 +419,146 @@ test('a phone another daemon put to sleep is not reported as crashed', async () 
 
 test('a phone found running with a stale sleep marker (started outside PhoneDock) is not shown as sleeping', async () => {
   await putToSleep();
+  await peerMarker('asleep', process.pid, Date.now() - 60_000);   // slept a minute ago: past the inventory's lag
   states.set('pdtest-a', 'running'); core.invalidateDevices();
   assert.equal((await device()).sleep, null);
   await S.sweep();
   assert.equal(S.readMarker(ID), undefined);
+});
+
+// ── review fixes (PR #13): each of these failed before its fix ─────────────────
+const hit = async (method: string, path: string, id: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}) => {
+  const m = router.match(method, path.replace(':id', encodeURIComponent(id)));
+  assert.ok(m && m !== 'method', `${method} ${path}`);
+  const res = { headersSent: false, destroyed: false, setHeader() {} };
+  return m.h({ params: m.params, owner: 'cli:test', req: { method, headers }, res, url: new URL(`http://127.0.0.1${path}`), body: async () => body, q: () => undefined } as unknown as Ctx);
+};
+const jobDone = async (raw: unknown) => {
+  const { job } = JSON.parse(String((raw as { body: unknown }).body)) as { job: { id: string } };
+  for (let i = 0; i < 200 && core.getJob(job.id).state === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
+  return core.getJob(job.id);
+};
+async function peerMarker(phase: 'stopping' | 'asleep', pid: number, sinceMs = Date.now()) {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = join(process.env.PHONEDOCK_HOME!, 'devices', core.safeId(ID));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'sleep.json'), JSON.stringify({ v: 1, since: new Date(sinceMs).toISOString(), reason: 'idle', name: 'pdtest-a', idleSec: 900, phase, owner: { pid }, state: { snapshot: 'default_boot', savedAt: new Date(sinceMs).toISOString() } }));
+}
+async function deadPid(): Promise<number> {
+  const { spawn } = await import('node:child_process');
+  const c = spawn(process.execPath, ['-e', '0']);
+  await new Promise((r) => c.on('exit', r));
+  return c.pid!;
+}
+
+test('use vs observe: a static environment read is observe; saving a flow reads the live screen; the header counts on GETs only (#12)', () => {
+  assert.equal(S.classifyRequest('GET', '/v1/devices/:id/environment'), 'observe');
+  assert.equal(S.classifyRequest('POST', '/v1/devices/:id/flow'), 'use');
+  assert.equal(S.classifyRequest('POST', '/v1/devices/:id/shell', { 'x-phonedock-observe': '1' }), 'use');
+  assert.equal(S.classifyRequest('GET', '/v1/devices/:id/apps', { 'x-phonedock-observe': '1' }), 'observe');
+});
+
+test('the Snapshots list hides only the emulator’s own quick-boot state; a person’s "phonedock_sleep" is listed (#4)', async () => {
+  const names = ((await hit('GET', '/v1/devices/:id/snapshots', ID)) as { name: string }[]).map((s) => s.name);
+  assert.deepEqual(names, ['phonedock_sleep', 'mine']);
+});
+
+test('a resent request that already reached the phone is answered from its receipt, without waking it (#7)', async () => {
+  const { withRequestReceipt } = await import('./requests.ts');
+  const rc = () => ({
+    params: { id: ID }, owner: 'cli:test', url: new URL('http://127.0.0.1/v1/devices/x/input'), body: async () => ({ kind: 'tap', x: 1, y: 2 }),
+    req: { method: 'POST', headers: { 'x-phonedock-request-id': 'pdtest-tap-1' } }, res: { headersSent: false, destroyed: false, setHeader() {} },
+  }) as unknown as Ctx;
+  await withRequestReceipt(rc(), async () => ({ ok: true, delivery: 'delivered' }));
+  await putToSleep();
+  hooks.wake = async () => { throw new PhoneDockError('The device failed to start', 'boot_failed', 500); };
+  const leave = await S.enterRequest(rc(), 'POST', '/v1/devices/:id/input');
+  leave?.();
+  assert.ok(!calls.includes('wake:pdtest-a'), 'no wake for a request that is only replayed');
+  const again = await withRequestReceipt(rc(), async () => { throw new Error('must not run again'); }) as { delivery: string };
+  assert.equal(again.delivery, 'delivered');
+});
+
+test('restart during an automatic wake really restarts the phone (#8)', async () => {
+  await putToSleep();
+  const w = deferred(); hooks.wake = () => w.promise;
+  const waking = S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input');
+  await tick();
+  const restart = hit('POST', '/v1/devices/:id/restart', ID);
+  await tick();
+  w.resolve(); (await waking)?.();
+  const job = await jobDone(await restart);
+  assert.equal(job.state, 'done', JSON.stringify(job.error));
+  assert.deepEqual(calls, ['wake:pdtest-a', 'shutdown:pdtest-a', 'boot:pdtest-a']);
+});
+
+test('no wake starts while the phone is being deleted (#8)', async () => {
+  await putToSleep();
+  const d = deferred(); hooks.del = () => d.promise;
+  const del = hit('DELETE', '/v1/devices/:id', ID);
+  for (let i = 0; i < 5; i++) await tick();
+  const req = S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input').then((l) => l?.(), () => undefined);
+  for (let i = 0; i < 5; i++) await tick();
+  d.resolve(); await del; await req;
+  assert.ok(!calls.includes('wake:pdtest-a'), calls.join());
+});
+
+test('a request that woke the phone sees it running in the inventory right away (#9)', async () => {
+  await putToSleep();
+  hooks.listDelayMs = 600;
+  try {
+    (await S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input'))?.();
+    const d = (await core.listDevices(false)).find((x) => x.id === ID)!;
+    assert.equal(d.state, 'running');
+    assert.ok(!(d.meta as { stale?: boolean } | undefined)?.stale, 'not a stale read');
+  } finally { hooks.listDelayMs = 0; await new Promise((r) => setTimeout(r, 700)); }   // let the slow read finish
+});
+
+test('another daemon’s change to the setting is seen at once, Never included (#10)', async () => {
+  const { utimesSync, writeFileSync } = await import('node:fs');
+  delete process.env.PHONEDOCK_IDLE_SLEEP;
+  S.setIdleSleep(600);
+  await S.sweep();
+  const peer = (timeoutSec: number | null, bump: number) => {
+    const f = join(process.env.PHONEDOCK_HOME!, 'idle-sleep.json');
+    writeFileSync(f, JSON.stringify({ v: 1, timeoutSec, updatedAt: new Date().toISOString() }));
+    const t = Date.now() / 1000 + bump; utimesSync(f, t, t);
+  };
+  peer(null, 5);
+  advance(700); await S.sweep();
+  assert.ok(!calls.includes('save:pdtest-a'), 'Never, chosen through the other daemon');
+  peer(600, 10);
+  advance(700); await S.sweep();
+  assert.ok(calls.includes('save:pdtest-a'), 'and back to 10 minutes');
+  assert.ok(S.sweepEveryMs(null) > 0, 'it keeps watching the setting while it is Never');
+  S.setIdleSleep(900);
+});
+
+test('a peer still stopping the phone: no marker is cleared under it, and a request waits for it (#3)', async () => {
+  await peerMarker('stopping', 1, Date.now() - 60_000);   // pid 1 stands in for the other daemon: alive, not us
+  states.set('pdtest-a', 'running'); core.invalidateDevices();
+  await S.sweep();
+  assert.ok(S.isSleeping(ID), 'the sweep left the peer’s marker alone');
+  let done = false;
+  const req = S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input').then((l) => { done = true; l?.(); });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.ok(!done && !calls.includes('wake:pdtest-a'), 'it waits while the peer stops the phone');
+  states.set('pdtest-a', 'stopped'); core.invalidateDevices();
+  await peerMarker('asleep', 1);
+  await req;
+  assert.ok(calls.includes('wake:pdtest-a'), 'then wakes it');
+});
+
+test('a daemon that died while stopping the phone: the next one goes by the emulator itself (#3)', async () => {
+  const pid = await deadPid();
+  await peerMarker('stopping', pid, Date.now() - 60_000);
+  states.set('pdtest-a', 'running'); core.invalidateDevices();
+  await S.sweep();
+  assert.ok(S.isSleeping(ID), 'still within the stop’s deadline: its exit may be on the way');
+  await peerMarker('stopping', pid, Date.now() - 600_000);
+  core.invalidateDevices(); await S.sweep();
+  assert.ok(!S.isSleeping(ID), 'long past it and still running: it never stopped');
+  await peerMarker('stopping', pid, Date.now() - 60_000);
+  states.set('pdtest-a', 'stopped'); core.invalidateDevices();
+  assert.deepEqual((await device()).sleep?.reason, 'idle', 'stopped: it is asleep');
 });

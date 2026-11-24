@@ -36,7 +36,7 @@ may show them as `mcp__phonedock__get_ui` or similar). No MCP tools? Use the CLI
    (Android: `backend="android-emulator"`, e.g. `profile="pixel_9"`; `list_os_images` shows installed images).
    A stopped one: `boot_device`. Long operations return a job id when they outlast `wait_seconds`: poll `get_job`.
    A **sleeping** one (`list_devices` says `sleeping: memory freed…`): PhoneDock stopped it after it sat idle to free
-   its memory. Just use it: your first call wakes it where it left off (about 5 s; the result starts `Woke <name> (5.1 s)`).
+   its memory. Just use it: your first call wakes it where it left off (about 5 s; the result ends with `Woke <name> (5.1 s).`).
    Never create another device because one is sleeping.
 2. **Read the screen:** `get_ui`. One line per element: `e12 Button "Sign in" @(270,605) 120x40 [clickable]`.
    A `SYSTEM PROMPT:` line means a dialog is up (answer with `handle_alert action="accept"|"dismiss"|"button=Allow Once"`);

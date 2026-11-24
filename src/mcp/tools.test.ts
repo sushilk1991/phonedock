@@ -759,3 +759,23 @@ test('MCP list_runs and get_run support summary, public-safe md, and json format
     assert.equal(JSON.parse(jsonRes.text).id, rec.id);
   } finally { await s.close(); }
 });
+
+test('a wake notice is its own content item, on the call that woke the phone only (#16)', async () => {
+  const fake = androidFake({ width: 100, height: 200 }, { width: 100, height: 200 }, []);
+  let releaseDoctor!: () => void;
+  const gate = new Promise<void>((r) => { releaseDoctor = r; });
+  fake.environment = async () => { (fake as { onWake?: (w: unknown) => void }).onWake?.({ ms: 100, name: 'pdtest-x' }); return { platform: 'android', controls: [] }; };
+  fake.doctor = async () => { await gate; return { ok: true, checks: [] }; };
+  const { client, close } = await connect(fake);
+  try {
+    const raw = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: args }) as Promise<{ content: { type: string; text?: string }[] }>;
+    const doctor = raw('doctor', {});
+    const env = await raw('device_environment', { device: 'pdtest-x' });
+    releaseDoctor();
+    const doc = await doctor;
+    assert.doesNotThrow(() => JSON.parse(env.content[0].text!), 'the JSON result is untouched');
+    assert.ok(env.content.some((x) => x.text === 'Woke pdtest-x (0.1 s).'), JSON.stringify(env.content));
+    assert.doesNotThrow(() => JSON.parse(doc.content[0].text!));
+    assert.ok(!doc.content.some((x) => /Woke/.test(x.text ?? '')), 'not on a call that never touched the phone');
+  } finally { await close(); }
+});

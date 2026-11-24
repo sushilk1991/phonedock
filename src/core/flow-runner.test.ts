@@ -678,3 +678,14 @@ steps:
     assert.ok(!logged.join('\n').includes(secret), 'skip log output leaked secret');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runner: the lease is renewed for the whole run, so a long wait can’t let the phone sleep under the flow (#11)', async () => {
+  const { c, calls } = fakeApp(); const dir = tmp();
+  try {
+    const flow = parseFlow('name: Wait\nplatform: android\nsteps:\n  - sleep: 450\n', 'flows/wait.yaml');
+    const r = await runFlow(c, flow, { deviceId: 'android-emulator:pdtest-fake', artifactsDir: dir, settle: false, timeoutMs: 50, leaseRenewMs: 100 } as Parameters<typeof runFlow>[2]);
+    assert.equal(r.status, 'pass', r.message ?? '');
+    assert.ok(calls.filter((x) => x === 'lease').length >= 3, calls.join());
+    assert.equal(calls[calls.length - 1], 'release', 'nothing renews it after it is given back');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

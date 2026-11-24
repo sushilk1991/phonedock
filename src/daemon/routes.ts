@@ -31,8 +31,7 @@ import { inputRoute } from './delivery.ts';
 import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTENT_TYPE, VIDEO_MSG, type VideoSink } from '../core/video.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
-import { clearMarker, ensureAwake, forgetSleep, isSleeping, settleSleep, wakeDevice } from './idle-sleep.ts';
-import { SLEEP_SNAPSHOT } from '../backends/android-emulator.ts';
+import { clearMarker, ensureAwake, forgetSleep, settleSleep, withLifecycle } from './idle-sleep.ts';
 
 export const VERSION = '0.6.0';
 const startedAt = Date.now();
@@ -169,14 +168,18 @@ r.del('/v1/devices/:id', async (c) => {
   const force = truthy(c.q('force'));
   if (!d.managed && !force) throw new PhoneDockError('This device was not created by PhoneDock', 'forbidden', 403, ['Delete it with force only if you really mean to remove a device PhoneDock did not create.'], `Device ${id} was not created by PhoneDock`);
   if (!force) checkLease(id, c.owner);   // force deletes a leased device too (`phonedock rm --force`)
-  await settleSleep(id);
-  stopStreamsFor(id);
-  await stopRecordingFor(id, 'device deleted');
-  await stopTraceFor(id, 'device deleted').catch(() => undefined);
-  await need(b, 'delete', 'delete')(nid);
-  removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true); clearMarker(id);
-  invalidateDevices();
-  return { ok: true };
+  // Held to the end: a request meanwhile waits, then finds no sleeping phone to wake.
+  return withLifecycle(id, async () => {
+    await settleSleep(id);
+    await forgetSleep(id, b, nid);
+    stopStreamsFor(id);
+    await stopRecordingFor(id, 'device deleted');
+    await stopTraceFor(id, 'device deleted').catch(() => undefined);
+    await need(b, 'delete', 'delete')(nid);
+    removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true); clearMarker(id);
+    invalidateDevices();
+    return { ok: true };
+  });
 });
 r.post('/v1/devices/:id/boot', async (c) => {
   const { id, b, nid } = dev(c);
@@ -185,23 +188,25 @@ r.post('/v1/devices/:id/boot', async (c) => {
   const opts = (await c.body()) as BootOptions;
   const job = startJob('boot', async (p) => {
     const t0 = Date.now();
-    // A phone PhoneDock put to sleep wakes where it left off (idle-sleep.ts); a cold or windowed start the person
-    // asked for is a fresh start instead.
-    await settleSleep(id);
-    if (isSleeping(id) && !opts.coldBoot && !opts.window) {
-      const w = await wakeDevice(id, c.owner, p);
+    // A phone PhoneDock put to sleep wakes where it left off (idle-sleep.ts, which also waits for a sleep or a stop in
+    // progress); a cold or windowed start the person asked for is a fresh start instead.
+    if (!opts.coldBoot && !opts.window) {
+      const w = await ensureAwake(id, c.owner, p);
       if (w) {
         p(`woke in ${(w.ms / 1000).toFixed(1)}s${w.report.resumed ? ', where it left off' : `, started fresh: ${w.report.note ?? 'its saved state didn’t load'}`}`);
         return await getDevice(id, true);
       }
     }
-    await forgetSleep(id, b, nid);
-    p(`booting ${id}${opts.coldBoot ? ' (cold)' : ''}`);
-    try { await boot(nid, { ...opts, onProgress: p } as BootOptions); }
-    catch (e) { logAction(id, c.owner, { action: 'device.start_failed', error: failText(e) }); throw e; }
-    p(`ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-    logAction(id, c.owner, { action: 'device.start' });
-    return await getDevice(id, true);
+    return withLifecycle(id, async () => {
+      await settleSleep(id);
+      await forgetSleep(id, b, nid);
+      p(`booting ${id}${opts.coldBoot ? ' (cold)' : ''}`);
+      try { await boot(nid, { ...opts, onProgress: p } as BootOptions); }
+      catch (e) { logAction(id, c.owner, { action: 'device.start_failed', error: failText(e) }); throw e; }
+      p(`ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      logAction(id, c.owner, { action: 'device.start' });
+      return await getDevice(id, true);
+    });
   }, id);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
 });
@@ -213,11 +218,13 @@ export function failText(e: unknown): string {
 r.post('/v1/devices/:id/shutdown', async (c) => {
   const { id, b, nid } = dev(c);
   checkLease(id, c.owner);
-  await settleSleep(id);
-  // Sleeping: it is already off. Stopped on purpose now, so it stays off until someone starts it.
-  if (await forgetSleep(id, b, nid)) { logAction(id, c.owner, { action: 'device.shutdown', summary: 'Shut down while sleeping: it stays off' }); return { ok: true }; }
-  await shutdownDevice(id, b, nid, c.owner, 'stopping');
-  return { ok: true };
+  return withLifecycle(id, async () => {
+    await settleSleep(id);
+    // Sleeping: it is already off. Stopped on purpose now, so it stays off until someone starts it.
+    if (await forgetSleep(id, b, nid)) { logAction(id, c.owner, { action: 'device.shutdown', summary: 'Shut down while sleeping: it stays off' }); return { ok: true }; }
+    await shutdownDevice(id, b, nid, c.owner, 'stopping');
+    return { ok: true };
+  });
 });
 /** Shut a device down. It reads "stopping" the moment this starts, its streams and recording end, and the outcome is
  *  logged (Activity). The person's control ends with it. */
@@ -240,17 +247,21 @@ r.post('/v1/devices/:id/restart', async (c) => {
   const { id, b, nid } = dev(c);
   checkLease(id, c.owner);
   const boot = need(b, 'boot', 'boot');
-  const d = await getDevice(id);
+  await getDevice(id);
   const opts = (await c.body()) as BootOptions;
   const owner = c.owner;
   const job = startJob('boot', async (p) => {
     const t0 = Date.now();
     try {
-      await settleSleep(id);
-      const asleep = await forgetSleep(id, b, nid);
-      if (d.state !== 'stopped' && !asleep) { p(`shutting down ${id}`); await shutdownDevice(id, b, nid, owner, 'restarting'); }
-      p(`booting ${id}`);
-      await boot(nid, { ...opts, onProgress: p } as BootOptions);
+      await withLifecycle(id, async () => {
+        await settleSleep(id);
+        const asleep = await forgetSleep(id, b, nid);
+        // Its state now, after any wake or sleep in progress has ended: not what it was when the request came.
+        const d = await getDevice(id, true);
+        if (d.state !== 'stopped' && !asleep) { p(`shutting down ${id}`); await shutdownDevice(id, b, nid, owner, 'restarting'); }
+        p(`booting ${id}`);
+        await boot(nid, { ...opts, onProgress: p } as BootOptions);
+      });
     } catch (e) { logAction(id, owner, { action: 'device.restart_failed', error: failText(e) }); throw e; }
     p(`restarted in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     logAction(id, owner, { action: 'device.restart' });
@@ -277,9 +288,9 @@ r.post('/v1/devices/:id/clone', async (c) => {
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
 });
 r.post('/v1/devices/:id/window', async (c) => { const { b, nid } = dev(c); await need(b, 'openWindow', 'native window')(nid); return { ok: true }; });
-/** Snapshots the emulator keeps for itself (quick boot) and the one PhoneDock saves before an idle phone sleeps are
- *  not the person's: never listed. */
-const INTERNAL_SNAPSHOTS = new Set(['default_boot', SLEEP_SNAPSHOT]);
+/** The snapshot the emulator keeps for itself (quick boot, also what an idle phone sleeps in) is not the person's: never
+ *  listed, and a person can't save over, restore or delete it (the backend also refuses names that normalise to it). */
+const INTERNAL_SNAPSHOTS = new Set(['default_boot']);
 r.get('/v1/devices/:id/snapshots', async (c) => { const { b, nid } = dev(c); return (await need(b, 'listSnapshots', 'snapshots')(nid)).filter((s) => !INTERNAL_SNAPSHOTS.has(s.name)); });
 r.post('/v1/devices/:id/snapshots', async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);
@@ -290,8 +301,11 @@ r.post('/v1/devices/:id/snapshots', async (c) => {
   logAction(id, c.owner, { action: 'snapshot.save', name: body.name });
   return { ok: true };
 });
+const internalSnapshot = (name: string) => {
+  if (INTERNAL_SNAPSHOTS.has(name)) throw badRequest(`"${name}" is reserved for the emulator`, ['Choose another snapshot.']);
+};
 r.post('/v1/devices/:id/snapshots/:name/restore', async (c) => {
-  const { id, b, nid } = dev(c); checkLease(id, c.owner);
+  const { id, b, nid } = dev(c); checkLease(id, c.owner); internalSnapshot(c.params.name);
   try { await withTransition(id, 'restoring', () => need(b, 'restoreSnapshot', 'snapshots')(nid, c.params.name)); }
   catch (e) { logAction(id, c.owner, { action: 'snapshot.restore_failed', name: c.params.name, error: failText(e) }); throw e; }
   uiCache.delete(id);
@@ -306,7 +320,7 @@ r.post('/v1/devices/:id/snapshots/:name/restore', async (c) => {
   return { ok: true };
 });
 r.del('/v1/devices/:id/snapshots/:name', async (c) => {
-  const { id, b, nid } = dev(c); checkLease(id, c.owner);
+  const { id, b, nid } = dev(c); checkLease(id, c.owner); internalSnapshot(c.params.name);
   await need(b, 'deleteSnapshot', 'snapshots')(nid, c.params.name);
   return { ok: true };
 });

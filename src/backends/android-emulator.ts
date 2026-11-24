@@ -1,10 +1,11 @@
 // Android Emulator backend. Managed AVDs live in ANDROID_AVD_HOME=stateDir('avd'), isolated from the
 // user's ~/.android/avd (those are listed read-only as managed=false and never modified).
 import { spawn, type ChildProcess } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, closeSync } from 'node:fs';
+import { constants as fsc, copyFileSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync, closeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { run, sleep } from '../core/exec.ts';
 import { stateDir, toolEnv, which } from '../core/paths.ts';
 import {
@@ -231,16 +232,27 @@ async function runningEmulators(): Promise<Running[]> {
         A.adb(d.serial, ['emu', 'avd', 'path'], { allowFail: true, timeoutMs: 5000 }),
       ]);
       const name = n.stdout.split('\n')[0].trim(); const path = p.stdout.split('\n')[0].trim();
-      if (name && name !== 'KO') { c = { name, path, at: Date.now() }; serialCache.set(d.serial, c); }
+      // An unknown path (the console didn't answer) is asked again next time, not remembered.
+      if (name && name !== 'KO' && path && path !== 'KO') { c = { name, path, at: Date.now() }; serialCache.set(d.serial, c); }
+      else return { serial: d.serial, state: d.state, name: name === 'KO' ? '' : name, path: '' };
     }
     return { serial: d.serial, state: d.state, name: c?.name ?? '', path: c?.path ?? '' };
   }));
 }
-async function serialFor(name: string): Promise<string | undefined> {
+const canonical = (p: string) => { try { return realpathSync(p); } catch { return resolve(p).replace(/\/+$/, ''); } };
+/** The running emulator of this AVD: the one whose `emu avd path` is the AVD's folder. A same-named emulator of another
+ *  AVD (Android Studio's) is not it. One whose path is unknown (its console didn't answer) matches by name, except
+ *  `strict`: what idle sleep does to a phone (save, stop, wake) needs a positive match. Inventory and every command
+ *  use this one matcher, so they can't disagree. */
+export function runningFor<R extends { name: string; path: string }>(running: R[], a: { name: string; avdDir: string }, strict = false): R | undefined {
+  const dir = canonical(a.avdDir);
+  return running.find((r) => r.path && canonical(r.path) === dir) ?? (strict ? undefined : running.find((r) => r.name === a.name && !r.path));
+}
+async function serialFor(name: string, strict = false): Promise<string | undefined> {
   const a = findAvd(name);
-  const r = (await runningEmulators()).filter((e) => e.name === name);
-  if (r.length > 1 && a) return (r.find((e) => e.path && e.path.replace(/\/$/, '') === a.avdDir.replace(/\/$/, '')) ?? r[0]).serial;
-  return r[0]?.serial;
+  const running = await runningEmulators();
+  if (!a) return strict ? undefined : running.find((e) => e.name === name)?.serial;
+  return runningFor(running, a, strict)?.serial;
 }
 async function requireSerial(name: string): Promise<string> {
   const s = await serialFor(name);
@@ -422,8 +434,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     const user = scanAvds(userHome(), false).filter((a) => !names.has(a.name));
     let running: Running[] = [];
     try { running = await runningEmulators(); } catch { /* adb missing */ }
-    const byPath = (a: AvdEntry) => running.find((r) => r.path && r.path.replace(/\/$/, '') === a.avdDir.replace(/\/$/, '')) ?? running.find((r) => r.name === a.name && !r.path);
-    return [...managed, ...user].map((a) => toDevice(a, byPath(a)));
+    return [...managed, ...user].map((a) => toDevice(a, runningFor(running, a)));
   },
 
   async listImages() {
@@ -576,9 +587,9 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       return { name: n, createdAt: at.toISOString(), ...(sizeMB !== undefined ? { sizeMB } : {}) };
     }).sort((x, y) => (x.createdAt ?? '').localeCompare(y.createdAt ?? ''));
   },
-  async saveSnapshot(name: string, snap: string) { await emuSnapshot(name, 'save', snap); },
+  async saveSnapshot(name: string, snap: string) { await emuSnapshot(name, 'save', personsSnapshot(snap)); },
   async restoreSnapshot(name: string, snap: string) {
-    await emuSnapshot(name, 'load', snap);
+    await emuSnapshot(name, 'load', personsSnapshot(snap));
     // The restored state can be a sleeping screen (the snapshot was saved with it off). The phone must end up
     // running and showing its screen: wake it, and report honestly if it didn't come back.
     const s = await serialFor(name);
@@ -597,6 +608,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     }
   },
   async deleteSnapshot(name: string, snap: string) {
+    personsSnapshot(snap);
     const s = await serialFor(name);
     if (s) { await emuSnapshot(name, 'del', snap); return; }
     const a = requireAvd(name);
@@ -700,95 +712,134 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   },
   runningSerial: serialFor,
   // ── idle sleep (src/daemon/idle-sleep.ts) ──
+  // One checkpoint per sleep: the emulator's own quick-boot state (default_boot), saved explicitly and checked before
+  // the phone stops. `emu kill` then saves it once more on the way out (there is no supported stop without that), and
+  // the wake quick-boots it, with -force-snapshot-load so a state that won't load can't turn into a fresh start.
   async saveSleep(name: string): Promise<SleepState> {
     const a = requireAvd(name);
     if (!a.managed) throw new PhoneDockError('PhoneDock only puts phones it created to sleep', 'forbidden', 403, undefined, `"${name}" lives in ${a.home}, outside PhoneDock's own emulators`);
-    const s = await requireSerial(name);
+    const s = await strictSerial(name);
+    const ramMB = Number(a.config['hw.ramSize']) || 2048;
+    const free = freeBytes(a.avdDir);
+    if (free !== undefined && !enoughDiskForSleep(free, ramMB)) {
+      const gb = (n: number) => (n / 1024 ** 3).toFixed(1);
+      throw new PhoneDockError('Not enough free disk to save the phone’s state', 'disk_full', 507,
+        [`It keeps running. Saving it needs about ${gb(ramMB * 1024 ** 2 + SLEEP_DISK_MARGIN)} GB free; ${gb(free)} GB is.`],
+        `${a.avdDir}: ${free} bytes free, hw.ramSize=${ramMB} MB`);
+    }
+    // A token in the guest, written just before the save: the wake checks it's this save that came back, not another
+    // of the same boot (a snapshot the person saved earlier, say).
+    const token = randomBytes(8).toString('hex');
+    await A.adb(s, ['shell', `echo ${token} > ${SLEEP_TOKEN_FILE}`], { timeoutMs: 10_000 });
     const id = await guestIdentity(s);
+    if (id.token !== token || !id.bootId) throw new PhoneDockError('Couldn’t save the phone’s state', 'snapshot_failed', 500, ['It keeps running; PhoneDock tries again after it has been idle for another while.'], `guest didn't keep the sleep token (read ${JSON.stringify(id)})`);
     const t0 = Date.now();
-    await emuSnapshot(name, 'save', SLEEP_SNAPSHOT);
-    // The console said OK; check the files are really there and new before anything stops the phone.
-    const dir = join(a.avdDir, 'snapshots', SLEEP_SNAPSHOT);
-    let written = false;
-    try {
-      const pb = statSync(join(dir, 'snapshot.pb')), ram = statSync(join(dir, 'ram.bin'));
-      written = pb.mtimeMs >= t0 - 2000 && ram.size > 0;
-    } catch { /* missing */ }
-    if (!written) throw new PhoneDockError('Couldn’t save the phone’s state', 'snapshot_failed', 500, ['It keeps running; PhoneDock tries again after it has been idle for another while.'], `${dir}: snapshot.pb or ram.bin missing or older than the save`);
-    return { snapshot: SLEEP_SNAPSHOT, savedAt: new Date(t0).toISOString(), ...id };
+    await emuSnapshot(name, 'save', QUICKBOOT_SNAPSHOT, true);
+    savedOn.set(name, s);
+    if (!checkpointWritten(a, t0)) throw new PhoneDockError('Couldn’t save the phone’s state', 'snapshot_failed', 500, ['It keeps running; PhoneDock tries again after it has been idle for another while.'], `${join(a.avdDir, 'snapshots', QUICKBOOT_SNAPSHOT)}: snapshot.pb or ram.bin missing or older than the save`);
+    return { snapshot: QUICKBOOT_SNAPSHOT, savedAt: new Date(t0).toISOString(), ...id };
   },
 
-  async stopAfterSleep(name: string): Promise<void> {
-    const s = await serialFor(name);
-    if (!s) return;
-    const pid = (await emulatorProcess(name))?.pid ?? children.get(name)?.pid;
-    // The emulator saves its own quick-boot state on the way out (a few seconds); its memory is free only once the
-    // process is gone, not when adb drops the serial.
+  async stopAfterSleep(name: string, opts: { timeoutMs?: number } = {}): Promise<void> {
+    // The very emulator saveSleep checked (by serial), not one found by name now.
+    const s = savedOn.get(name) ?? await serialFor(name, true);
+    savedOn.delete(name);
+    if (!s) return;   // none of this AVD's is running: stopped already
+    const proc = await emulatorProcessOf(name, s);
+    const timeoutMs = opts.timeoutMs ?? 180_000;
+    // The emulator saves its quick-boot state on the way out (a few seconds); its memory is free only once the process
+    // is gone. Success needs proof: the process (when known) gone, and adb no longer listing it.
     await A.adb(s, ['emu', 'kill'], { allowFail: true, timeoutMs: 10_000 });
-    const deadline = Date.now() + 180_000;
-    if (pid) {
-      while (Date.now() < deadline && processAlive(pid)) await sleep(250);
-      if (processAlive(pid)) throw new PhoneDockError('The phone didn’t stop', 'sleep_failed', 500, ['Shut it down from PhoneDock, or quit the emulator process.'], `emulator pid ${pid} still running 180 s after emu kill`);
+    const exited = async () => {
+      processCache = undefined;
+      const pidGone = proc ? !processAlive(proc.pid) : !(await emulatorProcessOf(name, s));
+      const listed = await A.adbDevices().then((l) => l.some((d) => d.serial === s), () => true);   // can't tell: still there
+      return pidGone && !listed;
+    };
+    const deadline = Date.now() + timeoutMs;
+    while (!(await exited())) {
+      if (Date.now() > deadline) throw new PhoneDockError('The phone didn’t stop', 'sleep_failed', 500, ['Shut it down from PhoneDock, or quit the emulator process.'], `emulator ${proc ? `pid ${proc.pid}` : '(process not found)'} / ${s} still there ${Math.round(timeoutMs / 1000)} s after emu kill`);
+      await sleep(250);
     }
-    // adb lists the serial for a moment after the process is gone: wait, so the device list says stopped at once.
-    const adbDeadline = Date.now() + (pid ? 15_000 : 180_000);
-    while (Date.now() < adbDeadline && (await A.adbDevices().catch(() => [])).some((d) => d.serial === s)) await sleep(250);
-    processCache = undefined;
     serialCache.delete(s);
   },
 
   async wakeFromSleep(name: string, saved: SleepState, opts: { onProgress?: (l: string) => void } = {}): Promise<WakeReport> {
     const p = opts.onProgress;
-    const started = await bootAvd(name, { headless: true, onProgress: p });
-    const s = await requireSerial(name);
+    const a = requireAvd(name);
+    const already = await serialFor(name, true);
+    if (already) {
+      // Running already: an earlier attempt or another daemon woke it (it is the saved state), or someone started it
+      // elsewhere while it slept (it may be in use: left as it is).
+      dropRecovery(a);
+      const report: WakeReport = resumedFrom(await guestIdentityRetry(already), saved)
+        ? { resumed: true, via: 'quickboot' }
+        : { resumed: false, via: 'cold', note: 'It was started elsewhere while it slept, so it kept the state it has now.' };
+      report.clock = await setGuestClock(already);
+      return report;
+    }
+    // The emulator deletes a quick-boot state it fails to load: keep a copy (an APFS clone, no extra disk) until the
+    // wake is verified, and put it back if the load fails, so the next attempt (or a person) still has it.
+    keepRecovery(a);
+    let started: { coldBoot: boolean };
+    try { started = await bootAvd(name, { headless: true, onProgress: p, forceSnapshotLoad: true }); }
+    catch (e) {
+      restoreRecovery(a);
+      const pe = e as PhoneDockError;
+      throw new PhoneDockError('The phone’s saved state didn’t load', pe.code ?? 'boot_failed', pe.status ?? 500,
+        ['Its saved state is kept. Try again; to start it fresh instead (apps and data are kept), use Cold Boot.'], [pe.message, pe.detail].filter(Boolean).join('\n'));
+    }
+    const s = await strictSerial(name);
     let report: WakeReport;
     if (started.coldBoot) {
       // A virtual phone whose disguise changed (a PhoneDock update) must start cold, or the saved state would bring
       // the old identity back. Its apps and data are kept; what was open is not.
       report = { resumed: false, via: 'cold', note: 'This virtual phone’s setup changed in this PhoneDock version, so it started fresh (apps and data are kept).' };
-    } else if (resumedFrom(await guestIdentity(s).catch(() => ({})), saved)) {
+    } else if (resumedFrom(await guestIdentityRetry(s), saved)) {
       report = { resumed: true, via: 'quickboot' };
-    } else if (started.alreadyRunning) {
-      // Someone started it while it slept (another tool, or an older PhoneDock): it may be in use. Leave it as it is.
-      report = { resumed: false, via: 'cold', note: 'It was started elsewhere while it slept, so it kept the state it has now.' };
     } else {
-      // The quick-boot state the emulator saved on its way out didn't load (or was older): load the one PhoneDock
-      // saved and checked before it stopped the phone.
-      p?.('loading the state saved before it slept');
-      await emuSnapshot(name, 'load', SLEEP_SNAPSHOT);
-      await A.waitBootCompleted(s, 60_000).catch(() => undefined);
-      await A.adb(s, ['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], { allowFail: true });
-      await A.adb(s, ['shell', 'wm', 'dismiss-keyguard'], { allowFail: true });
-      report = resumedFrom(await guestIdentity(s).catch(() => ({})), saved)
-        ? { resumed: true, via: 'snapshot' }
-        : { resumed: false, via: 'cold', note: 'The saved state didn’t load, so the phone started fresh (apps and data are kept).' };
+      report = { resumed: false, via: 'cold', note: 'It came back from a different saved state than the one it slept in (it was started and stopped elsewhere meanwhile).' };
     }
-    await emuSnapshot(name, 'del', SLEEP_SNAPSHOT).catch(() => undefined);   // ~3 GB per phone on disk: not kept
+    dropRecovery(a);
     report.clock = await setGuestClock(s);
     return report;
   },
 
   async discardSleep(name: string): Promise<void> {
-    try {
-      if (await serialFor(name)) { await emuSnapshot(name, 'del', SLEEP_SNAPSHOT); return; }
-      const a = findAvd(name);
-      if (a?.managed) rmSync(join(a.avdDir, 'snapshots', SLEEP_SNAPSHOT), { recursive: true, force: true });
-    } catch { /* best effort */ }
+    // Nothing the person can see: only a recovery copy a wake may have left behind (and the serial a cancelled
+    // sleep checked).
+    savedOn.delete(name);
+    try { const a = findAvd(name); if (a?.managed) dropRecovery(a); } catch { /* best effort */ }
   },
 
-  async keepAwake(name: string): Promise<string | undefined> {
-    // The person may be using the phone where PhoneDock sees no input: the emulator's own window, or scrcpy.
-    const proc = await emulatorProcess(name);
+  async keepAwake(name: string, opts: { timeoutSec?: number | null; guest?: boolean } = {}): Promise<string | undefined> {
+    // Use PhoneDock can't see: the emulator's own window, scrcpy, someone's adb session, and (guest) the phone's own
+    // idle clock and test runs. Whatever can't be read counts as in use: an unknown is never put to sleep.
+    const cantTell = (why: string) => `PhoneDock can’t tell whether it is in use (${why})`;
+    const s = await serialFor(name, true).catch(() => undefined);
+    const ps = await processList();
+    if (!ps.ok) return cantTell('couldn’t list processes');
+    const proc = await emulatorProcessOf(name, s);
     if (proc && !hasArg(proc.args, '-no-window')) return 'its emulator window is open';
-    const s = await serialFor(name).catch(() => undefined);
-    if (s && (await processes()).some((x) => /(^|\/)scrcpy(\s|$)/.test(x.args) && hasArgPair(x.args, '-s', s))) return 'it is open in a separate window';
+    if (!s) return undefined;
+    if (ps.list.some((x) => /(^|\/)scrcpy(\s|$)/.test(x.args) && hasArgPair(x.args, '-s', s))) return 'it is open in a separate window';
+    const session = ps.list.find((x) => adbSessionOn(x.args, s) && !descendsFrom(x, process.pid, ps.list));
+    if (session) return `an adb session is open on it (${adbSessionOn(session.args, s)})`;
+    if (!opts.guest) return undefined;
+    const r = await A.adb(s, ['shell', 'dumpsys power | grep -E "^ *lastUserActivityTime=" | head -1; ps -A -o ARGS | grep "[c]om.android.commands.am.Am instrument" | head -1'],
+      { allowFail: true, timeoutMs: 10_000 }).catch(() => undefined);
+    if (!r || r.code !== 0) return cantTell('the phone didn’t answer');
+    if (/Am instrument/.test(r.stdout)) return 'a test is running on it (am instrument)';
+    const ago = /\((\d+) ms ago\)/.exec(r.stdout)?.[1];
+    if (ago === undefined) return cantTell('it didn’t say when it was last used');
+    if (opts.timeoutSec && Number(ago) < opts.timeoutSec * 1000) return `it was used ${Math.round(Number(ago) / 60_000)} min ago through something other than PhoneDock (adb, Android Studio or a test)`;
     return undefined;
   },
 };
 
 /** Boot an AVD (backend.boot). `coldBoot`: it started without its quick-boot state (asked for, or forced because a
  *  virtual phone's disguise changed). */
-async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: string) => void } = {}): Promise<{ coldBoot: boolean; alreadyRunning?: boolean }> {
+async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: string) => void; forceSnapshotLoad?: boolean } = {}): Promise<{ coldBoot: boolean; alreadyRunning?: boolean }> {
   const a = requireAvd(name);
   const p = opts.onProgress;
   if (await serialFor(name)) { p?.('already running'); return { coldBoot: false, alreadyRunning: true }; }
@@ -811,6 +862,8 @@ async function bootAvd(name: string, opts: BootOptions & { onProgress?: (l: stri
     // Host GPU (Metal via gfxstream) works headless on Apple Silicon; override with PHONEDOCK_EMULATOR_GPU.
     args.push('-gpu', process.env.PHONEDOCK_EMULATOR_GPU ?? 'host');
     if (coldBoot) args.push('-no-snapshot-load');
+    // A wake: the quick-boot state or nothing (the emulator exits rather than start fresh, and PhoneDock keeps the state).
+    else if (opts.forceSnapshotLoad) args.push('-force-snapshot-load');
     if (disguiseBoot?.ramdiskPath) args.push('-ramdisk', disguiseBoot.ramdiskPath);
     // Vulkan: an app that uses it (Chrome does) makes the emulator refuse to save a snapshot (UNSUPPORTED_VK_APP).
     // Without it Chrome renders through OpenGL ES and snapshots save fine (measured; screenshots as fast).
@@ -968,22 +1021,86 @@ function vulkanEnabled(a: AvdEntry): boolean {
   return vulkan;
 }
 const INTERNAL_SNAPSHOT = 'default_boot';   // the emulator's own quick-boot snapshot: not the person's
-/** The state PhoneDock saves before it puts an idle phone to sleep (saveSleep): not the person's either. */
-export const SLEEP_SNAPSHOT = 'phonedock_sleep';
-function userSnapshotNames(avdDir: string): string[] { return safeLs(join(avdDir, 'snapshots')).filter((n) => n !== INTERNAL_SNAPSHOT && n !== SLEEP_SNAPSHOT); }
+/** Idle sleep's one checkpoint is that same quick-boot state. */
+const QUICKBOOT_SNAPSHOT = INTERNAL_SNAPSHOT;
+function userSnapshotNames(avdDir: string): string[] { return safeLs(join(avdDir, 'snapshots')).filter((n) => n !== INTERNAL_SNAPSHOT); }
+/** A snapshot name from a person (the API): never one that normalises to the emulator's own quick-boot state. */
+function personsSnapshot(snap: string): string {
+  if (sanitizeName(snap) === INTERNAL_SNAPSHOT) throw new PhoneDockError(`"${snap}" is reserved for the emulator`, 'bad_request', 400, ['Choose another snapshot name.'], `"${snap}" normalises to "${INTERNAL_SNAPSHOT}", the emulator's quick-boot state`);
+  return snap;
+}
 
 // ── idle sleep helpers ───────────────────────────────────────────────────────
 /** Who the guest is right now: its kernel boot id and uptime. A guest resumed from a save has the same boot id and is
  *  at least as old as it was just before the save; a cold boot (or an older quick-boot state) is not. */
-async function guestIdentity(serial: string): Promise<{ bootId?: string; uptimeSec?: number }> {
-  const r = await A.adb(serial, ['shell', 'cat', '/proc/sys/kernel/random/boot_id', '/proc/uptime'], { allowFail: true, timeoutMs: 10_000 });
-  const [boot, up] = r.stdout.trim().split('\n').map((l) => l.trim());
+const SLEEP_TOKEN_FILE = '/data/local/tmp/.phonedock-sleep';
+/** The serial saveSleep checked, for the stop that follows it. */
+const savedOn = new Map<string, string>();
+async function guestIdentity(serial: string): Promise<{ bootId?: string; uptimeSec?: number; token?: string }> {
+  const r = await A.adb(serial, ['shell', 'cat', '/proc/sys/kernel/random/boot_id', '/proc/uptime', SLEEP_TOKEN_FILE], { allowFail: true, timeoutMs: 10_000 });
+  const [boot, up, token] = r.stdout.trim().split('\n').map((l) => l.trim());
   const uptimeSec = Number.parseFloat(up ?? '');
-  return { ...(/^[0-9a-f-]{36}$/.test(boot ?? '') ? { bootId: boot } : {}), ...(Number.isFinite(uptimeSec) ? { uptimeSec } : {}) };
+  return { ...(/^[0-9a-f-]{36}$/.test(boot ?? '') ? { bootId: boot } : {}), ...(Number.isFinite(uptimeSec) ? { uptimeSec } : {}), ...(/^[0-9a-f]{16}$/.test(token ?? '') ? { token } : {}) };
 }
-export function resumedFrom(now: { bootId?: string; uptimeSec?: number }, saved: Pick<SleepState, 'bootId' | 'uptimeSec'>): boolean {
+/** Right after a boot adb can drop a command or two. */
+async function guestIdentityRetry(serial: string): Promise<{ bootId?: string; uptimeSec?: number; token?: string }> {
+  for (let i = 0; ; i++) {
+    const id = await guestIdentity(serial).catch(() => ({}));
+    if ((id as { bootId?: string }).bootId || i >= 4) return id;
+    await sleep(500);
+  }
+}
+/** The guest is the one that was saved: same kernel boot, at least as old, and (when the save had one) the token written
+ *  just before that save. */
+export function resumedFrom(now: { bootId?: string; uptimeSec?: number; token?: string }, saved: Pick<SleepState, 'bootId' | 'uptimeSec' | 'token'>): boolean {
   if (!saved.bootId || now.bootId !== saved.bootId) return false;
+  if (saved.token && now.token !== saved.token) return false;
   return saved.uptimeSec === undefined || (now.uptimeSec ?? -1) >= saved.uptimeSec - 1;
+}
+/** Room for a sleep save: up to the guest's whole RAM, and a margin. */
+const SLEEP_DISK_MARGIN = 1024 ** 3;
+export function enoughDiskForSleep(freeBytes: number, ramMB: number): boolean { return freeBytes >= ramMB * 1024 ** 2 + SLEEP_DISK_MARGIN; }
+function freeBytes(dir: string): number | undefined {
+  try { const s = statfsSync(dir); return Number(s.bavail) * Number(s.bsize); } catch { return undefined; }
+}
+function checkpointWritten(a: AvdEntry, since: number): boolean {
+  const dir = join(a.avdDir, 'snapshots', QUICKBOOT_SNAPSHOT);
+  try { return statSync(join(dir, 'snapshot.pb')).mtimeMs >= since - 2000 && statSync(join(dir, 'ram.bin')).size > 0; } catch { return false; }
+}
+// The recovery copy of the checkpoint while a wake loads it. A snapshot is two halves: its folder (RAM, devices) and an
+// internal snapshot of the same name in each of the AVD's qcow2 disk images. An emulator that fails to load it deletes
+// both, so the copy is of both, taken with the emulator stopped.
+const recoveryDir = (a: AvdEntry) => join(a.avdDir, 'phonedock-sleep-recovery');
+const qcow2In = (dir: string) => { try { return readdirSync(dir).filter((f) => f.endsWith('.qcow2')); } catch { return []; } };
+const diskImages = (a: AvdEntry) => qcow2In(a.avdDir);
+function keepRecovery(a: AvdEntry) {
+  const src = join(a.avdDir, 'snapshots', QUICKBOOT_SNAPSHOT);
+  const dir = recoveryDir(a);
+  rmSync(dir, { recursive: true, force: true });
+  if (!existsSync(src)) return;
+  // Clones where the disk can (APFS: instant, no extra space until the emulator writes), copies where it can't.
+  try {
+    mkdirSync(dir, { recursive: true });
+    for (const q of diskImages(a)) copyFileSync(join(a.avdDir, q), join(dir, q), fsc.COPYFILE_FICLONE);
+    cpSync(src, join(dir, QUICKBOOT_SNAPSHOT), { recursive: true, mode: fsc.COPYFILE_FICLONE });
+    writeFileSync(join(dir, 'complete'), '');
+  } catch (e) { rmSync(dir, { recursive: true, force: true }); console.error(`[phonedockd] couldn't keep a copy of ${a.name}'s saved state during its wake: ${(e as Error).message}`); }
+}
+function restoreRecovery(a: AvdEntry) {
+  const dir = recoveryDir(a);
+  if (!existsSync(join(dir, 'complete'))) { rmSync(dir, { recursive: true, force: true }); return; }
+  for (const q of qcow2In(dir)) renameSync(join(dir, q), join(a.avdDir, q));
+  const dst = join(a.avdDir, 'snapshots', QUICKBOOT_SNAPSHOT);
+  rmSync(dst, { recursive: true, force: true });
+  mkdirSync(join(a.avdDir, 'snapshots'), { recursive: true });
+  renameSync(join(dir, QUICKBOOT_SNAPSHOT), dst);
+  rmSync(dir, { recursive: true, force: true });
+}
+function dropRecovery(a: AvdEntry) { rmSync(recoveryDir(a), { recursive: true, force: true }); }
+async function strictSerial(name: string): Promise<string> {
+  const s = await serialFor(name, true);
+  if (!s) throw new PhoneDockError(`Emulator "${name}" is not running`, 'not_running', 409, ['Start the emulator first.'], `No running emulator is positively this AVD (${findAvd(name)?.avdDir ?? name})`);
+  return s;
 }
 /** A phone resumed from a save keeps the time it had then until something corrects it. The emulator corrects it only
  *  through its modem, which a virtual phone often boots without, so set it from the Mac's clock. The shell user may
@@ -1001,23 +1118,48 @@ async function setGuestClock(serial: string): Promise<{ skewSec: number; set: bo
   const after = await read();
   return Number.isFinite(after) && Math.abs(after) <= 2 ? { skewSec: skew, set: true } : { skewSec: skew, set: false, error: `the clock is still ${after} s off after setting it` };
 }
-interface Proc { pid: number; args: string }
-let processCache: { at: number; list: Promise<Proc[]> } | undefined;
-/** `ps` once every few seconds, shared by every check in that time. */
-function processes(): Promise<Proc[]> {
+interface Proc { pid: number; ppid: number; args: string }
+let processCache: { at: number; list: Promise<{ ok: boolean; list: Proc[] }> } | undefined;
+/** `ps` once every few seconds, shared by every check in that time. `ok: false` when it couldn't be read. */
+function processList(): Promise<{ ok: boolean; list: Proc[] }> {
   if (processCache && Date.now() - processCache.at < 3000) return processCache.list;
-  const list = run('/bin/ps', ['-axww', '-o', 'pid=,args='], { allowFail: true, timeoutMs: 10_000 }).then((r) => r.stdout.split('\n').map((l) => {
-    const m = /^\s*(\d+)\s+(.*)$/.exec(l);
-    return m ? { pid: Number(m[1]), args: m[2] } : undefined;
-  }).filter((x): x is Proc => !!x), () => [] as Proc[]);
+  const list = run('/bin/ps', ['-axww', '-o', 'pid=,ppid=,args='], { allowFail: true, timeoutMs: 10_000 }).then((r) => {
+    const procs = r.stdout.split('\n').map((l) => {
+      const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l);
+      return m ? { pid: Number(m[1]), ppid: Number(m[2]), args: m[3] } : undefined;
+    }).filter((x): x is Proc => !!x);
+    return { ok: r.code === 0 && procs.length > 0, list: procs };
+  }, () => ({ ok: false, list: [] as Proc[] }));
   processCache = { at: Date.now(), list };
   return list;
 }
+const processes = async () => (await processList()).list;
+/** Started (directly or not) by process `root`: this daemon's own adb commands are not someone else's session. */
+function descendsFrom(p: Proc, root: number, all: Proc[]): boolean {
+  const parent = new Map(all.map((x) => [x.pid, x.ppid]));
+  let cur: number | undefined = p.ppid;
+  for (let i = 0; i < 32 && cur && cur > 1; i++) { if (cur === root) return true; cur = parent.get(cur); }
+  return false;
+}
+/** `adb -s <serial> shell|logcat|…` in someone's terminal or IDE: its subcommand, else undefined. */
+export function adbSessionOn(args: string, serial: string): string | undefined {
+  const w = args.split(/\s+/);
+  const i = w.findIndex((x) => /(^|\/)adb$/.test(x));
+  if (i < 0) return undefined;
+  const rest = w.slice(i + 1);
+  const s = rest.indexOf('-s');
+  if (s < 0 || rest[s + 1] !== serial) return undefined;
+  return rest.slice(s + 2).find((x) => /^(shell|logcat|exec-out|install|install-multiple|bugreport|jdwp|am|instrument)$/.test(x));
+}
 const hasArg = (args: string, a: string) => (' ' + args + ' ').includes(` ${a} `);
 const hasArgPair = (args: string, a: string, v: string) => (' ' + args + ' ').includes(` ${a} ${v} `);
-/** The emulator (qemu) process running this AVD, if any. */
-async function emulatorProcess(name: string): Promise<Proc | undefined> {
-  return (await processes()).find((x) => /(^|\/)(qemu-system-[\w-]+|emulator)(\s|$)/.test(x.args.split(' -')[0] + ' ') && hasArgPair(x.args, '-avd', name));
+const isEmulatorArgs = (args: string) => /(^|\/)(qemu-system-[\w-]+|emulator)(\s|$)/.test(args.split(' -')[0] + ' ');
+/** The emulator (qemu) process running this AVD, if any. With its serial: the one on that console port (another AVD
+ *  of the same name runs on another port); without: the only one by that name. */
+async function emulatorProcessOf(name: string, serial?: string): Promise<Proc | undefined> {
+  const port = serial?.replace(/^emulator-/, '');
+  const ps = (await processes()).filter((x) => isEmulatorArgs(x.args) && hasArgPair(x.args, '-avd', name));
+  return (port ? ps.find((x) => hasArgPair(x.args, '-port', port)) : undefined) ?? (ps.length === 1 && !serial ? ps[0] : undefined);
 }
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
@@ -1049,8 +1191,8 @@ export function snapshotFailure(op: 'save' | 'load' | 'del', output: string): Ph
   if (/already exists/i.test(out)) return new PhoneDockError('A snapshot with that name already exists', 'conflict', 409, ['Choose another name, or delete the old snapshot first.'], `snapshot ${op} failed: ${out}`);
   return new PhoneDockError(`Couldn’t ${verb} the snapshot`, 'snapshot_failed', 500, ['Wait a few seconds and try again; if it keeps failing, restart the phone.'], `snapshot ${op} failed: ${out}`);
 }
-async function emuSnapshot(name: string, op: 'save' | 'load' | 'del', snap: string) {
-  const s = await serialFor(name);
+async function emuSnapshot(name: string, op: 'save' | 'load' | 'del', snap: string, strict = false) {
+  const s = await serialFor(name, strict);
   if (!s) throw new PhoneDockError(`Emulator "${name}" is not running.`, 'not_running', 409, ['Start the emulator first.'], 'Stopped devices can only list or delete snapshots');
   const sn = sanitizeName(snap);
   const r = await A.adb(s, ['emu', 'avd', 'snapshot', op === 'del' ? 'delete' : op, sn], { allowFail: true, timeoutMs: 180_000 });
