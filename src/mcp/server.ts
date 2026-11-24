@@ -26,7 +26,7 @@ import { registerTraceTools } from './tools-trace.ts';
 import { formatUiObservation, humanNeeded, noteBatchDeviceWrite, resolveObserve, type FormatUiResult, type ObserveMode } from './ui-format.ts';
 export { humanNeeded };
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const DEFAULT_MAX_SIZE = 1024;
 const RUNTIME_TOOLS = new Set(['list_devices', 'acquire_device', 'release_device', 'get_ui', 'screenshot', 'tap',
   'swipe', 'type_text', 'fill', 'press_key', 'scroll_to', 'go_back', 'system_gesture', 'hide_keyboard', 'wait_for',
