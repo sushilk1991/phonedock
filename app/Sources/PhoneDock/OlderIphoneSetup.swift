@@ -72,6 +72,14 @@ enum ControlSetup: Equatable {
 }
 
 extension AppModel {
+    /// The setup run to show for a device. A failure that left the service managing the phone (locked, untrusted:
+    /// the service carries on by itself) gives way to the service's live state once that moves on.
+    func controlFlow(for device: Device) -> ControlSetup? {
+        let flow = controlSetups[device.id]
+        if case .failed = flow, let c = device.wdaControl, !c.isFailed { return nil }
+        return flow
+    }
+
     /// Set Up Control: read Xcode's teams; one goes straight on, several ask, none says how to sign in.
     func beginControlSetup(_ device: Device) {
         guard let c = client else { toast = Toast(title: "PhoneDock isn’t connected", message: "It reconnects automatically."); return }
@@ -97,7 +105,10 @@ extension AppModel {
     }
 
     func startControlSetup(_ device: Device, team: String?) {
-        guard let c = client, let udid = device.nativeId else { return }
+        guard let c = client, let udid = device.nativeId else {
+            controlSetups[device.id] = .failed(FriendlyError(title: "PhoneDock isn’t connected", message: "It reconnects automatically. Try again in a moment."))
+            return
+        }
         controlSetups[device.id] = .running("Checking Xcode and the iPhone…")
         Task {
             do {
@@ -176,7 +187,7 @@ struct ControlSetupPanel: View {
     var compact = false
     @State private var team: String?
 
-    private var flow: ControlSetup? { model.controlSetups[device.id] }
+    private var flow: ControlSetup? { model.controlFlow(for: device) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
@@ -190,7 +201,8 @@ struct ControlSetupPanel: View {
             case .done:
                 ConnectStatusView(status: .ok("Control is set up")).testAnchor("control-setup-done")
             case .failed(let p):
-                ProblemView(problem: p, retry: { model.beginControlSetup(device) })
+                ProblemView(problem: p, retry: { model.beginControlSetup(device) },
+                            otherTitle: "Dismiss", other: { model.dismissControlSetup(device) })
                     .testAnchor("control-setup-problem")
             case nil:
                 idle
@@ -330,7 +342,7 @@ struct OlderIphoneControlCapsule: View {
 
     var body: some View {
         HStack(spacing: Theme.Space.xs) {
-            switch model.controlSetups[device.id] {
+            switch model.controlFlow(for: device) {
             case .checking, .running:
                 ProgressView().controlSize(.mini).id(scheme)
                 Text("Setting up control…").font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.primary)

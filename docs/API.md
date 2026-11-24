@@ -727,25 +727,36 @@ clone-and-`xcodebuild test`:
    changes, when the built runner's provisioning profile expires within a day (personal teams sign for 7 days), or when
    the phone isn't in that profile. Paid teams keep upstream's `com.facebook.WebDriverAgentRunner`; a personal team
    gets `dev.phonedock.wda.<team>` (another team owns upstream's id). Builds unused for 30 days are deleted.
-3. *Launch* with `xcodebuild test-without-building -xctestrun <file> -destination id=<udid>`; a launch refused for
-   expired signing rebuilds once. Build/launch failures: `xcode_account_missing`, `bundle_id_unavailable`,
+3. *Launch* with `xcodebuild test-without-building -xctestrun <file> -destination id=<udid>`. A launch refused for
+   expired signing, or called untrusted by a build more than an hour old (a certificate revoked from another Mac reads
+   the same), rebuilds once. Build/launch failures: `xcode_account_missing`, `bundle_id_unavailable`,
    `signing_limit`, `device_not_registered`, `wda_untrusted` (trust the developer under Settings › General › VPN &
    Device Management), `signing_expired`, `device_locked`, `developer_mode_off`, `no_device`, else `wda_setup_failed`
-   with Xcode's last lines in `detail`.
+   with Xcode's last lines in `detail` (a failure to start xcodebuild at all is also `wda_setup_failed`, no longer
+   `exec_failed`).
+
+A WebDriverAgent already running keeps serving until the new build is ready, so a setup that fails to build (another
+team, say) leaves it running and puts the previous configuration back. One setup at a time per phone: another gets
+`409 busy`. `DELETE /v1/connect/:id` during a setup stops its build or launch, and the job fails with `cancelled` (409).
 
 PhoneDock then keeps WebDriverAgent running (`wda` in `ios-device.json`): it relaunches it when the daemon starts (a
 WebDriverAgent already answering at the saved URL is adopted instead), when the phone reappears in devicectl (USB or
-Wi-Fi), and when `GET /status` stops answering for 45 s, with one launcher per phone and backoff (5 s, 15 s, 1 min,
-5 min, 15 min; it gives up after 6 failed launches until the phone reconnects or setup runs again). Each launch saves
-the address WebDriverAgent prints (DHCP can change it). A runner that started but never answered is left running and
-reported `unreachable` (a network or Local Network problem). A filtered service (`PHONEDOCK_DEVICE_FILTER`) never
-supervises.
+Wi-Fi), when the runner exits, and when `GET /status` stops answering for 45 s, with one launcher per phone and one
+build at a time per build directory. Failed launches, exits and hangs count toward giving up (pauses of 5 s, 15 s,
+1 min, 5 min, 15 min; it gives up after 6, until the phone reconnects or setup runs again); the count is forgiven once a
+runner has answered for a minute. Each launch saves the address WebDriverAgent prints (DHCP can change it). A runner
+that started but never answered is left running and reported `unreachable` (a network or Local Network problem). Waits
+devicectl can see (not connected, not trusted, Developer Mode off, locked) are checked every 30 s without launching;
+waits only a launch reveals (xcodebuild says untrusted, locked or unreachable) are retried after 30 s, 1 min, 5 min and
+15 min, and given up after 8. When the daemon exits it stops the runners it started; the next daemon starts them again
+without a rebuild. A filtered service (`PHONEDOCK_DEVICE_FILTER`) never supervises or launches on its own.
 
 `Device.meta.wdaControl` (added in 0.7.0): `null` unless PhoneDock manages the phone, else `{ managed: true, state,
 message, hint?, wdaUrl?, attempts, nextRetryAt?, updatedAt }` with `state` one of `starting`, `running`, `unreachable`
 (started, but this Mac can't reach it), `waiting_unlock` (locked, e.g. after a restart; retried once it is unlocked),
 `waiting_phone` (not connected, not trusted, or Developer Mode off), `waiting_trust` (developer certificate not trusted
-yet), `retrying`, `failed`. Waiting states don't count as failed launches. While it isn't `running`, its message is also
+yet), `retrying`, `failed`. `attempts` counts failed launches, exits and hangs since the last healthy run; waiting
+states don't count. While it isn't `running`, its message is also
 in `meta.readiness.hints`, input on such a phone fails with `503 wda_not_ready` (that message) before a WebDriverAgent
 URL exists, and `wda_unreachable` carries it after.
 

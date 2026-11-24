@@ -156,7 +156,9 @@ Management**, tap your Apple ID and tap **Trust**: PhoneDock notices and carries
 - **Keeps it running.** WebDriverAgent stops whenever the iPhone restarts or PhoneDock restarts (including after an
   update). PhoneDock starts it again when it starts, when the phone reconnects over USB or Wi-Fi, and when it stops
   answering, with growing pauses between tries. A locked phone (one that just restarted, for example) waits until you
-  unlock it; the device's Info tab says what PhoneDock is waiting for.
+  unlock it; the device's Info tab says what PhoneDock is waiting for. If it still can't start after several tries it
+  stops trying and says why; reconnect the phone or press Set Up Control again to start over. Setting up again keeps
+  the running WebDriverAgent until the new build is ready.
 - **Disconnect** (`phonedock disconnect ios-device:<UDID>`) stops all of that for the phone.
 
 ### No Apple ID in Xcode? Use an App Store Connect API key
