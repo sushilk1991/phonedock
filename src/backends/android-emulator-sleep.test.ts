@@ -224,11 +224,14 @@ test('who may be on this emulator: adb with -e, -t or no selector; scrcpy with -
     // a transfer, an install, or a command PhoneDock doesn't know: in use. Its inventory's read-only probes: not
     ['adb -s emulator-5554 push big.bin /sdcard/', 'push'], ['adb -s emulator-5554 pull /sdcard/x.mp4 .', 'pull'], ['adb -s emulator-5554 sync', 'sync'],
     ['adb -s emulator-5554 install app.apk', 'install'], ['adb -s emulator-5554 frobnicate', 'frobnicate'], ['adb -e push a /sdcard/', 'push'],
-    ['adb -s emulator-5554 emu avd name', undefined], ['adb -s emulator-5554 get-state', undefined], ['adb -s emulator-5556 push a b', undefined]] as const) {
+    ['adb -s emulator-5554 emu avd name', undefined], ['adb -s emulator-5554 get-state', undefined], ['adb -s emulator-5556 push a b', undefined],
+    // only a process that runs adb: a script or node running it, not the word elsewhere (grep, a shell whose script says it)
+    ['/bin/sh /tmp/x/adb -s emulator-5554 push a b', 'push'], ['node /tmp/sdk/platform-tools/adb -s emulator-5554 shell', 'shell'],
+    ['grep adb shell.log', undefined], ['/bin/zsh -c echo an adb command aimed at it', undefined], ['vim adb', undefined]] as const) {
     assert.equal(m.adbSessionOn(args, S), want, args);
   }
   for (const [args, want] of [['scrcpy --serial emulator-5554', true], ['scrcpy --serial=emulator-5554', true], ['/opt/homebrew/bin/scrcpy', true],
-    ['scrcpy -s emulator-5556', false], ['scrcpy -d', false], ['scrcpy -e', false]] as const) {
+    ['scrcpy -s emulator-5556', false], ['scrcpy -d', false], ['scrcpy -e', false], ['grep scrcpy notes.txt', false], ['brew upgrade scrcpy', false]] as const) {
     assert.equal(m.scrcpyOn(args, S), want, args);
   }
 });

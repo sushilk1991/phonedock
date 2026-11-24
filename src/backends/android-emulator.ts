@@ -1189,6 +1189,13 @@ function descendsFrom(p: Proc, root: number, all: Proc[]): boolean {
   for (let i = 0; i < 32 && cur && cur > 1; i++) { if (cur === root) return true; cur = parent.get(cur); }
   return false;
 }
+/** Where the tool `name` is the program a process runs: its first word, or its second behind an interpreter (a script, or
+ *  node running one). Only then: the word anywhere else (`grep adb`, a shell whose script mentions it) is not it. -1: not. */
+function programAt(w: string[], name: string): number {
+  const is = (x: string | undefined) => x === name || !!x?.endsWith(`/${name}`);
+  if (is(w[0])) return 0;
+  return /(^|\/)(sh|bash|zsh|dash|node|python3?|perl|env)$/.test(w[0] ?? '') && is(w[1]) ? 1 : -1;
+}
 /** adb commands aimed at no device (the adb server among them), and the read-only probes PhoneDock's inventory makes. */
 const ADB_NOT_USE = /^(devices|start-server|kill-server|version|help|connect|disconnect|pair|mdns|keygen|track-devices|fork-server|server|nodaemon|get-state|get-serialno|get-devpath)$/;
 /** An adb command someone runs that may be on this emulator (a session, a push or pull, an install, or one PhoneDock
@@ -1197,7 +1204,7 @@ const ADB_NOT_USE = /^(devices|start-server|kill-server|version|help|connect|dis
 export function adbSessionOn(args: string, serial: string): string | undefined {
   if (/ logcat -T 1 -v brief -s ScreenRecord:D PowerManagerService:I(\s|$)/.test(args) || / exec-out screenrecord --output-format=h264 /.test(args)) return undefined;
   const w = args.split(/\s+/);
-  const i = w.findIndex((x) => /(^|\/)adb$/.test(x));
+  const i = programAt(w, 'adb');
   if (i < 0) return undefined;
   // Its device: `-s <serial>`; `-d` is USB. `-e` (an emulator), `-t <id>` or none (`$ANDROID_SERIAL`, or the only
   // device) may be this one, so they count: unknown means in use.
@@ -1223,7 +1230,7 @@ function hostActivity(ps: Proc[], proc: Proc, s: string): string | undefined {
  *  or the only device). `-d` and `-e` pick a USB or a TCP/IP device, never an emulator. */
 export function scrcpyOn(args: string, serial: string): boolean {
   const w = args.split(/\s+/);
-  const i = w.findIndex((x) => /(^|\/)scrcpy$/.test(x));
+  const i = programAt(w, 'scrcpy');
   if (i < 0) return false;
   let sel: string | undefined;
   for (let j = i + 1; j < w.length; j++) {
