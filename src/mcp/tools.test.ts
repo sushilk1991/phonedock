@@ -759,3 +759,25 @@ test('MCP list_runs and get_run support summary, public-safe md, and json format
     assert.equal(JSON.parse(jsonRes.text).id, rec.id);
   } finally { await s.close(); }
 });
+
+test('iphone_control: set_up and stop act on the named real iPhone by UDID; a failed setup shows its cause; simulators are refused', async () => {
+  const phone = { id: 'ios-device:00008020-0000AAAA0000BBBB', nativeId: '00008020-0000AAAA0000BBBB', backend: 'ios-device', name: 'Old iPhone', platform: 'ios', state: 'running' };
+  const sim = { ...phone, id: 'ios-simulator:X', nativeId: 'X', backend: 'ios-simulator', name: 'Sim' };
+  const fake: Fake = {
+    calls: [],
+    resolveDevice: async (q: string) => (q === 'Sim' ? sim : phone),
+    wdaSetup: async (udid: string, o: unknown) => { fake.calls.push(['wdaSetup', udid, o]); return { id: 'job_1', kind: 'wda-setup', state: 'failed', error: { code: 'wda_setup_failed', message: 'Choose which team signs WebDriverAgent', cause: 'team_required' } }; },
+    wdaStop: async (udid: string) => { fake.calls.push(['wdaStop', udid]); return { ok: true, udid, stopped: true, confirmed: true }; },
+  };
+  const s = await connect(fake);
+  try {
+    const up = await s.call('iphone_control', { action: 'set_up', device: 'Old iPhone' });
+    assert.equal(up.isError, true);
+    assert.match(up.text, /cause: team_required/);
+    assert.deepEqual(fake.calls[0].slice(0, 2), ['wdaSetup', phone.nativeId]);
+    assert.equal((fake.calls[0][2] as { share?: boolean }).share, undefined, 'never shared unless asked');
+    const stop = await s.call('iphone_control', { action: 'stop', device: 'Old iPhone' });
+    assert.deepEqual([stop.isError, fake.calls[1]], [false, ['wdaStop', phone.nativeId]]);
+    assert.equal((await s.call('iphone_control', { action: 'stop', device: 'Sim' })).isError, true);
+  } finally { await s.close(); }
+});

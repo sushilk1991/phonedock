@@ -845,6 +845,16 @@ struct SidebarView: View {
                     .disabled(!online || !d.can("record") || model.recordingUnsupported.contains(d.id))
             }
         }
+        if d.isOlderPairedIphone {   // iOS 26 and older; progress and problems show in the Info tab's Control section
+            Divider()
+            let busy = model.controlBusy(d)
+            if !d.wdaReady {   // private from here: the sharing choice is in the Control section
+                Button("Set Up Control") { model.showControl(d); model.setUpControl(d, share: false) }
+                    .disabled(!online || !d.isRunning || busy)
+            }
+            Button("Stop Control") { model.showControl(d); model.stopControl(d) }
+                .disabled(!online || busy)
+        }
         Divider()
         Button("Copy Device ID") { DeviceActions.copyID(d) }
         if DeviceActions.canDelete(d) {
@@ -1079,6 +1089,8 @@ struct CommandWell: View {
     var plain = false
     /// One line, truncated in the middle (the tooltip shows it all; Copy copies it all). Otherwise it wraps.
     var oneLine = false
+    /// What to show when it should break differently from what Copy copies (an address on its own line, say).
+    var display: String? = nil
     var onCopy: (() -> Void)? = nil
     @State private var copied = false
 
@@ -1086,10 +1098,10 @@ struct CommandWell: View {
         HStack(alignment: .top, spacing: Theme.Space.m) {
             Group {
                 if oneLine {
-                    Text(command).lineLimit(1).truncationMode(.middle)
+                    Text(display ?? command).lineLimit(1).truncationMode(.middle)
                 } else {
                     // Wraps between words only: a path never breaks in the middle (its spaces and slashes stay together).
-                    CommandBody(command: command)
+                    CommandBody(command: display ?? command)
                 }
             }
                 .font(Theme.Fonts.mono)

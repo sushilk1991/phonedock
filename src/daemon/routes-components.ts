@@ -29,7 +29,8 @@ export function initComponents(customManager?: ComponentManager): ComponentManag
   const mgr = customManager ?? new ComponentManager({
     externalLookup(id) {
       if (id === 'ios-tools') return externalPymd3Python();
-      return which('axe');
+      if (id === 'axe') return which('axe');
+      return undefined;   // wda: only the pinned copy (or PHONEDOCK_WDA_SOURCE), never a checkout found on disk
     },
     onChange(status) {
       emit('component', status);

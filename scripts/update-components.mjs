@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// Re-pin PhoneDock managed components (tools/components.json + tools/ios-tools.lock).
+// Re-pin PhoneDock managed components (tools/components.json + tools/ios-tools.lock + tools/licenses/).
 // Enforces the >=14-day release age policy across the whole lock unless --allow-recent "<reason>" is supplied.
 //
 // Examples:
 //   node scripts/update-components.mjs --check
 //   node scripts/update-components.mjs --axe 1.8.0
+//   node scripts/update-components.mjs --wda 16.15.3
 //   node scripts/update-components.mjs --pymd3 11.63.1 --python-release 20261026 --python-version 3.12.16 \
 //     --allow-recent "Only version verified on iOS 27.2.1 hardware (UI tree and live video over Wi-Fi)" \
 //     --allow-recent-pkg ansilogs,apple-symbols,ipsw-parser,pycrashreport
@@ -18,6 +19,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MANIFEST_PATH = join(ROOT, 'tools', 'components.json');
 const LOCK_PATH = join(ROOT, 'tools', 'ios-tools.lock');
+const WDA_LICENSE_REL = 'licenses/WebDriverAgent-LICENSE';
+const DEFAULT_ALLOWED_HOSTS = [
+  'github.com',
+  'codeload.github.com',
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+  'files.pythonhosted.org',
+  'pypi.org',
+];
 const DAY_MS = 86_400_000;
 
 function parseArgs(argv) {
@@ -40,6 +50,7 @@ function parseArgs(argv) {
       case '--python-release': opts.pythonRelease = next(); break;
       case '--python-version': opts.pythonVersion = next(); break;
       case '--axe': opts.axe = next(); break;
+      case '--wda': opts.wda = next(); break;
       case '--min-age-days': opts.minAgeDays = Number(next()); break;
       case '--cutoff': opts.cutoff = next(); break;
       case '--allow-recent': opts.allowRecent = next(); break;
@@ -56,6 +67,7 @@ function parseArgs(argv) {
           '  --python-release <tag>       Pin python-build-standalone release tag (e.g. 20261026)',
           '  --python-version <ver>       Pin CPython version (e.g. 3.12.16)',
           '  --axe <ver>                  Pin AXe release version without leading v (e.g. 1.8.0)',
+          '  --wda <ver>                  Pin appium/WebDriverAgent source release without leading v (e.g. 16.15.3)',
           '  --min-age-days <n>           Minimum release age in days (default: 14)',
           '  --cutoff <iso>               Explicit exclude-newer ISO timestamp',
           '  --allow-recent "<reason>"    Allow a release newer than min-age-days with a recorded reason',
@@ -175,7 +187,7 @@ async function verifyLockAges(lockText, cutoffIso, exceptionsByPkg) {
  * Pin-time archive listing check: downloads the archive, verifies its sha256, and refuses any pin
  * containing absolute paths, `..` segments, or anything other than regular files, directories, and symlinks.
  */
-async function verifyPinnedArchiveListing(label, url, expectedSha256) {
+async function verifyPinnedArchiveListing(label, url, expectedSha256, extract) {
   const work = mkdtempSync(join(tmpdir(), 'pd-pin-check-'));
   try {
     const res = await fetch(url, { headers: { 'User-Agent': 'PhoneDock-update-components/1.0' } });
@@ -218,7 +230,12 @@ async function verifyPinnedArchiveListing(label, url, expectedSha256) {
       }
     }
     console.log(`  archive listing ok (${label}): ${files} files, ${dirs} dirs, ${symlinks} symlinks (sha256=${actualSha.slice(0, 12)})`);
-    return { sha256: actualSha, size: buf.length, files, dirs, symlinks };
+    const extracted = {};
+    for (const entry of extract ?? []) {
+      if (!names.includes(entry)) throw new Error(`${label}: archive has no ${entry}`);
+      extracted[entry] = execFileSync('/usr/bin/tar', ['-xOzf', tarPath, entry], { maxBuffer: 4 * 1024 * 1024 });
+    }
+    return { sha256: actualSha, size: buf.length, files, dirs, symlinks, names, extracted };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
@@ -263,6 +280,51 @@ async function resolveAxe(version, cutoffIso, allowRecent) {
       versionArgs: ['--version'],
       expectedVersion: cleanVer,
     },
+  };
+}
+
+/**
+ * appium/WebDriverAgent publishes no source asset, so the pin is GitHub's tag archive (which redirects to
+ * codeload.github.com). Its sha256 is computed here and checked again on every install. The upstream BSD licence is
+ * copied from the same archive into tools/ so it ships with PhoneDock.
+ */
+async function resolveWda(version, cutoffIso, allowRecent) {
+  const cleanVer = version.replace(/^v/, '');
+  const tag = `v${cleanVer}`;
+  const rel = await fetchGitHubRelease('appium/WebDriverAgent', tag);
+  const publishedAt = rel.published_at;
+  checkAge(`WebDriverAgent ${cleanVer}`, publishedAt, cutoffIso, allowRecent);
+  const url = `https://github.com/appium/WebDriverAgent/archive/refs/tags/${tag}.tar.gz`;
+  const sourceDir = `WebDriverAgent-${cleanVer}`;
+  const filename = `WebDriverAgent-${cleanVer}.tar.gz`;
+  const required = ['WebDriverAgent.xcodeproj/project.pbxproj', 'LICENSE'];
+  const verified = await verifyPinnedArchiveListing(filename, url, '', required.map((f) => `${sourceDir}/${f}`));
+  if (!verified.names.every((n) => n === `${sourceDir}/` || n.startsWith(`${sourceDir}/`))) {
+    throw new Error(`${filename}: expected every entry under ${sourceDir}/`);
+  }
+  const licence = verified.extracted[`${sourceDir}/LICENSE`];
+  if (!/BSD License/.test(licence.toString('utf8'))) throw new Error(`${filename}: LICENSE is not the BSD licence PhoneDock ships`);
+  writeFileSync(join(ROOT, 'tools', WDA_LICENSE_REL), licence);
+  return {
+    id: 'wda',
+    displayName: 'iPhone WebDriverAgent',
+    description: 'appium/WebDriverAgent source. PhoneDock builds it once per Mac and signing team so iPhones on iOS 26 and older take taps, typing and the UI tree.',
+    kind: 'source-archive',
+    version: cleanVer,
+    publishedAt,
+    ...(Date.parse(publishedAt) > Date.parse(cutoffIso) && allowRecent ? { recentOverrideReason: allowRecent } : {}),
+    estimatedDiskBytes: 5_000_000,   // the source; each signed build adds ~130 MB under <state>/wda-builds
+    licenseFile: WDA_LICENSE_REL,
+    artifacts: [
+      {
+        platforms: ['darwin-arm64', 'darwin-x64'],
+        filename,
+        url,
+        sha256: verified.sha256,
+        size: verified.size,
+      },
+    ],
+    verify: { sourceDir, requiredFiles: required },
   };
 }
 
@@ -379,7 +441,12 @@ async function runCheck(opts) {
   const lockText = readFileSync(LOCK_PATH, 'utf8');
   const ios = manifest.components?.['ios-tools'];
   const axe = manifest.components?.axe;
-  if (!ios || !axe) throw new Error('Manifest must define ios-tools and axe');
+  const wda = manifest.components?.wda;
+  if (!ios || !axe || !wda) throw new Error('Manifest must define ios-tools, axe and wda');
+  if (!wda.licenseFile || !existsSync(join(ROOT, 'tools', wda.licenseFile))) throw new Error('wda licenseFile is missing from tools/');
+  for (const host of ['codeload.github.com']) {
+    if (!manifest.allowedHosts?.includes(host)) throw new Error(`allowedHosts must include ${host} (the WebDriverAgent archive redirects there)`);
+  }
 
   const actualLockSha = sha256(Buffer.from(lockText, 'utf8'));
   if (ios.lockSha256 !== actualLockSha) {
@@ -397,7 +464,7 @@ async function runCheck(opts) {
   if (!opts.offline) {
     const count = await verifyLockAges(lockText, cutoff, excMap);
     console.log(`check ok: ${count} locked packages verified against cutoff ${cutoff} (${excMap.size} recorded exception(s))`);
-    for (const comp of [ios, axe]) {
+    for (const comp of [ios, axe, wda]) {
       for (const art of comp.artifacts ?? []) {
         await verifyPinnedArchiveListing(art.filename, art.url, art.sha256);
       }
@@ -418,15 +485,10 @@ async function main() {
   const existing = existsSync(MANIFEST_PATH) ? JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) : {
     schemaVersion: 1,
     minAgeDays: opts.minAgeDays,
-    allowedHosts: [
-      'github.com',
-      'objects.githubusercontent.com',
-      'release-assets.githubusercontent.com',
-      'files.pythonhosted.org',
-      'pypi.org',
-    ],
+    allowedHosts: [...DEFAULT_ALLOWED_HOSTS],
     components: {},
   };
+  for (const host of DEFAULT_ALLOWED_HOSTS) if (!existing.allowedHosts.includes(host)) existing.allowedHosts.splice(1, 0, host);
 
   const cutoffIso = opts.cutoff ?? new Date(Date.now() - opts.minAgeDays * DAY_MS).toISOString().replace(/\.\d+Z$/, 'Z');
   const existingIos = existing.components?.['ios-tools'];
@@ -434,6 +496,8 @@ async function main() {
 
   const updateIos = Boolean(opts.pymd3 || opts.pythonRelease || opts.pythonVersion || !existingIos);
   const updateAxe = Boolean(opts.axe || !existingAxe);
+  const existingWda = existing.components?.wda;
+  const updateWda = Boolean(opts.wda || !existingWda);
 
   if (updateIos) {
     const pymd3Ver = opts.pymd3 ?? existingIos?.version ?? '11.63.1';
@@ -475,6 +539,13 @@ async function main() {
     console.log(`Resolving axe (${axeVer}, cutoff ${cutoffIso})…`);
     existing.components.axe = await resolveAxe(axeVer, cutoffIso, opts.allowRecent);
     console.log(`  axe: v${existing.components.axe.version}, size=${existing.components.axe.artifacts[0].size}, sha256=${existing.components.axe.artifacts[0].sha256.slice(0, 12)}`);
+  }
+
+  if (updateWda) {
+    const wdaVer = opts.wda ?? existingWda?.version ?? '16.15.3';
+    console.log(`Resolving wda (${wdaVer}, cutoff ${cutoffIso})…`);
+    existing.components.wda = await resolveWda(wdaVer, cutoffIso, opts.allowRecent);
+    console.log(`  wda: v${existing.components.wda.version}, size=${existing.components.wda.artifacts[0].size}, sha256=${existing.components.wda.artifacts[0].sha256.slice(0, 12)}`);
   }
 
   existing.schemaVersion = 1;

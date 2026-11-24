@@ -661,7 +661,8 @@ export interface Backend {
 
 // ── Managed components (GET /v1/components, POST /v1/components/:id/install) ──
 
-export type ComponentId = 'ios-tools' | 'axe';
+/** 'wda': the pinned appium/WebDriverAgent source PhoneDock builds for iPhones on iOS 26 and older. */
+export type ComponentId = 'ios-tools' | 'axe' | 'wda';
 export type ComponentState = 'missing' | 'installing' | 'ready' | 'failed';
 export type ComponentPhase = 'queued' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'checking';
 export type ComponentSource = 'managed' | 'override' | 'external' | 'none';
@@ -712,6 +713,9 @@ export class PhoneDockError extends Error {
   detail?: string;
   /** Input errors: how far the input got (the daemon fills it in for input routes when a backend leaves it out). */
   delivery?: Delivery;
+  /** The specific failure behind a catch-all code that is kept for compatibility (wda-setup: `wda_setup_failed` with
+   *  cause `signing_limit`). Sent as `error.cause`. */
+  declare cause?: string;
   constructor(message: string, code = 'error', status = 400, hints?: string[], detail?: string, delivery?: Delivery) {
     super(message);
     this.code = code;

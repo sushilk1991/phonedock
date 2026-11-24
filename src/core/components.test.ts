@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ComponentManager, getComponentManager, isolatedPythonEnv, safeExtractTarGz, setComponentManager,
+  ComponentManager, getComponentManager, isolatedPythonEnv, resolveWdaSource, safeExtractTarGz, setComponentManager,
   tarExtractArgv, verifyExtractedTree,
 } from './components.ts';
 import {
@@ -48,8 +48,13 @@ function writeTestTools(
   toolsDir: string,
   axeArtifact: { url: string; sha256: string; size: number; version: string },
   iosVersion = '11.63.1',
+  wdaArtifact: { url: string; sha256: string; size: number; version: string } = {
+    url: 'https://github.com/appium/WebDriverAgent/archive/refs/tags/v16.15.3.tar.gz', sha256: 'd'.repeat(64), size: 100, version: '16.15.3',
+  },
 ): ComponentManifest {
   mkdirSync(toolsDir, { recursive: true });
+  mkdirSync(join(toolsDir, 'licenses'), { recursive: true });
+  writeFileSync(join(toolsDir, 'licenses', 'WebDriverAgent-LICENSE'), 'BSD License\n', 'utf8');
   const lockText = `pymobiledevice3==${iosVersion} \\\n    --hash=sha256:${'a'.repeat(64)}\n`;
   writeFileSync(join(toolsDir, 'ios-tools.lock'), lockText, 'utf8');
   writeFileSync(join(toolsDir, 'pd-ios-hid.py'), 'import pymobiledevice3\n', 'utf8');
@@ -99,6 +104,24 @@ function writeTestTools(
         }],
         verify: { binary: 'axe', versionArgs: ['--version'], expectedVersion: axeArtifact.version },
       },
+      wda: {
+        id: 'wda',
+        displayName: 'iPhone WebDriverAgent',
+        description: 'Test wda',
+        kind: 'source-archive',
+        version: wdaArtifact.version,
+        publishedAt: '2026-10-16T21:41:13Z',
+        estimatedDiskBytes: 5_000_000,
+        licenseFile: 'licenses/WebDriverAgent-LICENSE',
+        artifacts: [{
+          platforms: ['darwin-arm64', 'darwin-x64'],
+          filename: `WebDriverAgent-${wdaArtifact.version}.tar.gz`,
+          url: wdaArtifact.url,
+          sha256: wdaArtifact.sha256,
+          size: wdaArtifact.size,
+        }],
+        verify: { sourceDir: `WebDriverAgent-${wdaArtifact.version}`, requiredFiles: ['WebDriverAgent.xcodeproj/project.pbxproj', 'LICENSE'] },
+      },
     },
   };
   writeFileSync(join(toolsDir, 'components.json'), JSON.stringify(manifest, null, 2), 'utf8');
@@ -126,6 +149,14 @@ test('repo tools/components.json and tools/ios-tools.lock pass validation', () =
   assert.equal(manifest.components['ios-tools'].version, '11.63.1');
   assert.equal(manifest.components.axe.version, '1.8.0');
   assert.ok(existsSync(join(toolsDir, 'ios-tools.lock')));
+  // WebDriverAgent: a pinned tag archive (never HEAD), at least 14 days old when pinned, with its licence shipped.
+  const wda = manifest.components.wda;
+  assert.equal(wda.kind, 'source-archive');
+  assert.match(wda.artifacts[0].url, /^https:\/\/github\.com\/appium\/WebDriverAgent\/archive\/refs\/tags\/v\d+\.\d+\.\d+\.tar\.gz$/);
+  assert.match(wda.artifacts[0].sha256, /^[0-9a-f]{64}$/);
+  assert.equal(wda.verify.sourceDir, `WebDriverAgent-${wda.version}`);
+  assert.ok(manifest.allowedHosts.includes('codeload.github.com'), 'the tag archive redirects to codeload.github.com');
+  assert.match(readFileSync(join(toolsDir, wda.licenseFile!), 'utf8'), /^BSD License\n\nFor WebDriverAgent software/);
 });
 
 test('manifest and lock validation rejects bad URLs, hosts, hashes and unhashed locks', () => {
@@ -1190,5 +1221,123 @@ test('Round 5: activation garbage recovery restores and adopts a concurrent read
     });
   } finally {
     rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// ── wda: a pinned source archive PhoneDock builds (never a clone of upstream HEAD) ──
+
+function makeFakeWdaTarGz(workDir: string, version: string, opts: { license?: boolean; extraTop?: string } = {}): { buf: Buffer; sha256: string } {
+  const src = join(workDir, `wda-src-${Math.random().toString(36).slice(2, 8)}`);
+  const top = join(src, `WebDriverAgent-${version}`);
+  mkdirSync(join(top, 'WebDriverAgent.xcodeproj'), { recursive: true });
+  writeFileSync(join(top, 'WebDriverAgent.xcodeproj', 'project.pbxproj'), '// fake project\n');
+  if (opts.license !== false) writeFileSync(join(top, 'LICENSE'), 'BSD License\n');
+  if (opts.extraTop) mkdirSync(join(src, opts.extraTop), { recursive: true });
+  const tarPath = join(workDir, `wda-${Math.random().toString(36).slice(2, 8)}.tar.gz`);
+  execFileSync('/usr/bin/tar', ['-czf', tarPath, '-C', src, '.']);
+  const buf = readFileSync(tarPath);
+  return { buf, sha256: sha256Hex(buf) };
+}
+
+test('wda installs a pinned source archive: checksum-verified, one top directory with the project and licence, no external copy', async () => {
+  const work = makeTempDir('pd-comp-wda-');
+  try {
+    const good = makeFakeWdaTarGz(work, '16.15.3');
+    const noLicense = makeFakeWdaTarGz(work, '16.15.3', { license: false });
+    const twoTops = makeFakeWdaTarGz(work, '16.15.3', { extraTop: 'other' });
+    const served = new Map<string, Buffer>([['/good.tar.gz', good.buf], ['/nolicense.tar.gz', noLicense.buf], ['/twotops.tar.gz', twoTops.buf]]);
+    await withServer((req, res) => {
+      const buf = served.get(req.url ?? '');
+      if (!buf) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Length': String(buf.length) });
+      res.end(buf);
+    }, async (base) => {
+      const axe = { url: 'https://github.com/cameroncooke/AXe/releases/download/v1.8.0/a.tar.gz', sha256: 'c'.repeat(64), size: 100, version: '1.8.0' };
+      const setup = (name: string, wda: { url: string; sha256: string; size: number }) => {
+        const toolsDir = join(work, `t-${name}`);
+        const rootDir = join(work, `c-${name}`);
+        writeTestTools(toolsDir, axe, '11.63.1', { ...wda, version: '16.15.3' });
+        // Default externalLookup: nothing on disk (a stray checkout, the old HEAD clone) ever counts as wda.
+        const mgr = new ComponentManager({ rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, envOverride: () => undefined });
+        return { mgr, rootDir };
+      };
+
+      const { mgr, rootDir } = setup('good', { url: `${base}/good.tar.gz`, sha256: good.sha256, size: good.buf.length });
+      assert.equal(mgr.status('wda').state, 'missing');
+      assert.equal(mgr.status('wda').source, 'none');
+      const st = await mgr.install('wda');
+      assert.equal(st.state, 'ready');
+      assert.equal(st.installedVersion, '16.15.3');
+      const src = resolveWdaSource(mgr);
+      assert.ok(src && src.source === 'managed');
+      assert.match(src.path, /WebDriverAgent-16\.15\.3$/);
+      assert.ok(existsSync(join(src.path, 'WebDriverAgent.xcodeproj', 'project.pbxproj')));
+      assert.ok(existsSync(join(src.path, 'LICENSE')));
+      assert.equal(mgr.isCurrent('wda'), true);
+
+      // Same size, wrong bytes: rejected by sha256, nothing activated.
+      const flipped = Buffer.from(good.buf); flipped[flipped.length - 5] ^= 0xff;
+      served.set('/flipped.tar.gz', flipped);
+      const bad = setup('flipped', { url: `${base}/flipped.tar.gz`, sha256: good.sha256, size: good.buf.length });
+      await assert.rejects(() => bad.mgr.install('wda'), (e: any) => e.code === 'checksum_mismatch');
+      assert.equal(bad.mgr.resolveManaged('wda'), undefined);
+      assert.deepEqual(readdirSync(join(bad.rootDir, 'wda')).filter((n) => !n.startsWith('.')), []);
+
+      const nl = setup('nolicense', { url: `${base}/nolicense.tar.gz`, sha256: noLicense.sha256, size: noLicense.buf.length });
+      await assert.rejects(() => nl.mgr.install('wda'), (e: any) => e.code === 'self_check_failed' && /LICENSE/.test(e.detail));
+      const tt = setup('twotops', { url: `${base}/twotops.tar.gz`, sha256: twoTops.sha256, size: twoTops.buf.length });
+      await assert.rejects(() => tt.mgr.install('wda'), (e: any) => e.code === 'self_check_failed');
+      assert.ok(existsSync(rootDir));
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('PHONEDOCK_WDA_SOURCE overrides wda only with a WebDriverAgent folder, and blocks auto-install either way', () => {
+  const work = makeTempDir('pd-comp-wda-ovr-');
+  try {
+    const toolsDir = join(work, 'tools');
+    writeTestTools(toolsDir, { url: 'https://github.com/cameroncooke/AXe/releases/download/v1.8.0/a.tar.gz', sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
+    const checkout = join(work, 'checkout');
+    mkdirSync(join(checkout, 'WebDriverAgent.xcodeproj'), { recursive: true });
+    writeFileSync(join(checkout, 'WebDriverAgent.xcodeproj', 'project.pbxproj'), '');
+    writeFileSync(join(checkout, 'LICENSE'), 'BSD License\n');
+    let override: string | undefined = checkout;
+    const mgr = new ComponentManager({ rootDir: join(work, 'c'), toolsDir, platformKey: 'darwin-arm64', envOverride: (id) => (id === 'wda' ? override : undefined) });
+    assert.deepEqual(resolveWdaSource(mgr), { path: checkout, version: undefined, source: 'override' });
+    assert.equal(mgr.status('wda').state, 'ready');
+    assert.equal(mgr.triggerAuto('wda'), false);
+    override = join(work, 'empty');
+    mkdirSync(override);
+    const st = mgr.status('wda');
+    assert.equal(st.state, 'failed');
+    assert.equal(st.error?.code, 'invalid_override');
+    assert.match(st.error?.message ?? '', /PHONEDOCK_WDA_SOURCE/);
+    assert.equal(resolveWdaSource(mgr), undefined);
+    assert.equal(mgr.triggerAuto('wda'), false);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('manifest validation: a source archive needs sourceDir and safe requiredFiles, and its licence must ship in tools/', () => {
+  const dir = makeTempDir('pd-comp-wda-val-');
+  try {
+    const m = writeTestTools(dir, { url: 'https://github.com/cameroncooke/AXe/releases/download/v1.8.0/a.tar.gz', sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
+    assert.doesNotThrow(() => validateManifest(m, dir));
+    const clone = () => JSON.parse(JSON.stringify(m)) as ComponentManifest;
+    const noDir = clone(); delete noDir.components.wda.verify.sourceDir;
+    assert.throws(() => validateManifest(noDir, dir), /sourceDir/);
+    const escape = clone(); escape.components.wda.verify.requiredFiles = ['../../etc/passwd'];
+    assert.throws(() => validateManifest(escape, dir), /requiredFiles/);
+    const noLicence = clone(); noLicence.components.wda.licenseFile = 'licenses/missing';
+    assert.throws(() => validateManifest(noLicence, dir), /Licence notice missing/);
+    const codeload = clone(); codeload.components.wda.artifacts[0].url = 'https://codeload.github.com/appium/WebDriverAgent/tar.gz/refs/tags/v16.15.3';
+    assert.throws(() => validateManifest(codeload, dir), /not allowed/);   // not in this fixture's allowlist
+    const missing = clone(); delete (missing.components as Record<string, unknown>).wda;
+    assert.throws(() => validateManifest(missing, dir), /Missing component "wda"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
