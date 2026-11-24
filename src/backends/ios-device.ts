@@ -30,7 +30,7 @@ import { lockGuard } from './ios-lock.ts';
 import { abortXctrace, startXctrace, stopXctrace } from './ios-trace.ts';
 import { connect as netConnect } from 'node:net';
 import {
-  LOCAL_NETWORK_HINT, WDA_PORT, parseApiKey, readXcodeInfo, readXcodeTeams, setupPhone, stopRunner, urlFor,
+  LOCAL_NETWORK_HINT, WDA_PORT, parseApiKey, readXcodeInfo, readXcodeTeams, setupPhone, sharingChecker, stopRunner, urlFor,
   type PhoneFacts, type ProbeResult, type Runner, type WdaConfig, type WdaDeps, type WdaSetupResult, type XcodeInfo, type XcodeTeam,
 } from './ios-wda.ts';
 import { iosFeedStats, iosHevcFeed, iosVideoFrameStream, iosVideoStats, iosVideoStream, startHevcRecording, warmVideoHelper, type HevcRecording, type HevcVideoFeed, type VideoDeps } from './ios-video.ts';
@@ -842,15 +842,18 @@ async function endRunnersOnPhone(udid: string, pids?: number[], withinMs = 60_00
   return { found, left: now.length };
 }
 
-function tcpProbe(host: string, port: number): Promise<ProbeResult> {
+function tcpProbe(host: string, port: number, timeoutMs = 3000): Promise<ProbeResult> {
   return new Promise((resolve) => {
     const sock = netConnect({ host, port });
     const done = (r: ProbeResult) => { sock.destroy(); resolve(r); };
-    sock.setTimeout(3000, () => done('unknown'));
+    sock.setTimeout(timeoutMs, () => done('unknown'));
     sock.once('connect', () => done('open'));
     sock.once('error', (e: NodeJS.ErrnoException) => done(e.code === 'ECONNREFUSED' ? 'refused' : 'unknown'));
   });
 }
+
+/** The device list's sharing check for phones with control on (1 s probes, once a minute per phone). */
+const sharing = sharingChecker((host, port) => tcpProbe(host, port, 1000));
 
 /** devicectl's facts for setup's preflight. Each devicectl call takes seconds over Wi-Fi: when the last list showed the
  *  phone reachable, the lock state is asked while the list is read. */
@@ -951,7 +954,7 @@ async function controlSetup(id: string, opts: ControlSetupOptions, onProgress: (
     c.done = p.catch(() => undefined);
     const r = await p;
     if (opts.name) cfgState.update((all) => { if (all[udid]) all[udid] = { ...all[udid], name: opts.name }; });
-    sessions.delete(r.wdaUrl); statusCache.delete(r.wdaUrl); scaleCache.delete(udid);
+    sessions.delete(r.wdaUrl); statusCache.delete(r.wdaUrl); scaleCache.delete(udid); sharing.forget(udid);
     const totalMs = Date.now() - t0;
     const line = `${(totalMs / 1000).toFixed(1)} s: ${steps.map(([s, ms]) => `${s} ${(ms / 1000).toFixed(1)} s`).join(' · ')}`;
     onProgress(`Ready in ${line}`);
@@ -979,7 +982,7 @@ async function controlStop(id: string): Promise<{ udid: string; stopped: boolean
   const d = listCache?.list.find((x) => hw(x).udid === udid || x.identifier === udid);
   const ip = d ? tunnelIpOf(d) : undefined;
   if (ip) { sessions.delete(urlFor(ip, WDA_PORT)); statusCache.delete(urlFor(ip, WDA_PORT)); }
-  scaleCache.delete(udid);
+  scaleCache.delete(udid); sharing.forget(udid);
   return { udid, stopped: !!c?.runner || phone.found > 0, confirmed: macGone && phone.left === 0 };
 }
 
@@ -1057,6 +1060,8 @@ export const backend: Backend & {
       const tip = cf?.wdaTeam && !cf.wdaUrl ? tunnelIpOf(d) : undefined;
       const url = tip ? urlFor(tip, WDA_PORT) : wdaUrl(udid);
       const ws = url ? await wdaStatus(url) : undefined;
+      // Control set up here and on: whether other Macs on the Wi-Fi can reach it (null: control isn't on here).
+      const shared = tip && ws?.ok ? await sharing.check(udid, ws.status) : undefined;
       const readiness = cachedReadiness(d);
       const osv = s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
       if (osv) {
@@ -1077,6 +1082,7 @@ export const backend: Backend & {
         meta: {
           coreDeviceId: d.identifier, productType: h.productType, transport: transportOf(d), pairingState: c.pairingState ?? d.connectionProperties?.pairingState,
           tunnelState: readiness.tunnel, developerMode: readiness.developerMode, wdaUrl: url ?? null, wdaReady: ws?.ok ?? null, wdaTeam: cf?.wdaTeam?.team ?? null,
+          wdaSharing: shared?.state ?? null, wdaSharedUrl: shared?.url ?? null,
           readiness, experimental: false,
         },
       });

@@ -102,6 +102,8 @@ function fmtDevice(d: Device): string {
   if (d.handoff) bits.push(`waiting-for-human=${JSON.stringify(d.handoff.reason.slice(0, 60))}`);
   if (!d.managed) bits.push('unmanaged');
   if (d.error) bits.push(`error=${d.error}`);
+  if (d.meta?.wdaSharing === 'shared') bits.push(`shared-on-wifi: anyone on this Wi-Fi can control it${d.meta.wdaSharedUrl ? ` at ${d.meta.wdaSharedUrl}` : ''} (iphone_control action="stop" ends it; tell the user)`);
+  if (d.meta?.wdaSharing === 'unknown') bits.push('sharing=unknown (couldn’t check whether other Macs on the Wi-Fi can control it)');
   return bits.join(' | ');
 }
 

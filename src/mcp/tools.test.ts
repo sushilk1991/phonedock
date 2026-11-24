@@ -781,3 +781,19 @@ test('iphone_control: set_up and stop act on the named real iPhone by UDID; a fa
     assert.equal((await s.call('iphone_control', { action: 'stop', device: 'Sim' })).isError, true);
   } finally { await s.close(); }
 });
+
+test('list_devices says when an older iPhone is shared on the Wi-Fi, or couldn’t be checked', async () => {
+  const phone = { id: 'ios-device:00008020-0000AAAA0000BBBB', nativeId: '00008020-0000AAAA0000BBBB', backend: 'ios-device', name: 'Old iPhone', platform: 'ios', kind: 'physical', state: 'running', managed: false, capabilities: [] };
+  const fake: Fake = { calls: [], devices: async () => [
+    { ...phone, meta: { wdaSharing: 'shared', wdaSharedUrl: 'http://192.0.2.10:8100' } },
+    { ...phone, id: 'ios-device:B', name: 'Other iPhone', meta: { wdaSharing: 'unknown' } },
+    { ...phone, id: 'ios-device:C', name: 'Private iPhone', meta: { wdaSharing: 'not_shared' } },
+  ] };
+  const s = await connect(fake);
+  try {
+    const out = (await s.call('list_devices')).text;
+    assert.match(out, /Old iPhone.*shared-on-wifi: anyone on this Wi-Fi can control it at http:\/\/192\.0\.2\.10:8100/);
+    assert.match(out, /Other iPhone.*sharing=unknown/);
+    assert.doesNotMatch(out.split('\n').find((l) => l.includes('Private iPhone')) ?? '', /shared-on-wifi|sharing=/);
+  } finally { await s.close(); }
+});

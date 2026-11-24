@@ -123,3 +123,12 @@ test('parseLaunchFlags: --arg (including leading dash), --extra, --args-json, --
     );
   }
 });
+
+test('devices: an older iPhone shared on the Wi-Fi (or not checkable) is said under the table, every time', () => {
+  const phone = { ...base, nativeId: '00008020-0000AAAA0000BBBB', name: 'pdtest-old' };
+  const shared = devicesTable([{ ...phone, meta: { wdaSharing: 'shared', wdaSharedUrl: 'http://192.0.2.10:8100' } }]);
+  assert.match(shared, /pdtest-old: anyone on this Wi-Fi can control it, without a password \(other Macs: phonedock connect --ios http:\/\/192\.0\.2\.10:8100\)/);
+  assert.match(shared, /phonedock ios wda-stop --udid 00008020-0000AAAA0000BBBB/);
+  assert.match(devicesTable([{ ...phone, meta: { wdaSharing: 'unknown' } }]), /couldn’t check whether other Macs/);
+  for (const s of ['not_shared', null, undefined]) assert.doesNotMatch(devicesTable([{ ...phone, meta: { wdaSharing: s } }]), /Wi-Fi/);
+});

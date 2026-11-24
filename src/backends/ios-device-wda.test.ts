@@ -27,7 +27,8 @@ test('input to a phone set up here goes to the tunnel address devicectl reports 
   const server = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
     res.setHeader('content-type', 'application/json');
-    if (req.url === '/status') { res.end(JSON.stringify({ value: { ready: true, ios: { ip: null } } })); return; }
+    // Its Wi-Fi address is this fake's own: the device list's probe of <Wi-Fi>:8100 reaches it, so it reads as shared.
+    if (req.url === '/status') { res.end(JSON.stringify({ value: { ready: true, ios: { ip: '127.0.0.1' } } })); return; }
     if (req.url === '/session') { res.end(JSON.stringify({ sessionId: 's1', value: { sessionId: 's1' } })); return; }
     if (req.url === '/wda/activeAppInfo') { res.end(JSON.stringify({ value: { bundleId: 'com.example.app', name: 'Example' } })); return; }
     res.end(JSON.stringify({ value: { width: 375, height: 812 } }));
@@ -41,6 +42,7 @@ test('input to a phone set up here goes to the tunnel address devicectl reports 
     writeCfg(setUpCfg);                                              // no saved address
     const listed = (await backend.listDevices()).find((d) => d.nativeId === UDID)!;
     assert.deepEqual([listed.meta?.wdaUrl, listed.meta?.wdaReady, listed.meta?.wdaTeam], ['http://127.0.0.1:8100', true, 'AAAAA11111']);
+    assert.deepEqual([listed.meta?.wdaSharing, listed.meta?.wdaSharedUrl], ['shared', 'http://127.0.0.1:8100'], 'answers on its Wi-Fi address: shared');
     await backend.tap!(UDID, 10, 10);
     const sent = hits.filter((h) => h.startsWith('POST')).length;
     assert.ok(sent > 0, 'the tap reached WebDriverAgent at the tunnel address');
@@ -48,7 +50,8 @@ test('input to a phone set up here goes to the tunnel address devicectl reports 
 
     // The tunnel moves (nothing listens at the new address): nothing goes to the old one.
     fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: '::1' }]; fake.save();
-    await backend.listDevices();
+    const moved = (await backend.listDevices()).find((d) => d.nativeId === UDID)!;
+    assert.deepEqual([moved.meta?.wdaReady, moved.meta?.wdaSharing], [false, null], 'control off: no sharing claim either way');
     const e = await errOf(backend.tap!(UDID, 10, 10));
     assert.equal(e?.code, 'wda_not_ready');
     assert.match(e!.hints![0], /Set Up Control|wda-setup/);

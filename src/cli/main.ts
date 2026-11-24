@@ -228,9 +228,20 @@ export function devicesTable(list: Device[]): string {
   }));
   const cols = ['name', 'id', 'platform', 'state', 'os', 'screen', 'lease', ...(rows.some((r) => r.human) ? ['human'] : []), 'managed'];
   const waiting = list.filter((d) => humanCell(d));
-  return table(rows, cols) + (waiting.length
+  return table(rows, cols) + sharingNotes(list) + (waiting.length
     ? `\n\n${waiting.map((d) => `${d.name} is waiting for a person: ${d.handoff!.reason}\n  Do it on the device (as the person: --owner app:human, no lease needed), then: phonedock handoff done ${d.handoff!.id} [--note "…"]   (or: phonedock handoff cancel ${d.handoff!.id})`).join('\n')}`
     : '');
+}
+
+/** Older iPhones whose control is shared on the Wi-Fi (or can't be checked): said under the table, every time. */
+export function sharingNotes(list: Device[]): string {
+  const lines = list.flatMap((d) => {
+    const stop = `Stop Control ends it: phonedock ios wda-stop --udid ${d.nativeId}`;
+    if (d.meta?.wdaSharing === 'shared') return [`${d.name}: anyone on this Wi-Fi can control it, without a password${d.meta.wdaSharedUrl ? ` (other Macs: phonedock connect --ios ${d.meta.wdaSharedUrl})` : ''}. ${stop}`];
+    if (d.meta?.wdaSharing === 'unknown') return [`${d.name}: couldn’t check whether other Macs on this Wi-Fi can control it (allow PhoneDock under Privacy & Security › Local Network). ${stop}`];
+    return [];
+  });
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
 }
 
 function progressPrinter(quiet: boolean) {

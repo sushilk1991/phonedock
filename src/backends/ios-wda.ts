@@ -535,6 +535,30 @@ export const sameHost = (a: string, b: string) => canonHost(a) === canonHost(b);
 export type ProbeResult = 'open' | 'refused' | 'unknown';
 
 
+/** Is a running WebDriverAgent reachable on the phone's Wi-Fi address? For the device list, so the person sees that a
+ *  phone is shared after a restart or a CLI setup: at most one probe of <Wi-Fi>:8100 per phone a minute. It answers:
+ *  shared; it refuses, or the phone reports no Wi-Fi address (JSON null): not shared; anything else (no answer, Local
+ *  Network permission, a malformed /status): unknown, never "not shared". */
+export interface Sharing { state: 'shared' | 'not_shared' | 'unknown'; url?: string }
+export function sharingChecker(probe: (host: string, port: number) => Promise<ProbeResult>, now: () => number = Date.now, everyMs = 60_000) {
+  const last = new Map<string, { at: number; p: Promise<Sharing> }>();
+  return {
+    check(key: string, status: unknown): Promise<Sharing> {
+      const c = last.get(key);
+      if (c && now() - c.at < everyMs) return c.p;
+      const ip = (status as { ios?: { ip?: unknown } } | undefined)?.ios?.ip;
+      const p: Promise<Sharing> = ip === null ? Promise.resolve({ state: 'not_shared' })
+        : typeof ip !== 'string' || !isIP(ip) ? Promise.resolve({ state: 'unknown' })
+        : probe(ip, WDA_PORT).then((r): Sharing => (r === 'open' ? { state: 'shared', url: urlFor(ip, WDA_PORT) } : { state: r === 'refused' ? 'not_shared' : 'unknown' }),
+          (): Sharing => ({ state: 'unknown' }));
+      last.set(key, { at: now(), p });
+      return p;
+    },
+    /** After Set Up or Stop Control: the next list looks again. */
+    forget(key: string): void { last.delete(key); },
+  };
+}
+
 // ── build once, launch on request ─────────────────────────────────────────
 
 /** What Set Up Control remembers for a phone (ios-device.json `wdaTeam`): the team and how it signs, so setting up

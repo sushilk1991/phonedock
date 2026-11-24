@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { PhoneDockError, type ExecResult } from '../core/types.ts';
 import {
   UPSTREAM_RUNNER_BUNDLE_ID, buildArgv, buildKey, checkReach, chooseTeam, classifyXcodebuild, ensureBuild, launchArgv, runBuild,
-  parseApiKey, parseXcodeTeams, preflight, pruneBuilds, readXcodeInfo, readXcodeTeams, runnerBundleId, setupPhone, startRunner,
+  parseApiKey, parseXcodeTeams, preflight, pruneBuilds, readXcodeInfo, readXcodeTeams, runnerBundleId, setupPhone, sharingChecker, startRunner,
   teamScopedBundleId, type ChildLike, type Exec, type PhoneFacts, type ProbeResult, type WdaConfig, type WdaDeps, type XcodeInfo,
 } from './ios-wda.ts';
 
@@ -666,4 +666,34 @@ test('Stop Control before the launch (an already-aborted setup): cancelled, noth
     assert.equal(e2?.cause, 'cancelled');
     assert.equal(w.launches.length, 0);
   } finally { w.done(); }
+});
+
+test('the device list’s sharing check: what each answer means, and one probe per phone a minute', async () => {
+  let t = 0;
+  const probes: string[] = [];
+  let answer: ProbeResult | 'throw' = 'open';
+  const s = sharingChecker(async (h, p) => { probes.push(`${h}:${p}`); if (answer === 'throw') throw new Error('EPERM'); return answer; }, () => t);
+  const st = (ip: unknown) => ({ ready: true, ios: { ip } });
+  assert.deepEqual(await s.check('A', st(WIFI_IP)), { state: 'shared', url: `http://${WIFI_IP}:8100` });
+  assert.deepEqual(probes, [`${WIFI_IP}:8100`]);
+  answer = 'refused';
+  t += 59_000;
+  assert.equal((await s.check('A', st(WIFI_IP))).state, 'shared', 'within the minute: the last answer, no probe');
+  assert.equal(probes.length, 1);
+  await Promise.all([s.check('B', st(WIFI_IP)), s.check('B', st(WIFI_IP))]);
+  assert.equal(probes.length, 2, 'two lists at once: one probe');
+  t += 1_000;
+  assert.equal((await s.check('A', st(WIFI_IP))).state, 'not_shared', 'a minute later: probed again');
+  answer = 'unknown'; s.forget('A');
+  assert.equal((await s.check('A', st(WIFI_IP))).state, 'unknown', 'no answer is unknown, never not shared');
+  answer = 'throw'; s.forget('A');
+  assert.equal((await s.check('A', st(WIFI_IP))).state, 'unknown', 'a probe error (Local Network permission) is unknown');
+  const n = probes.length;
+  for (const [ip, state] of [[null, 'not_shared'], [undefined, 'unknown'], [42, 'unknown'], ['not-an-address', 'unknown']] as const) {
+    s.forget('C');
+    assert.equal((await s.check('C', st(ip))).state, state, String(ip));
+  }
+  s.forget('C');
+  assert.equal((await s.check('C', {})).state, 'unknown', 'a malformed /status');
+  assert.equal(probes.length, n, 'nothing to probe without a Wi-Fi address');
 });

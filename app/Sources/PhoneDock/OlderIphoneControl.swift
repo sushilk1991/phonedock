@@ -29,6 +29,11 @@ extension Device {
 
     /// The team Set Up Control used for this phone on this Mac: its build is kept, so setting up again takes seconds.
     var wdaTeam: String? { meta?["wdaTeam"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 } }
+
+    /// The device list's check (about once a minute) of whether other Macs on the Wi-Fi can reach it: "shared",
+    /// "not_shared", "unknown" (couldn't check), or nil while control isn't on here.
+    var wdaSharing: String? { meta?["wdaSharing"]?.stringValue }
+    var wdaSharedUrl: String? { meta?["wdaSharedUrl"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 } }
 }
 
 /// One Set Up Control or Stop Control run for a phone (`AppModel.controlRuns`). It never says whether control is on:
@@ -248,12 +253,16 @@ struct OlderIphoneControlPanel: View {
                     .environment(\.pdProblemFullWidth, true)
                     .testAnchor("control-problem")
             case .done(let shared, let url):
-                on(shared: shared, sharedUrl: url)
+                // The setup's answer, or the phone's if it says shared (the warning errs towards showing).
+                on(shared: shared || device.wdaSharing == "shared", sharedUrl: url ?? device.wdaSharedUrl,
+                   unchecked: !shared && device.wdaSharing == "unknown")
             case .stopped:
                 ConnectStatusView(status: .ok("Control stopped")).testAnchor("control-stopped")
                 off
             case nil:
-                if device.wdaReady { on(shared: false, sharedUrl: nil) } else { status; off }
+                if device.wdaReady {
+                    on(shared: device.wdaSharing == "shared", sharedUrl: device.wdaSharedUrl, unchecked: device.wdaSharing == "unknown")
+                } else { status; off }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -270,7 +279,7 @@ struct OlderIphoneControlPanel: View {
         }
     }
 
-    private func on(shared: Bool, sharedUrl: String?) -> some View {
+    private func on(shared: Bool, sharedUrl: String?, unchecked: Bool) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.m) {
             statusLine("Control is on", dot: .running, note: "Taps, typing and the UI tree work through WebDriverAgent.")
             if shared {
@@ -283,6 +292,10 @@ struct OlderIphoneControlPanel: View {
                     }
                     note("Anyone on this Wi-Fi can control the iPhone, without a password, until you press Stop Control or restart the iPhone. To stop sharing, press Stop Control, then Set Up Control.")
                 }
+            } else if unchecked {
+                // Never "private": a probe that can't tell (Local Network permission, no answer) says so.
+                note("PhoneDock couldn’t check whether other Macs on this Wi-Fi can control the iPhone. Allow PhoneDock under System Settings › Privacy & Security › Local Network. Stop Control ends any sharing.")
+                    .testAnchor("control-sharing-unknown")
             }
             Button("Stop Control") { model.stopControl(device) }
                 .buttonStyle(.borderedProminent)
