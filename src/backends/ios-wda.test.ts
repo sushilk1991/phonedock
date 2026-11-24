@@ -697,3 +697,90 @@ test('the device list’s sharing check: what each answer means, and one probe p
   assert.equal((await s.check('C', {})).state, 'unknown', 'a malformed /status');
   assert.equal(probes.length, n, 'nothing to probe without a Wi-Fi address');
 });
+
+// ── review round 2 (t1ct's Codex pass on df816f7) ──
+
+test('#2: more than one WebDriverAgent on the phone is never reused; all are left for Stop Control', async () => {
+  const w = world({ runners: [77, 78] });
+  try {
+    w.status.set(URL_A, { value: { ready: true, ios: { ip: WIFI_IP } } });      // would pass the private check
+    const e = await setupPhone(w.d, UDID, {}, () => undefined).then(() => undefined, (x) => x as PhoneDockError);
+    assert.equal(e?.cause, 'wda_running');
+    assert.deepEqual([w.launches.length, w.ended.length, [...w.onPhone].join()], [0, 0, '77,78']);
+  } finally { w.done(); }
+});
+
+test('#3: with a build in place, the phone is listed again right before the launch; a runner that appeared is left alone', async () => {
+  const w = world();
+  try {
+    await ensureBuild(w.d, UDID, cfgA, () => undefined);
+    const orig = w.d.runners;
+    let n = 0;
+    w.d.runners = async (u) => { const r = await orig(u); if (++n === 1) w.onPhone.add(55); return r; };   // Xcode starts one just after the first look
+    const e = await setupPhone(w.d, UDID, {}, () => undefined).then(() => undefined, (x) => x as PhoneDockError);
+    assert.equal(e?.cause, 'wda_running');
+    assert.deepEqual([w.launches.length, w.ended.length, [...w.onPhone].join()], [0, 0, '55']);
+  } finally { w.done(); }
+});
+
+test('#3: a failed launch ends a runner only when it is the one new runner; several new ones are left for Stop Control', async () => {
+  const w = world();
+  try {
+    const orig = w.d.spawn;
+    w.d.spawn = (cmd, args, o) => {
+      if (args[0] !== 'test-without-building') return orig(cmd, args, o);
+      const k = new FakeChild(); w.kids.push(k);
+      setImmediate(() => { w.onPhone.add(91); w.onPhone.add(92); k.say('Testing failed'); k.exit(65); });
+      return k;
+    };
+    const e = await setupPhone(w.d, UDID, {}, () => undefined).then(() => undefined, (x) => x as PhoneDockError);
+    assert.equal(e?.code, 'wda_setup_failed');
+    assert.deepEqual(w.ended, [], 'whose is which is unclear: none ended');
+    assert.equal([...w.onPhone].join(), '91,92');
+    assert.match(e!.hints![0], /Stop Control/);
+  } finally { w.done(); }
+});
+
+test('#7: the name is saved with the team in one write, inside the launch’s cleanup: a failed save ends the launch', async () => {
+  const w = world();
+  try {
+    const saves: unknown[][] = [];
+    w.d.save = (u, c, name) => { saves.push([u, c, name]); throw new Error('EACCES: ios-device.json'); };
+    await assert.rejects(setupPhone(w.d, UDID, { name: 'Old iPhone' }, () => undefined), /EACCES/);
+    assert.deepEqual(saves, [[UDID, cfgA, 'Old iPhone']]);
+    assert.deepEqual(w.ended, [[90]], 'its runner on the phone');
+    assert.ok(w.kids.at(-1)!.killed.length > 0, 'its xcodebuild');
+  } finally { w.done(); }
+});
+
+test('#4: Stop signals every xcodebuild started for the phone at once, whatever its setup is doing, and keeps a handle until it exits', async () => {
+  const { stopMacSide } = await import('./ios-wda.ts') as unknown as { stopMacSide: (c: object, settleMs?: number, waitMs?: number) => Promise<boolean> };
+  const runner = (stubborn = false) => {
+    let alive = true; let resolve!: (c: number) => void;
+    const exited = new Promise<number | null>((r) => { resolve = r; });
+    const r = { pid: 1, startedAt: 0, killed: 0, alive: () => alive, exited,
+      kill() { r.killed++; if (!stubborn) { alive = false; resolve(0); } } };
+    return r;
+  };
+  // A setup stuck in preflight (never settles) that inherited a live xcodebuild: signalled at once, not after the wait.
+  const inherited = runner();
+  const c = { abort: new AbortController(), runners: new Set([inherited]), busy: true, done: new Promise(() => undefined) };
+  const t0 = Date.now();
+  const gone = await stopMacSide(c, 50, 50);
+  assert.equal(inherited.killed, 1);
+  assert.equal(c.abort.signal.aborted, true);
+  assert.equal(gone, false, 'the setup never settled: not confirmed');
+  assert.ok(Date.now() - t0 < 2000);
+  // One that ignores signals stays in the set, so the next Stop still sees it and doesn't confirm.
+  const stuck = runner(true);
+  const c2 = { abort: new AbortController(), runners: new Set([stuck]), busy: false };
+  assert.equal(await stopMacSide(c2, 50, 50), false);
+  assert.ok(c2.runners.has(stuck));
+  assert.equal(await stopMacSide(c2, 50, 50), false);
+  // Everything ended: confirmed, and nothing kept.
+  const fine = runner();
+  const c3 = { abort: new AbortController(), runners: new Set([fine]), busy: false, done: Promise.resolve() };
+  assert.equal(await stopMacSide(c3, 50, 50), true);
+  assert.equal(c3.runners.size, 0);
+});
+

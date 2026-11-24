@@ -355,7 +355,18 @@ export class ComponentManager {
   }
 
   spec(id: ComponentId): ComponentSpec {
-    return this.load().manifest.components[id];
+    const s = this.load().manifest.components[id];
+    if (!s) {
+      throw new PhoneDockError(`${id === 'wda' ? 'WebDriverAgent' : id} isn’t available in this PhoneDock’s components`, 'component_unavailable', 404,
+        [id === 'wda' ? 'Update PhoneDock, or set PHONEDOCK_WDA_SOURCE to a WebDriverAgent source tree.' : 'Update PhoneDock.']);
+    }
+    return s;
+  }
+
+  /** The components this manifest has (one from before a component existed leaves it out). */
+  private present(): ComponentId[] {
+    const comps = this.load().manifest.components;
+    return COMPONENT_IDS.filter((id) => comps[id]);
   }
 
   pinnedKey(id: ComponentId): { key: string; artifact: ComponentArtifact } | undefined {
@@ -498,7 +509,7 @@ export class ComponentManager {
    * Also garbage-collects dead-PID `stage-<pid>-*` dirs older than 24 h and dead-PID `.trash-*` dirs.
    */
   prune(id?: ComponentId): { removedKeys: string[]; removedStaging: string[]; removedTrash: string[] } {
-    const ids = id ? [id] : [...COMPONENT_IDS];
+    const ids = id ? [id] : this.present();
     const removedKeys: string[] = [];
     const removedStaging: string[] = [];
     const removedTrash: string[] = [];
@@ -600,11 +611,11 @@ export class ComponentManager {
 
   /** Start lifecycle hooks: touch active keys, prune stale unused keys & GC abandoned staging/trash, and repeat daily. */
   startLifecycle(): void {
-    for (const id of COMPONENT_IDS) this.touchUsed(id);
+    for (const id of this.present()) this.touchUsed(id);
     this.prune();
     if (this.pruneTimer) clearInterval(this.pruneTimer);
     this.pruneTimer = setInterval(() => {
-      for (const id of COMPONENT_IDS) this.touchUsed(id);
+      for (const id of this.present()) this.touchUsed(id);
       this.prune();
     }, 86_400_000);
     this.pruneTimer.unref();
@@ -705,7 +716,7 @@ export class ComponentManager {
   }
 
   listStatuses(): ComponentStatus[] {
-    return COMPONENT_IDS.map((id) => this.status(id));
+    return this.present().map((id) => this.status(id));
   }
 
   /** Whether this component is already at the daemon's pinned key (or overridden by env). */

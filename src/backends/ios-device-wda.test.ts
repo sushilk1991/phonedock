@@ -2,7 +2,7 @@
 // tunnel address read fresh from devicectl, and Stop Control. No phone is reachable from these tests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,7 +36,7 @@ test('input to a phone set up here goes to the tunnel address devicectl reports 
   const bound = await new Promise<boolean>((r) => { server.once('error', () => r(false)); server.listen(8100, '127.0.0.1', () => r(true)); });
   if (!bound) { t.skip('port 8100 is in use on this Mac'); return; }
   const savedEnv = process.env.PHONEDOCK_WDA_URL;
-  process.env.PHONEDOCK_WDA_URL = 'http://127.0.0.1:1';           // never used for a phone set up here
+  delete process.env.PHONEDOCK_WDA_URL;
   try {
     fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: '127.0.0.1' }]; fake.save();
     writeCfg(setUpCfg);                                              // no saved address
@@ -121,3 +121,69 @@ test('a phone whose tunnel idled down: input brings it up (devicectl’s details
     assert.ok(Date.now() - t0 < 5000, `refused in ${Date.now() - t0} ms`);
   } finally { server.closeAllConnections?.(); server.close(); }
 });
+
+// ── review round 2 (t1ct's Codex pass on df816f7) ──
+
+const SIM = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE', OTHER_SIM = 'FFFFFFFF-BBBB-CCCC-DDDD-EEEEEEEEEEEE';
+/** main's simulator path, kept off the network: an existing clone, and no Xcode behind the fake developer dir. */
+function mainPathOffline() { mkdirSync(join(home, 'wda', 'WebDriverAgent', 'WebDriverAgent.xcodeproj'), { recursive: true }); }
+const within = <T,>(p: Promise<T>, ms = 20_000) => Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('timed out')), ms).unref())]);
+
+test('#5: conflicting targets are refused before anything runs or is saved', async () => {
+  mainPathOffline();
+  fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: 'fd00:0:0:1::1' }]; fake.scenario.runners = {}; fake.save();
+  writeCfg({});
+  for (const [id, destination] of [[UDID, `platform=iOS Simulator,id=${SIM}`], [UDID, `platform=iOS Simulator,id=${UDID}`], [SIM, `platform=iOS Simulator,id=${OTHER_SIM}`], [SIM, 'platform=iOS Simulator,name=iPhone 16']] as const) {
+    const progress: string[] = [];
+    const e = await within(errOf(backend.wdaSetup(id, { destination }, (l) => progress.push(l))));
+    assert.equal(e?.code, 'bad_request', `${id} + ${destination}: ${e?.message}`);
+    assert.deepEqual(progress, [], 'nothing ran');
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(home, 'ios-device.json'), 'utf8')), {}, 'nothing saved');
+});
+
+test('#8: same-target destination forms keep working, as on main', async () => {
+  mainPathOffline();
+  fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: 'fd00:0:0:1::1' }]; fake.save();
+  // An iPhone named the long way: Set Up Control (here it stops at preflight, with a cause), not a refusal.
+  const phone = await within(errOf(backend.wdaSetup(UDID, { destination: `platform=iOS,id=${UDID}` })));
+  assert.notEqual(phone?.code, 'bad_request', String(phone?.message));
+  assert.ok(phone?.cause, 'Set Up Control’s error, with its cause');
+  // A simulator named by id alone, or by platform and id: main's path (it says so, then fails here for want of Xcode).
+  for (const destination of [`id=${SIM}`, `platform=iOS Simulator,id=${SIM}`]) {
+    const progress: string[] = [];
+    await within(errOf(backend.wdaSetup(SIM, { destination }, (l) => progress.push(l))));
+    assert.ok(progress.some((l) => /using existing clone/.test(l)), `${destination}: main's path (${progress.join(' | ')})`);
+  }
+});
+
+test('#9: an explicit PHONEDOCK_WDA_URL keeps main’s precedence; an iPhone now on iOS 27 isn’t routed to WebDriverAgent', async (t) => {
+  const hits: string[] = [];
+  const server = createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/status') { res.end(JSON.stringify({ value: { ready: true, ios: { ip: null } } })); return; }
+    if (req.url === '/session') { res.end(JSON.stringify({ sessionId: 's1', value: { sessionId: 's1' } })); return; }
+    res.end(JSON.stringify({ value: { width: 375, height: 812 } }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const envUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const savedEnv = process.env.PHONEDOCK_WDA_URL;
+  try {
+    writeCfg(setUpCfg);
+    fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: 'fd00:0:0:1::1' }]; fake.save();
+    process.env.PHONEDOCK_WDA_URL = envUrl;
+    const listed = (await backend.listDevices()).find((d) => d.nativeId === UDID)!;
+    assert.equal(listed.meta?.wdaUrl, envUrl);
+    await backend.tap!(UDID, 10, 10);
+    assert.ok(hits.some((h) => h.startsWith('POST')), 'the tap went to the explicit URL');
+    delete process.env.PHONEDOCK_WDA_URL;
+    fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: 'fd00:0:0:1::1', osVersion: '27.0' }]; fake.save();
+    const upgraded = (await backend.listDevices()).find((d) => d.nativeId === UDID)!;
+    assert.deepEqual([upgraded.meta?.wdaUrl, upgraded.meta?.wdaSharing], [null, null], 'iOS 27: native input, no WebDriverAgent route');
+  } finally {
+    if (savedEnv === undefined) delete process.env.PHONEDOCK_WDA_URL; else process.env.PHONEDOCK_WDA_URL = savedEnv;
+    server.closeAllConnections?.(); server.close();
+  }
+});
+

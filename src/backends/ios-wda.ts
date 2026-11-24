@@ -685,7 +685,7 @@ export async function checkReach(d: ReachDeps, tunnel: string, port = WDA_PORT):
 
 // ── Set Up Control and Stop Control ────────────────────────────────────────
 
-export interface SetupRequest { team?: string; apiKey?: WdaApiKey; share?: boolean }
+export interface SetupRequest { team?: string; apiKey?: WdaApiKey; share?: boolean; /** saved with the team, in one write */ name?: string }
 /** `wdaUrl`: this Mac's address for it (the phone's tunnel address); `reused`: it was already running, private, and
  *  nothing was started. */
 export interface WdaSetupResult { udid: string; wdaUrl: string; pid?: number; team: string; shared: boolean; sharedUrl?: string; reused: boolean }
@@ -700,7 +700,23 @@ export interface WdaDeps extends WdaBuildDeps, ReachDeps {
   /** End these runners on the phone (all of them without `pids`) and confirm: resolves with how many are left. */
   endRunners(udid: string, pids?: number[]): Promise<number>;
   saved(udid: string): WdaConfig | undefined;
-  save(udid: string, cfg: WdaConfig): void;
+  save(udid: string, cfg: WdaConfig, name?: string): void;
+}
+
+/** What Set Up Control is doing for one phone in this service: its abort, and every xcodebuild it started there (kept
+ *  until each has exited, so a later Stop still sees one that outlived the last). Never saved. */
+export interface Control { abort: AbortController; runners: Set<Runner>; busy: boolean; done?: Promise<unknown> }
+
+/** Stop Control's Mac side: abort the setup and signal every known xcodebuild at once, whatever the setup is doing;
+ *  then wait for the setup to settle (≤ `settleMs`) and each xcodebuild to exit. True when nothing is left; what is
+ *  left stays in `c.runners` for the next Stop. */
+export async function stopMacSide(c: Control, settleMs = 30_000, waitMs = 15_000): Promise<boolean> {
+  c.abort.abort();
+  for (const r of c.runners) if (r.alive()) r.kill(1_000);
+  const settled = !c.done || await Promise.race([c.done.then(() => true), new Promise<boolean>((res) => { setTimeout(res, settleMs, false).unref?.(); })]);
+  await Promise.all([...c.runners].map((r) => stopRunner(r, 1_000, waitMs)));   // also one a launch added meanwhile
+  for (const r of [...c.runners]) if (!r.alive()) c.runners.delete(r);
+  return settled && c.runners.size === 0;
 }
 
 /** Codes a wda-setup job failed with before 0.7.0 stay; every other failure keeps the catch-all `wda_setup_failed`
@@ -756,7 +772,8 @@ async function setupSteps(d: WdaDeps, udid: string, req: SetupRequest, onProgres
   });
   const tunnel = await timed('tunnel address', d.tunnel(udid));
   const result = (r: Reach, reused: boolean, pid?: number): WdaSetupResult => {
-    d.save(udid, { team: cfg.team, free: cfg.free, bundleId: cfg.bundleId });   // never an API key: it is asked for when signing
+    // One write, inside the launch's cleanup: if it fails, the launch is ended. Never an API key: asked for when signing.
+    d.save(udid, { team: cfg.team, free: cfg.free, bundleId: cfg.bundleId }, req.name);
     return { udid, wdaUrl: urlFor(tunnel, WDA_PORT), ...(pid ? { pid } : {}), team: cfg.team, shared: share, ...(r.sharedUrl ? { sharedUrl: r.sharedUrl } : {}), reused };
   };
   // Already running: used only when it is positively private here (it answers on this Mac's tunnel and the Wi-Fi
@@ -764,6 +781,8 @@ async function setupSteps(d: WdaDeps, udid: string, req: SetupRequest, onProgres
   // anything when sharing is asked for, is left alone.
   const reusable = async () => {
     if (!before.length) return false;
+    // Several: which one the check reached is unclear (another could serve the Wi-Fi on another port).
+    if (before.length > 1) throw runningError(udid, { kind: 'unknown', why: `${before.length} WebDriverAgent runners are on it` }, share);
     const r = await timed('checking the running one', checkReach(d, tunnel));
     if (!share && r.kind === 'private' && r.wifi) return true;
     throw runningError(udid, r.kind === 'private' && !r.wifi ? { ...r, kind: 'unknown', why: 'it reports no Wi-Fi address, so how it is bound can’t be checked' } : r, share);
@@ -775,15 +794,10 @@ async function setupSteps(d: WdaDeps, udid: string, req: SetupRequest, onProgres
   onProgress(`Signing with team ${cfg.team}${cfg.free ? ' (a personal team: its signing lasts 7 days; then set up again)' : ''}`);
   let xctestrun = '';
   let built = false;
-  let listedAt = d.now();
-  let baseline = before;
   const launch = async (): Promise<WdaSetupResult> => {
-    // A build (or a wait for one) ran meanwhile: look again, and leave alone what appeared.
-    if (d.now() - listedAt > 10_000) {
-      baseline = await timed('listing runners on the iPhone', d.runners(udid)).catch(() => { throw new PhoneDockError('PhoneDock couldn’t see what runs on the iPhone', 'no_device', 409, ['Keep the iPhone connected and awake, then try again.']); });
-      listedAt = d.now();
-      if (baseline.length) throw runningError(udid, { kind: 'unknown', why: 'it started while WebDriverAgent was being built' }, share);
-    }
+    // Right before launching, look again (Xcode or another Mac may have started one since): what appeared is left alone.
+    const now = await timed('listing runners on the iPhone', d.runners(udid)).catch(() => { throw new PhoneDockError('PhoneDock couldn’t see what runs on the iPhone', 'no_device', 409, ['Keep the iPhone connected and awake, then try again.']); });
+    if (now.length) throw runningError(udid, { kind: 'unknown', why: 'it started after PhoneDock first looked' }, share);
     const t0 = d.now();
     const env: NodeJS.ProcessEnv = {
       ...d.env,
@@ -819,10 +833,9 @@ async function setupSteps(d: WdaDeps, udid: string, req: SetupRequest, onProgres
       // This launch's runner ends with the failure (also one whose xcodebuild died before printing its address): its
       // xcodebuild, then on the phone what wasn't there just before it started.
       if (s) await stopRunner(s.runner);
-      const left = await d.runners(udid).then(async (now) => {
-        const mine = now.filter((p) => !baseline.includes(p));
-        return mine.length ? d.endRunners(udid, mine) : 0;
-      }).catch(() => -1);
+      // None ran just before this launch: one runner now is this launch's and is ended. Several: whose is which is
+      // unclear, so none is ended (Stop Control ends them all, as the hint says).
+      const left = await d.runners(udid).then((after) => (after.length === 1 ? d.endRunners(udid, after) : after.length)).catch(() => -1);
       if (left !== 0 && e instanceof PhoneDockError) {
         e.hints = [`PhoneDock couldn’t confirm the WebDriverAgent it started is gone: press Stop Control (\`phonedock ios wda-stop --udid ${udid}\`).`, ...(e.hints ?? []).filter((h) => !/^PhoneDock stopped it/.test(h))];
       }
@@ -832,7 +845,6 @@ async function setupSteps(d: WdaDeps, udid: string, req: SetupRequest, onProgres
   const attempt = async (force?: string): Promise<WdaSetupResult> => {
     const b = await timed('build check', ensureBuild(d, udid, cfg, onProgress, { force, signal: ctl.signal }));
     xctestrun = b.xctestrun; built ||= b.built;
-    if (b.built) listedAt = 0;                       // a build ran: look at the phone again before launching
     return launch();
   };
   try { return await attempt(); }

@@ -233,6 +233,17 @@ export function devicesTable(list: Device[]): string {
     : '');
 }
 
+/** wda-setup's done line. "Only from this Mac" only when the result says `shared: false`: a daemon from before 0.7.0
+ *  launched WebDriverAgent on every address and says nothing about it. */
+export function setupDoneText(result: unknown): string {
+  const r = (result ?? {}) as { wdaUrl?: string; sharedUrl?: string; shared?: boolean };
+  const reach = r.shared === true
+    ? `, shared on the Wi-Fi${r.sharedUrl ? `: other Macs run \`phonedock connect --ios ${r.sharedUrl}\`` : ''}. Anyone on this Wi-Fi can control the iPhone until Stop Control or a restart of the iPhone`
+    : r.shared === false ? ' (reachable only from this Mac)'
+    : '. This PhoneDock didn’t say whether other Macs on the Wi-Fi can reach it: update it, or run `phonedock ios wda-stop` if you didn’t mean to share';
+  return `WebDriverAgent running at ${r.wdaUrl}${reach}. It doesn’t come back by itself after the iPhone or PhoneDock restarts.`;
+}
+
 /** Older iPhones whose control is shared on the Wi-Fi (or can't be checked): said under the table, every time. */
 export function sharingNotes(list: Device[]): string {
   const lines = list.flatMap((d) => {
@@ -1018,9 +1029,7 @@ export async function run(argv: string[]): Promise<number> {
         ...(a.flags.share === true || a.flags.share === 'true' ? { share: true } : {}),
         wait: wantWait(a), onProgress: progressPrinter(quiet),
       });
-      const res = job.result as { wdaUrl?: string; sharedUrl?: string; shared?: boolean } | undefined;
-      out(job, () => job.state === 'done'
-        ? `WebDriverAgent running at ${res?.wdaUrl}${res?.shared ? `, shared on the Wi-Fi${res.sharedUrl ? `: other Macs run \`phonedock connect --ios ${res.sharedUrl}\`` : ''}. Anyone on this Wi-Fi can control the iPhone until Stop Control or a restart of the iPhone` : ' (reachable only from this Mac)'}. It doesn’t come back by itself after the iPhone or PhoneDock restarts.`
+      out(job, () => job.state === 'done' ? setupDoneText(job.result)
         : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
       return job.state === 'failed' ? 1 : 0;
     }

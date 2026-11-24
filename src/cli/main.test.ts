@@ -132,3 +132,16 @@ test('devices: an older iPhone shared on the Wi-Fi (or not checkable) is said un
   assert.match(devicesTable([{ ...phone, meta: { wdaSharing: 'unknown' } }]), /couldn’t check whether other Macs/);
   for (const s of ['not_shared', null, undefined]) assert.doesNotMatch(devicesTable([{ ...phone, meta: { wdaSharing: s } }]), /Wi-Fi/);
 });
+
+test('#1: wda-setup says "only from this Mac" only when the result says shared: false', async () => {
+  const { setupDoneText } = await import('./main.ts') as unknown as { setupDoneText: (r: unknown) => string };
+  assert.match(setupDoneText({ wdaUrl: 'http://[fd00::1]:8100', shared: false }), /only from this Mac/);
+  const shared = setupDoneText({ wdaUrl: 'http://[fd00::1]:8100', shared: true, sharedUrl: 'http://192.0.2.10:8100' });
+  assert.match(shared, /Anyone on this Wi-Fi can control the iPhone/);
+  assert.match(shared, /connect --ios http:\/\/192\.0\.2\.10:8100/);
+  assert.doesNotMatch(shared, /only from this Mac/);
+  const older = setupDoneText({ wdaUrl: 'http://192.0.2.10:8100' });            // a daemon from before this change
+  assert.doesNotMatch(older, /only from this Mac/);
+  assert.match(older, /didn’t say whether other Macs/);
+});
+

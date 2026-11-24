@@ -1335,9 +1335,35 @@ test('manifest validation: a source archive needs sourceDir and safe requiredFil
     assert.throws(() => validateManifest(noLicence, dir), /Licence notice missing/);
     const codeload = clone(); codeload.components.wda.artifacts[0].url = 'https://codeload.github.com/appium/WebDriverAgent/tar.gz/refs/tags/v16.15.3';
     assert.throws(() => validateManifest(codeload, dir), /not allowed/);   // not in this fixture's allowlist
+    // An older manifest without wda is fine (#10); a wda entry that is there must be well formed.
     const missing = clone(); delete (missing.components as Record<string, unknown>).wda;
-    assert.throws(() => validateManifest(missing, dir), /Missing component "wda"/);
+    assert.doesNotThrow(() => validateManifest(missing, dir));
+    const wrongId = clone(); (wrongId.components.wda as { id: string }).id = 'axe';
+    assert.throws(() => validateManifest(wrongId, dir), /Missing component "wda"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('#10: main’s manifest (no "wda") still loads; WebDriverAgent is reported unavailable only when asked for', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtempSync: mk, mkdirSync: mkd, writeFileSync: wf, rmSync: rm } = await import('node:fs');
+  const { tmpdir: td } = await import('node:os');
+  const { join: j } = await import('node:path');
+  const dir = mk(j(td(), 'pd-main-manifest-'));
+  try {
+    const show = (path: string) => execFileSync('git', ['show', `origin/main:${path}`], { encoding: 'utf8' });
+    const manifest = JSON.parse(show('tools/components.json'));
+    assert.equal(manifest.components.wda, undefined, 'main’s manifest has no wda');
+    wf(j(dir, 'components.json'), JSON.stringify(manifest));
+    for (const c of Object.values(manifest.components) as { licenseFile?: string; lockFile?: string }[]) {
+      for (const f of [c.licenseFile, c.lockFile]) if (f) { mkd(j(dir, f, '..'), { recursive: true }); wf(j(dir, f), show(`tools/${f}`)); }
+    }
+    const { manifest: loaded } = loadManifest(dir);
+    assert.deepEqual(Object.keys(loaded.components).sort(), ['axe', 'ios-tools']);
+    const mgr = new ComponentManager({ rootDir: j(dir, 'root'), toolsDir: dir, platformKey: 'darwin-arm64', externalLookup: () => undefined, envOverride: () => undefined });
+    assert.deepEqual(mgr.listStatuses().map((x) => x.id).sort(), ['axe', 'ios-tools']);
+    assert.throws(() => mgr.status('wda'), (e: { code?: string }) => e.code === 'component_unavailable');
+  } finally { rm(dir, { recursive: true, force: true }); }
+});
+

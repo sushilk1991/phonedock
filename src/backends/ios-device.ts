@@ -30,8 +30,8 @@ import { lockGuard } from './ios-lock.ts';
 import { abortXctrace, startXctrace, stopXctrace } from './ios-trace.ts';
 import { connect as netConnect } from 'node:net';
 import {
-  LOCAL_NETWORK_HINT, WDA_PORT, parseApiKey, readXcodeInfo, readXcodeTeams, setupPhone, sharingChecker, stopRunner, urlFor,
-  type PhoneFacts, type ProbeResult, type Runner, type WdaConfig, type WdaDeps, type WdaSetupResult, type XcodeInfo, type XcodeTeam,
+  LOCAL_NETWORK_HINT, WDA_PORT, parseApiKey, readXcodeInfo, readXcodeTeams, setupPhone, sharingChecker, stopMacSide, urlFor,
+  type Control, type PhoneFacts, type ProbeResult, type WdaConfig, type WdaDeps, type WdaSetupResult, type XcodeInfo, type XcodeTeam,
 } from './ios-wda.ts';
 import { iosFeedStats, iosHevcFeed, iosVideoFrameStream, iosVideoStats, iosVideoStream, startHevcRecording, warmVideoHelper, type HevcRecording, type HevcVideoFeed, type VideoDeps } from './ios-video.ts';
 
@@ -265,9 +265,7 @@ function transportOf(d: DcDevice): string | undefined { return conn(d).transport
 // ── WebDriverAgent ─────────────────────────────────────────────────────────
 
 function wdaUrl(udid: string): string | undefined {
-  const cf = cfgFor(udid);
-  // A phone set up here with Set Up Control goes to its tunnel (setUpBase), not to PHONEDOCK_WDA_URL.
-  const u = cf?.wdaUrl ?? (cf?.wdaTeam ? undefined : process.env.PHONEDOCK_WDA_URL);
+  const u = cfgFor(udid)?.wdaUrl ?? process.env.PHONEDOCK_WDA_URL;
   return u?.replace(/\/+$/, '');
 }
 
@@ -770,7 +768,13 @@ export function stopWdaRunner(udid: string): boolean { const c = wdaRunners.get(
 
 /** A phone set up here with Set Up Control: input goes to its WebDriverAgent at the phone's end of this Mac's tunnel,
  *  read fresh from devicectl, never a saved address (a manual connection's `wdaUrl` is main's path, unchanged). */
-function setUp(udid: string): boolean { const cf = cfgFor(udid); return !!cf?.wdaTeam && !cf.wdaUrl; }
+function setUp(udid: string): boolean {
+  const cf = cfgFor(udid);
+  if (!cf?.wdaTeam || cf.wdaUrl) return false;
+  // A phone that has since moved to iOS 27 is controlled natively; its remembered team stays for nothing.
+  const osv = osByUdid.get(udid);
+  return !osv || iosMajor(osv) < 27;
+}
 
 function tunnelIpOf(d: DcDevice): string | undefined {
   const v = (d.properties?.connection ?? d.connectionProperties ?? {}).tunnelIPAddress;
@@ -906,10 +910,10 @@ function wdaDeps(udid: string): WdaDeps {
     runners: (u) => runnersOnPhone(u, 20_000),
     endRunners: async (u, pids) => (await endRunnersOnPhone(u, pids)).left,
     saved: (u) => cfgFor(u)?.wdaTeam,
-    save: (u, cfg) => cfgState.update((all) => {
+    save: (u, cfg, name) => cfgState.update((all) => {
       // The address of a WebDriverAgent saved by an earlier setup is that runner's: input now goes to the tunnel.
       const { wdaUrl: _u, address: _a, ...rest } = all[u] ?? {};
-      all[u] = { ...rest, udid: u, wdaTeam: cfg };
+      all[u] = { ...rest, udid: u, wdaTeam: cfg, ...(name ? { name } : {}) };
     }),
   };
 }
@@ -921,11 +925,10 @@ async function hardwareUdid(id: string): Promise<string> {
 }
 /** Simulators and CoreDevice identifiers are UUIDs; an iPhone's hardware UDID isn't. */
 const UUID_ID = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/i;
-const SIMULATOR_DESTINATION = /(^|,)\s*platform\s*=\s*iOS Simulator\s*(,|$)/i;
 
 /** What Set Up Control is doing for a phone right now (Stop Control cancels it and waits for `done`), and the runner
  *  it started. Not saved: after a restart nothing is adopted, and what runs is read from the phone. */
-const controls = new Map<string, { abort: AbortController; runner?: Runner; busy: boolean; done?: Promise<unknown> }>();
+const controls = new Map<string, Control>();
 
 export interface ControlSetupOptions { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string; share?: boolean }
 
@@ -935,25 +938,21 @@ async function controlSetup(id: string, opts: ControlSetupOptions, onProgress: (
   // One name per phone: what is remembered and what input looks up is the hardware UDID.
   const udid = UUID_ID.test(id) ? await hardwareUdid(id) : id;
   if (udid !== id) throw new PhoneDockError('Pass the iPhone’s UDID, not its CoreDevice identifier', 'bad_request', 400, [`Use --udid ${udid}.`]);
-  if (opts.destination && opts.destination.replace(/\s/g, '') !== `id=${udid}`) {
-    throw new PhoneDockError('A destination for an iPhone must be `id=<its udid>`', 'bad_request', 400, ['Leave destination out: PhoneDock launches on the iPhone you named.']);
-  }
   const apiKey = parseApiKey({ path: opts.apiKeyPath, keyId: opts.apiKeyId, issuerId: opts.apiKeyIssuerId });
   if (controls.get(udid)?.busy) {
     const e = new PhoneDockError('This iPhone is already being set up', 'wda_setup_failed', 409, ['Wait for that setup to finish.']);
     e.cause = 'busy';
     throw e;
   }
-  const prev = controls.get(udid);
-  const c: { abort: AbortController; runner?: Runner; busy: boolean; done?: Promise<unknown> } = { abort: new AbortController(), runner: prev?.runner, busy: true };
+  // An xcodebuild an earlier setup started (still hosting WebDriverAgent) stays known, for Stop Control.
+  const c: Control = { abort: new AbortController(), runners: new Set(controls.get(udid)?.runners), busy: true };
   controls.set(udid, c);
   const steps: [string, number][] = [];
   try {
-    const p = setupPhone(wdaDeps(udid), udid, { team: opts.team, ...(apiKey ? { apiKey } : {}), share: opts.share }, onProgress,
-      { signal: c.abort.signal, onRunner: (runner) => { c.runner = runner; }, onStep: (s, ms) => steps.push([s, ms]) });
+    const p = setupPhone(wdaDeps(udid), udid, { team: opts.team, ...(apiKey ? { apiKey } : {}), share: opts.share, name: opts.name }, onProgress,
+      { signal: c.abort.signal, onRunner: (runner) => { c.runners.add(runner); }, onStep: (s, ms) => steps.push([s, ms]) });
     c.done = p.catch(() => undefined);
     const r = await p;
-    if (opts.name) cfgState.update((all) => { if (all[udid]) all[udid] = { ...all[udid], name: opts.name }; });
     sessions.delete(r.wdaUrl); statusCache.delete(r.wdaUrl); scaleCache.delete(udid); sharing.forget(udid);
     const totalMs = Date.now() - t0;
     const line = `${(totalMs / 1000).toFixed(1)} s: ${steps.map(([s, ms]) => `${s} ${(ms / 1000).toFixed(1)} s`).join(' · ')}`;
@@ -971,19 +970,18 @@ async function controlStop(id: string): Promise<{ udid: string; stopped: boolean
   if (!/^[A-Za-z0-9-]+$/.test(id) || id.startsWith('wda-')) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400);
   const udid = await hardwareUdid(id);
   const c = controls.get(udid);
-  controls.delete(udid);
-  c?.abort.abort();
   const t0 = Date.now();
-  // A setup in flight settles only once its xcodebuild has exited (and it has ended its own runner on the phone).
-  const settled = c?.done ? await Promise.race([c.done.then(() => true), new Promise<boolean>((r) => setTimeout(r, 30_000, false).unref())]) : true;
-  const macGone = settled && (c?.runner ? await stopRunner(c.runner) : true);
+  const hadRunner = !!c?.runners.size;
+  // Every xcodebuild known for the phone is signalled at once; the record stays until each has exited.
+  const macGone = c ? await stopMacSide(c) : true;
+  if (c && macGone && controls.get(udid) === c) controls.delete(udid);
   const phone = await endRunnersOnPhone(udid).catch(() => ({ found: 0, left: -1 }));
   console.log(`[phonedockd] wda ${udid}: Stop Control in ${((Date.now() - t0) / 1000).toFixed(1)} s (${phone.found} runner(s) on the iPhone, ${phone.left === 0 ? 'none left' : phone.left < 0 ? 'no answer' : `${phone.left} left`})`);
   const d = listCache?.list.find((x) => hw(x).udid === udid || x.identifier === udid);
   const ip = d ? tunnelIpOf(d) : undefined;
   if (ip) { sessions.delete(urlFor(ip, WDA_PORT)); statusCache.delete(urlFor(ip, WDA_PORT)); }
   scaleCache.delete(udid); sharing.forget(udid);
-  return { udid, stopped: !!c?.runner || phone.found > 0, confirmed: macGone && phone.left === 0 };
+  return { udid, stopped: hadRunner || phone.found > 0, confirmed: macGone && phone.left === 0 };
 }
 
 /** The teams Xcode is signed in to, for the app's team picker and `phonedock ios wda-teams`. */
@@ -1057,15 +1055,16 @@ export const backend: Backend & {
       const udid: string = h.udid ?? d.identifier;
       seen.add(udid); seen.add(d.identifier);
       const cf = cfgFor(udid);
-      const tip = cf?.wdaTeam && !cf.wdaUrl ? tunnelIpOf(d) : undefined;
-      const url = tip ? urlFor(tip, WDA_PORT) : wdaUrl(udid);
+      const osv = s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
+      if (osv) osByUdid.set(udid, String(osv));
+      // main's routes first (a saved address, PHONEDOCK_WDA_URL); else Set Up Control's tunnel, below iOS 27.
+      const tip = !wdaUrl(udid) && setUp(udid) ? tunnelIpOf(d) : undefined;
+      const url = wdaUrl(udid) ?? (tip ? urlFor(tip, WDA_PORT) : undefined);
       const ws = url ? await wdaStatus(url) : undefined;
       // Control set up here and on: whether other Macs on the Wi-Fi can reach it (null: control isn't on here).
       const shared = tip && ws?.ok ? await sharing.check(udid, ws.status) : undefined;
       const readiness = cachedReadiness(d);
-      const osv = s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
       if (osv) {
-        osByUdid.set(udid, String(osv));
         if (iosMajor(String(osv)) >= 27) {
           try { getComponentManager().triggerAuto('ios-tools'); } catch { /* ignore */ }
         }
@@ -1143,9 +1142,18 @@ export const backend: Backend & {
   /** An iPhone: Set Up Control (build the pinned WebDriverAgent once, launch it privately, check it). A simulator
    *  destination: main's clone + build + run, unchanged. */
   async wdaSetup(udid: string, opts: ControlSetupOptions, onProgress: (l: string) => void = () => {}): Promise<{ udid: string; wdaUrl: string; pid?: number }> {
-    // main's path, unchanged, for a simulator: named by its destination, or by a UUID no iPhone answers to.
-    if (opts.destination ? SIMULATOR_DESTINATION.test(opts.destination) : UUID_ID.test(udid) && (await hardwareUdid(udid)) === udid) return wdaSetup(udid, opts, onProgress);
-    return controlSetup(udid, opts, onProgress);
+    // Decided before anything runs or is saved: an iPhone (a hardware UDID, or a UUID an iPhone answers to) gets Set Up
+    // Control; anything else is a simulator, main's path unchanged. A destination must name that same device by id=.
+    const phone = !UUID_ID.test(udid) || (await hardwareUdid(udid)) !== udid;
+    if (opts.destination !== undefined) {
+      const kv = new Map(opts.destination.split(',').map((part) => { const [k, ...v] = part.split('='); return [k.trim().toLowerCase(), v.join('=').trim()] as const; }));
+      const platform = kv.get('platform')?.toLowerCase();
+      const refuse = (why: string) => new PhoneDockError(`The destination ${why}`, 'bad_request', 400, [`Leave destination out, or pass id=${udid}.`], `udid ${udid}, destination ${opts.destination}`);
+      if (kv.get('id') !== udid) throw refuse(kv.has('id') ? `names another device (${kv.get('id')}) than ${udid}` : 'must name the device: id=<its udid>');
+      if (platform !== undefined && platform !== 'ios' && platform !== 'ios simulator') throw refuse(`platform isn’t iOS (${kv.get('platform')})`);
+      if (phone && platform === 'ios simulator') throw refuse('is a simulator, but the udid is an iPhone');
+    }
+    return phone ? controlSetup(udid, opts, onProgress) : wdaSetup(udid, opts, onProgress);
   },
   async wdaStop(udid: string) { return controlStop(udid); },
   async wdaTeams() { return wdaTeams(); },

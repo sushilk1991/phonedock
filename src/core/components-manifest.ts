@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { PhoneDockError, type ComponentId } from './types.ts';
 
 export const COMPONENT_IDS: readonly ComponentId[] = ['ios-tools', 'axe', 'wda'];
+/** Components a manifest may leave out (one from before they existed, via PHONEDOCK_TOOLS_DIR): reported unavailable
+ *  only when asked for. */
+export const OPTIONAL_COMPONENT_IDS: readonly ComponentId[] = ['wda'];
 
 /** The environment variable that points a component at a copy outside PhoneDock (an executable, or for 'wda' a
  *  WebDriverAgent checkout). Set: auto-install stops and that copy is used. */
@@ -203,6 +206,7 @@ export function validateManifest(
 
   for (const id of COMPONENT_IDS) {
     const c = comps[id] as ComponentSpec | undefined;
+    if (c === undefined && OPTIONAL_COMPONENT_IDS.includes(id)) continue;
     if (!c || typeof c !== 'object' || c.id !== id) {
       throw new PhoneDockError(`Missing component "${id}" in manifest`, 'invalid_manifest', 500);
     }
