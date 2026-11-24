@@ -330,8 +330,8 @@ function transportOf(d: DcDevice): string | undefined { return conn(d).transport
  *  checking that the address is still this phone). */
 function hasWda(udid: string): boolean {
   const cf = cfgFor(udid);
-  // Not the Mac's WebDriverAgent owner: wdaBase refuses, naming the owner.
-  if (cf?.wda) return !wdaOwner || !!wdaSup.boundUrl(cf.udid ?? udid);
+  // Not the Mac's WebDriverAgent owner: devicectl only (input refuses in wda(), naming the owner).
+  if (cf?.wda) return wdaOwner && !!wdaSup.boundUrl(cf.udid ?? udid);
   const u = (cf?.wdaUrl ?? process.env.PHONEDOCK_WDA_URL)?.replace(/\/+$/, '');
   return !!u && !otherPhoneAt.has(u);
 }
@@ -508,6 +508,7 @@ async function wdaFetch(base: string, method: string, path: string, body?: unkno
 }
 
 async function wda(udid: string): Promise<{ base: string; session: () => Promise<string> }> {
+  if (!wdaOwner && cfgFor(udid)?.wda) throw notOwnerError();
   if (!hasWda(udid)) {
     let dc: string | undefined; try { dc = dcId(udid); } catch { /* not connected: no OS to go by */ }
     const osv = (dc && osByUdid.get(dc)) || osByUdid.get(udid);
@@ -978,7 +979,7 @@ async function runnersOnPhone(udid: string, timeoutMs = 30_000): Promise<number[
  *  person's Stop). xcodebuild ending doesn't end the runner app on a phone (seen on Wi-Fi). Each devicectl call takes
  *  seconds over Wi-Fi, so: list, end them all at once (SIGKILL: a runner has nothing to save), list again; every call
  *  gets only the time left of `withinMs`, so nothing runs after this returns. Resolves with how many are left. */
-async function stopRunnersOnPhone(udid: string, o: { pids?: number[]; withinMs?: number } = {}): Promise<number> {
+export async function stopRunnersOnPhone(udid: string, o: { pids?: number[]; withinMs?: number } = {}): Promise<number> {
   const until = Date.now() + (o.withinMs ?? 60_000);
   const left = () => Math.max(0, until - Date.now());
   const mine = (all: number[]) => (o.pids ? all.filter((p) => o.pids!.includes(p)) : all);
@@ -1175,7 +1176,8 @@ async function wdaSetup(id: string, opts: WdaSetupOptions, onProgress: (l: strin
   const gen = markClock;
   if (!/^[A-Za-z0-9-]+$/.test(id) || id.startsWith('wda-')) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400, ['Pass the iPhone’s UDID (phonedock devices --backend ios-device).']);
   const t0 = Date.now();
-  const udid = await canonicalUdid(id);
+  // A simulator (as before 0.7.0) is named by the caller's id; devicectl isn't asked.
+  const udid = opts.destination && /platform=[^,]*simulator/i.test(opts.destination) ? id : await canonicalUdid(id);
   if (setupsRunning.has(udid)) {
     const e = new PhoneDockError('This iPhone is already being set up', 'wda_setup_failed', 409, ['Wait for that setup to finish.']);
     e.cause = 'busy';

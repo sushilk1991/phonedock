@@ -620,6 +620,21 @@ test('daemon start ends its own runner left on the phone (by its recorded pid), 
   assert.equal(w.onPhone.size, 0);
 });
 
+test('round 4: a runner whose pid on the phone devicectl didn’t give is still PhoneDock’s: its exit ends it there, then it relaunches', async () => {
+  const w = world();
+  let calls = 0;
+  const list = w.deps.runners!;
+  w.deps.runners = async (u) => { if (++calls === 2) throw new Error('devicectl: no answer'); return list(u); };   // the lookup after the launch
+  w.sup.start(); await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+  w.runners[0].die(0);                                   // xcodebuild ends; its runner app lives on on the phone
+  await w.settle();
+  assert.ok(!w.onPhone.has(w.runners[0].pid), 'ended on the phone, as PhoneDock’s own');
+  await w.tickAfter(5_000);
+  assert.equal(w.launches.length, 2, 'relaunched (not refused as somebody else’s)');
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+});
+
 test('round 4: daemon start leaves a runner it has no record of alone (somebody else’s) and says so', async () => {
   const w = world();
   w.onPhone.add(888);                                    // not PhoneDock's: another Mac's, another tool's

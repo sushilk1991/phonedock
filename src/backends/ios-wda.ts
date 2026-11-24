@@ -976,6 +976,8 @@ interface Entry {
   own?: number[];
   learning?: Promise<void>;
   learnBusy?: boolean;
+  /** launched, and its pid on the phone not found out yet: whatever runs there is its */
+  unlearned?: boolean;
 }
 
 /** Waits for the person that only a launch revealed: retried with backoff. */
@@ -1182,7 +1184,7 @@ export class WdaSupervisor {
             // keeps counting toward giving up.
             const up = e.runner ? t - (e.runner.readyAt ?? e.runner.startedAt) : 0;
             if (up >= this.o.minUptimeMs) { e.attempts = 0; e.personAttempts = 0; }
-            if (e.runner && e.own === undefined) this.learn(udid, e);
+            if (e.runner && e.unlearned) this.learn(udid, e);
             if (e.state !== 'running') this.set(e, 'running', 'WebDriverAgent is running');
             return;
           }
@@ -1332,10 +1334,16 @@ export class WdaSupervisor {
     const t0 = this.deps.now();
     const r = e?.runner;
     if (e) e.runner = undefined;
-    // Which runner on the phone is this one, if that was still being found out (or failed: ask now). Whatever runs
-    // there now started after this launch's check found nothing but PhoneDock's own, which it ended.
-    if (e && r && e.own === undefined) this.learn(udid, e);
+    // Which runner on the phone is this one, if that was still being found out (or failed: ask now, also after its
+    // xcodebuild exited). Whatever runs there started after this launch's check found nothing but PhoneDock's own.
+    if (e?.unlearned) this.learn(udid, e);
     await e?.learning;
+    const unknown = !!e?.unlearned;      // devicectl still can't say: our runner may live on there, so not confirmed
+    const hostsOf = () => (this.deps.ledger?.hosts?.() ?? []).filter((h) => h.udid === udid);
+    const reap = () => (this.deps.reapHosts ? this.deps.reapHosts(udid, hostsOf()).catch(() => false) : Promise.resolve(true));
+    // No runner of this process's: an xcodebuild left by a PhoneDock that died goes first, so it can't start or keep
+    // a runner on the phone while the phone is being checked.
+    const reapedFirst = r ? undefined : await reap();
     const rec = this.deps.ledger?.record(udid);
     const owedStop = this.stopOwed(rec);
     const all = !!o.all || (owedStop && !o.ownOnly);
@@ -1349,10 +1357,9 @@ export class WdaSupervisor {
         ? this.deps.stopOnPhone(udid, { ...(pids ? { pids } : {}), withinMs: this.o.stopWaitMs }).catch(() => -1).finally(() => { phoneMs = this.deps.now() - t0; })
         : Promise.resolve(0),
     ]);
-    const hosts = (this.deps.ledger?.hosts?.() ?? []).filter((h) => h.udid === udid);
-    const hostsGone = this.deps.reapHosts ? await this.deps.reapHosts(udid, hosts).catch(() => false) : macGone;
+    const hostsGone = (reapedFirst ?? (this.deps.reapHosts ? await reap() : macGone)) && macGone;
     // Recorded runners this call didn't ask about (daemon exit) stay owed.
-    const handled = onPhone || (!all && pids!.length === 0);
+    const handled = (onPhone || (!all && pids!.length === 0)) && (all || !unknown);
     const done = handled && left === 0 && macGone && hostsGone && (all || !owedStop);
     if (done) this.deps.ledger?.clean(udid);
     else this.deps.ledger?.mark(udid);
@@ -1363,7 +1370,7 @@ export class WdaSupervisor {
         + `${onPhone ? `${all ? 'every runner' : `runner ${pids!.join(', ')}`} on the iPhone ${s(phoneMs)}${left === 0 ? '' : left === -1 ? ', no answer' : `, ${left} left`}` : ''})`
         + `${hostsGone ? '' : '; an earlier xcodebuild is still running'}`);
     }
-    return macGone && hostsGone ? left : (left === 0 ? -1 : left);
+    return macGone && hostsGone && (all || !unknown) ? left : (left === 0 ? -1 : left);
   }
 
   /** The runners on the phone (none known when nothing can list them); devicectl failing is a wait for the phone. */
@@ -1384,7 +1391,7 @@ export class WdaSupervisor {
     if (!this.deps.runners || e.learnBusy) return;
     e.learnBusy = true;
     e.learning = this.deps.runners(udid).then((pids) => {
-      e.own = pids;
+      e.own = pids; e.unlearned = false;
       this.deps.ledger?.mark(udid, { phonePids: pids });
     }, () => undefined).finally(() => { e.learnBusy = false; });
   }
@@ -1440,6 +1447,7 @@ export class WdaSupervisor {
     e.okAt = this.deps.now(); e.sawLocked = false;
     this.set(e, 'running', 'WebDriverAgent is running');
     this.deps.log(`wda ${udid}: running at ${r.url} (xcodebuild pid ${r.runner.pid ?? '?'}${r.lanCheck ? `, Wi-Fi address ${r.lanCheck}` : ''}${r.sharedUrl ? `, shared at ${r.sharedUrl}` : ''})`);
+    e.unlearned = !!this.deps.runners;
     this.learn(udid, e);
     const runner = r.runner;
     void runner.exited.then(() => this.onExit(udid, e, runner));

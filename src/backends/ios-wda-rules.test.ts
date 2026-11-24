@@ -586,6 +586,9 @@ test('round 4: a service that isn’t the Mac’s WebDriverAgent owner refuses t
     const e = await errOf(backend.wdaSetup(UDID, {}));
     assert.equal(e?.code, 'wda_setup_failed');
     assert.equal(e?.cause, 'wda_not_owner');
+    assert.equal((await errOf(backend.tap!(UDID, 10, 10)))?.code, 'wda_not_owner', 'input to a managed phone names the owner');
+    const viaDevicectl = await errOf(backend.terminateApp!(UDID, 'com.example.app'));
+    assert.notEqual(viaDevicectl?.code, 'wda_not_owner', 'what devicectl does (apps, screenshots) still works here');
     assert.deepEqual(fake.runners(UDID), [80], 'the phone is untouched');
     assert.ok(readCfg()[UDID].wda, 'and the entry kept');
     writeCfg({ [UDID]: { udid: UDID, wdaUrl: `http://${WIFI}:8100` } });
@@ -765,6 +768,24 @@ test('round 4 / review-3 #6: the earlier-setup notice also for a record under th
   writeCfg({ [UDID]: { udid: UDID, wdaUrl: `http://${WIFI}:8100` } });              // devicectl has no row for it now
   const manual = (await backend.listDevices()).find((x) => x.nativeId === UDID)!;
   assert.match(String(backend.liveDevice(manual)?.meta?.wdaNotice ?? ''), /earlier setup/);
+});
+
+test('round 4 / review-3 #10: ending runners on the phone stops at its deadline; nothing is sent to the phone after it returns', async () => {
+  const { stopRunnersOnPhone } = await import('./ios-device.ts');
+  fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: TUNNEL }]; fake.scenario.runners = { [UDID]: [80] }; fake.scenario.delayMs = 2000; fake.save();
+  try {
+    const start = fake.calls().length;            // the log is shared with the tests before this one
+    const t = Date.now();
+    const left = await stopRunnersOnPhone(UDID, { withinMs: 600 }).catch(() => -1);
+    const took = Date.now() - t;
+    const after = fake.calls().length;
+    assert.ok(took < 1500, `returned at its deadline (${took} ms)`);
+    assert.notEqual(left, 0, 'not confirmed');
+    await sleep(2500);
+    assert.equal(fake.calls().length, after, 'no devicectl call after it returned');
+    assert.ok(!fake.calls().slice(start).some((c) => c.includes('terminate')), 'and nothing ended late');
+    assert.deepEqual(fake.runners(UDID), [80]);
+  } finally { fake.scenario.delayMs = 0; fake.save(); }
 });
 
 test('round 4: an aborted launch gives up only once its xcodebuild has exited (Disconnect waits for it)', async () => {
