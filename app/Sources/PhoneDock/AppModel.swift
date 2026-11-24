@@ -776,8 +776,10 @@ final class AppModel {
     /// Saves to the user's screenshot folder (`SavedMedia.folder`) and says so with a toast, as recordings do.
     func screenshot(_ d: Device) {
         if asleep.contains(d.id) {
-            toast = Toast(kind: .info, title: "\(d.name) is asleep", message: "A screenshot would be black. Wake it first.",
-                          actionTitle: "Wake", action: { [weak self] in self?.wake(d) })
+            toast = d.canWake
+                ? Toast(kind: .info, title: "\(d.name) is asleep", message: "A screenshot would be black. Wake it first.",
+                        actionTitle: "Wake", action: { [weak self] in self?.wake(d) })
+                : Toast(kind: .info, title: "\(d.name) is asleep", message: "A screenshot would be black. Wake it on the phone first.")
             return
         }
         perform("Couldn’t save a screenshot", device: d) { c in

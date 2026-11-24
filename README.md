@@ -216,7 +216,7 @@ Ask your agent to test a flow once, save it, and run it on every PR.
   (`brew install cameroncooke/axe/axe`).
 - **Android:** the Android SDK command-line tools and emulator (`brew install --cask android-commandlinetools`).
   `scrcpy` and `ffmpeg` are optional (separate windows, recording, live streaming).
-- **iPhones:** Xcode and `pymobiledevice3` (`uv tool install pymobiledevice3`).
+- **iPhones:** Xcode and `pymobiledevice3` (`uv tool install --python 3.12 pymobiledevice3`).
 - **Node.js:** PhoneDock.app includes its own runtime. Running from source needs Node.js 24 or later.
 
 `phonedock backends` shows what's available on your Mac and what's missing.

@@ -21,7 +21,8 @@ import {
 } from '../core/types.ts';
 import { hasLaunchOptions, iosLaunchArgv, iosPrefixedEnv } from '../core/launch-options.ts';
 import { JsonState, ScreenshotRecorder, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize } from './ios-common.ts';
-import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidPinch, hidSwipe, hidTap, hidType, hidTypable, isNativeInputCapable, type Geometry } from './ios-hid.ts';
+import { hidCombo, hidDoubleTap, hidKey, hidLongPress, hidPinch, hidScript, hidSwipe, hidTap, hidType, hidTypable, iosMajor, isNativeInputCapable, type Geometry } from './ios-hid.ts';
+import { pymd3Python } from './pymd3-python.ts';
 import { isNativeCapable, nativeSession, nativeUiTree } from './ios-native.ts';
 import { pasteUnicode, resolveForegroundApp } from './ios-input.ts';
 import { lockGuard } from './ios-lock.ts';
@@ -285,6 +286,24 @@ export async function wdaStatus(base: string, timeoutMs = 2500, fresh = false): 
   return v;
 }
 
+/**
+ * The error when this iPhone has no input path. iOS 27+ is controlled natively, with no WebDriverAgent. It only lands
+ * here when this Mac is missing what that path runs on, so name that instead of pointing at WebDriverAgent.
+ */
+export function noControlError(udid: string, osVersion: string | undefined, tools: { pymd3: boolean; hid: boolean }): PhoneDockError {
+  if (iosMajor(osVersion) >= 27 && (!tools.pymd3 || !tools.hid)) {
+    return tools.pymd3
+      ? new PhoneDockError('PhoneDock can’t control this iPhone', 'not_supported', 501, ['Reinstall PhoneDock: its iPhone input helper is missing.'],
+        `iOS ${osVersion} is controlled natively, but tools/pd-ios-hid.py wasn't found next to PhoneDock.`)
+      : new PhoneDockError('PhoneDock can’t control this iPhone yet', 'not_supported', 501,
+        ['Install pymobiledevice3 on this Mac: uv tool install --python 3.12 pymobiledevice3'],
+        `iOS ${osVersion} is controlled natively (taps, keys, typing and live video over USB or Wi-Fi), which needs pymobiledevice3 ` +
+        'in a Python 3.11 or later environment. PhoneDock looks for the pymobiledevice3 command on PATH and for uv or pipx installs, ' +
+        'or set PHONEDOCK_PYMD3_PYTHON to its Python. No restart is needed.');
+  }
+  return new PhoneDockError('Could not control or inspect the iPhone', 'not_supported', 501, ['Set up WebDriverAgent on the iPhone.'], wdaDetail(udid));
+}
+
 function wdaDetail(udid: string): string {
   return [
     'iPhones on iOS 27 or later need no WebDriverAgent (touch, keyboard and the UI tree go over USB or Wi-Fi via CoreDevice); this path is for older iOS.',
@@ -321,7 +340,10 @@ async function wdaFetch(base: string, method: string, path: string, body?: unkno
 
 async function wda(udid: string): Promise<{ base: string; session: () => Promise<string> }> {
   const base = wdaUrl(udid);
-  if (!base) throw new PhoneDockError('Could not control or inspect the iPhone', 'not_supported', 501, ['Set up WebDriverAgent on the iPhone.'], wdaDetail(udid));
+  if (!base) {
+    let dc: string | undefined; try { dc = dcId(udid); } catch { /* not connected: no OS to go by */ }
+    throw noControlError(udid, (dc && osByUdid.get(dc)) || osByUdid.get(udid), { pymd3: !!pymd3Python(), hid: !!hidScript() });
+  }
   return {
     base,
     session: async () => {

@@ -87,8 +87,12 @@ struct InspectorTabPicker: View {
             .testAnchor("Inspector tabs")
     }
 
-    /// 32 pt per tab × 7 = 224 pt so tabs + inspector toggle fit inside the 280 pt minimum inspector column without overflowing.
-    static let width: CGFloat = 224
+    /// What the control really draws at in a toolbar. macOS 26+ restyles a toolbar segmented control: each segment is at
+    /// least 30 pt and the glass adds 38 pt, whatever its symbols or `setWidth` say (measured on macOS 27.2). So 7 tabs
+    /// need 248 pt. A narrower item clips the first and last tabs: 224 cut Info and Runs in half. Segment widths stay
+    /// automatic, so the control fills exactly this width. The inspector's minimum width (`ContentView`,
+    /// `inspectorColumnWidth`) leaves room for this plus the inspector toggle.
+    static let width: CGFloat = 248
 
     private struct Segments: NSViewRepresentable {
         @Binding var tab: InspectorTab
@@ -98,11 +102,7 @@ struct InspectorTabPicker: View {
             let images = tabs.map { NSImage(systemSymbolName: $0.symbol, accessibilityDescription: $0.rawValue) ?? NSImage() }
             let c = NSSegmentedControl(images: images, trackingMode: .selectOne, target: context.coordinator,
                                        action: #selector(Coordinator.changed(_:)))
-            let segWidth = InspectorTabPicker.width / CGFloat(tabs.count)
-            for (i, t) in tabs.enumerated() {
-                c.setToolTip(t.help, forSegment: i)
-                c.setWidth(segWidth, forSegment: i)
-            }
+            for (i, t) in tabs.enumerated() { c.setToolTip(t.help, forSegment: i) }
             c.setAccessibilityLabel("Inspector")
             c.segmentDistribution = .fillEqually
             c.selectedSegment = tabs.firstIndex(of: tab) ?? 0
