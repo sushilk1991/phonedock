@@ -1,12 +1,14 @@
-// Managed component installer, verifier, lookup, locking and pruning (ios-tools, axe).
-// Keeps downloaded runtimes under <PHONEDOCK_HOME>/components/<id>/<key> with atomic activation and cross-process locks.
+// Managed component installer, verifier, lookup and pruning (ios-tools, axe).
+// Keeps downloaded runtimes under <PHONEDOCK_HOME>/components/<id>/<key>.
+// Lock-free atomic activation: each install stages in stage-<random>, writes .ready.json inside staging,
+// and activates via a single atomic rename(payload, <key>). A losing concurrent racer deletes its staging and adopts the winner.
 import { createHash, randomBytes } from 'node:crypto';
 import {
   accessSync, constants, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
-  readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
-import { run, sleep } from './exec.ts';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { run } from './exec.ts';
 import { stateDir, which } from './paths.ts';
 import {
   PhoneDockError,
@@ -16,20 +18,16 @@ import {
   assertAllowedUrl, COMPONENT_IDS, componentKey, currentPlatformKey, isComponentId, loadManifest, selectArtifact,
   type ComponentArtifact, type ComponentManifest, type ComponentSpec,
 } from './components-manifest.ts';
-import { hasUnsafeTarPath, inspectTarGzHeaders } from './tar-inspect.ts';
 
 export { COMPONENT_IDS, isComponentId } from './components-manifest.ts';
 
 const READY_FILE = '.ready.json';
-const LOCK_DIR_NAME = '.lock';
-const LOCK_OWNER_FILE = 'owner.json';
-const STAGING_DIR_NAME = '.staging';
+const LAST_USED_FILE = '.last-used';
+const STAGE_PREFIX = 'stage-';
+const TRASH_PREFIX = '.trash-';
 const MAX_REDIRECTS = 5;
 const PRUNE_UNUSED_MS = 30 * 86_400_000;
 const STAGING_ORPHAN_MS = 24 * 3_600_000;
-const DEFAULT_LOCK_MISSING_GRACE_MS = 5_000;
-const DEFAULT_LOCK_HEARTBEAT_MS = 10_000;
-const DEFAULT_LOCK_POLL_MS = 500;
 const DEFAULT_BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
 const DEFAULT_PIP_INDEX_URL = 'https://pypi.org/simple';
 
@@ -37,17 +35,8 @@ interface ReadyMarker {
   key: string;
   version: string;
   activatedAt: string;
-  lastUsedAt: string;
   sizeBytes: number;
   binaryRelPath: string;
-}
-
-interface LockOwner {
-  pid: number;
-  token: string;
-  startedAt: string;
-  heartbeatAt: string;
-  key: string;
 }
 
 interface RuntimeState {
@@ -77,25 +66,15 @@ export interface ComponentManagerOptions {
   autoEnabled?: () => boolean;
   /** Override clock (unit tests). */
   now?: () => number;
-  /** Override PID liveness check (unit tests). */
-  pidAlive?: (pid: number) => boolean;
   /** Override external discovery for status reporting. */
   externalLookup?: (id: ComponentId) => string | undefined;
   /** Override env override lookup (PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_AXE). */
   envOverride?: (id: ComponentId) => string | undefined;
   /** Override backoff schedule in ms (unit tests). */
   backoffMs?: readonly number[];
-  /** Override cross-process lock timings (unit tests). */
-  lockStaleMs?: number;
-  lockMissingGraceMs?: number;
-  lockHeartbeatMs?: number;
-  lockPollMs?: number;
-  lockWaitTimeoutMs?: number;
-  /** Test hook invoked right before attempting stale-lock reclamation (for ABA interleaving tests). */
-  onBeforeReclaim?: (reclaimKey: string) => Promise<void> | void;
   /** Override write stream factory (unit tests for filesystem error handling). */
   createWriteStream?: typeof createWriteStream;
-  /** Skip default network download / venv steps in unit tests when custom hooks provided. */
+  /** Extra pip args (unit tests). */
   pipExtraArgs?: string[];
   /** Called whenever a component's status changes (throttled for progress). */
   onChange?: (status: ComponentStatus) => void;
@@ -109,17 +88,15 @@ export function isExecutable(path: string): boolean {
   try { accessSync(path, constants.X_OK); return true; } catch { return false; }
 }
 
-function defaultPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; }
-  catch (e) { return (e as NodeJS.ErrnoException).code !== 'ESRCH'; }
+function atomicWriteText(filePath: string, text: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  writeFileSync(tmp, text, 'utf8');
+  renameSync(tmp, filePath);
 }
 
 function atomicWriteJson(filePath: string, data: unknown): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
-  writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
-  renameSync(tmp, filePath);
+  atomicWriteText(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
 /** Build a clean child environment for isolated Python venv creation and pip installs. */
@@ -136,14 +113,18 @@ export function isolatedPythonEnv(baseEnv: NodeJS.ProcessEnv = process.env): Nod
   return out;
 }
 
-/** Validate every tar entry's real binary header (type, path, symlink/hardlink target) before extraction. */
-export async function inspectTarSafety(tarballPath: string, targetDir: string): Promise<string[]> {
-  const entries = await inspectTarGzHeaders(tarballPath, targetDir);
-  return entries.map((e) => e.name);
+/** Exact argv for bsdtar extraction: never pass -P so bsdtar enforces its secure defaults. */
+export function tarExtractArgv(tarballPath: string, targetDir: string): string[] {
+  return ['-xzf', tarballPath, '-C', targetDir, '--no-same-owner'];
 }
 
-/** Verify every extracted entry and symlink chain resolves via realpath strictly inside rootDir. */
-export function verifyExtractedSymlinks(rootDir: string): void {
+/**
+ * Hardened post-extraction walk:
+ * - rejects anything other than a regular file, directory, or symlink (FIFOs, devices, sockets);
+ * - rejects any regular file with nlink > 1 (hardlinks);
+ * - rejects any symlink whose resolved realpath escapes rootDir (or is unresolvable/cyclic).
+ */
+export function verifyExtractedTree(rootDir: string): void {
   const rootReal = realpathSync(rootDir);
   const inside = (p: string) => p === rootReal || p.startsWith(rootReal + sep);
   const walk = (dir: string) => {
@@ -151,37 +132,65 @@ export function verifyExtractedSymlinks(rootDir: string): void {
       const full = join(dir, name);
       const st = lstatSync(full);
       if (st.isSymbolicLink()) {
-        const target = readlinkSync(full);
-        if (hasUnsafeTarPath(target)) {
-          throw new PhoneDockError('Archive contains an unsafe symlink', 'unsafe_archive', 502, undefined, `Symlink ${relative(rootReal, full)} -> ${target}`);
+        let real: string;
+        try {
+          real = realpathSync(full);
+        } catch {
+          throw new PhoneDockError(
+            'Archive contains an unresolvable symlink',
+            'unsafe_archive',
+            502,
+            undefined,
+            `Unresolvable symlink: ${relative(rootReal, full)}`,
+          );
         }
-      }
-      let real: string;
-      try {
-        real = realpathSync(full);
-      } catch {
-        throw new PhoneDockError('Archive contains an unresolvable symlink', 'unsafe_archive', 502, undefined, `Unresolvable entry: ${relative(rootReal, full)}`);
-      }
-      if (!inside(real)) {
-        throw new PhoneDockError('Archive entry resolves outside destination directory', 'unsafe_archive', 502, undefined, `${relative(rootReal, full)} -> ${real}`);
-      }
-      if (st.isDirectory()) {
+        if (!inside(real)) {
+          throw new PhoneDockError(
+            'Archive symlink resolves outside destination directory',
+            'unsafe_archive',
+            502,
+            undefined,
+            `${relative(rootReal, full)} -> ${real}`,
+          );
+        }
+      } else if (st.isFile()) {
+        if (st.nlink > 1) {
+          throw new PhoneDockError(
+            'Archive contains a hardlinked file',
+            'unsafe_archive',
+            502,
+            undefined,
+            `Rejected file with nlink=${st.nlink}: ${relative(rootReal, full)}`,
+          );
+        }
+      } else if (st.isDirectory()) {
         walk(full);
+      } else {
+        throw new PhoneDockError(
+          'Archive contains unsupported special file',
+          'unsafe_archive',
+          502,
+          undefined,
+          `Rejected non-regular entry: ${relative(rootReal, full)}`,
+        );
       }
     }
   };
   walk(rootReal);
 }
 
-/** Extract a tarball into targetDir after rejecting absolute paths, `..` traversal, and escaping symlinks. */
-export async function safeExtractTarGz(tarballPath: string, targetDir: string): Promise<void> {
+/** Extract a pinned tarball into a fresh empty staging dir with bsdtar's secure defaults (never -P), then verify the extracted tree. */
+export async function safeExtractTarGz(
+  tarballPath: string,
+  targetDir: string,
+  execFn: (cmd: string, args: string[], opts?: { timeoutMs?: number; failureMessage?: string }) => Promise<unknown> = run,
+): Promise<void> {
   mkdirSync(targetDir, { recursive: true });
-  await inspectTarSafety(tarballPath, targetDir);
-  await run('/usr/bin/tar', ['-xzf', tarballPath, '-C', targetDir, '--no-same-owner'], {
+  await execFn('/usr/bin/tar', tarExtractArgv(tarballPath, targetDir), {
     timeoutMs: 120_000,
     failureMessage: 'Could not extract downloaded archive',
   });
-  verifyExtractedSymlinks(targetDir);
+  verifyExtractedTree(targetDir);
 }
 
 /** Compute total file size recursively (ignoring broken symlinks). */
@@ -198,6 +207,73 @@ function dirSizeBytes(root: string): number {
   };
   try { walk(root); } catch { /* ignore */ }
   return total;
+}
+
+/**
+ * Make a Python venv built inside `stagePayloadDir` valid at `finalDir` before atomic rename:
+ * - convert absolute symlinks inside `venv/bin/*` that point within `stagePayloadDir` to relative symlinks;
+ * - rewrite staging paths to `finalDir` in `venv/pyvenv.cfg` and `#!` script headers in `venv/bin/*`.
+ */
+function relocateVenvForFinalDir(stagePayloadDir: string, finalDir: string): void {
+  const stageReal = realpathSync(stagePayloadDir);
+  const finalReal = join(realpathSync(dirname(finalDir)), relative(dirname(finalDir), finalDir));
+  const venvDir = join(stagePayloadDir, 'venv');
+  const venvBin = join(venvDir, 'bin');
+
+  const rewritePathRefs = (text: string): string => text
+    .replaceAll(stageReal, finalReal)
+    .replaceAll(stagePayloadDir, finalDir);
+
+  const cfgPath = join(venvDir, 'pyvenv.cfg');
+  if (existsSync(cfgPath)) {
+    writeFileSync(cfgPath, rewritePathRefs(readFileSync(cfgPath, 'utf8')), 'utf8');
+  }
+
+  if (existsSync(venvBin)) {
+    const venvBinReal = realpathSync(venvBin);
+    for (const name of readdirSync(venvBin)) {
+      const full = join(venvBin, name);
+      let st;
+      try { st = lstatSync(full); } catch { continue; }
+      if (st.isSymbolicLink()) {
+        const rawTarget = readlinkSync(full);
+        if (!isAbsolute(rawTarget)) continue;
+        let resolvedTarget = rawTarget;
+        try { resolvedTarget = realpathSync(full); } catch { /* fall back to rawTarget */ }
+        if (resolvedTarget === stageReal || resolvedTarget.startsWith(stageReal + sep)) {
+          unlinkSync(full);
+          symlinkSync(relative(venvBinReal, resolvedTarget), full);
+        } else if (rawTarget === stagePayloadDir || rawTarget.startsWith(stagePayloadDir + sep)) {
+          unlinkSync(full);
+          symlinkSync(relative(venvBin, rawTarget), full);
+        }
+        continue;
+      }
+      if (!st.isFile() || st.size > 1024 * 1024) continue;
+      if (/^activate(\.|$)/i.test(name)) {
+        const text = readFileSync(full, 'utf8');
+        if (text.includes(stagePayloadDir) || text.includes(stageReal)) {
+          writeFileSync(full, rewritePathRefs(text), 'utf8');
+        }
+        continue;
+      }
+      const buf = readFileSync(full);
+      if (buf.length < 2 || buf[0] !== 0x23 || buf[1] !== 0x21) continue; // not '#!'
+      // Rewrite up to the first 4 lines to cover both `#!<python>` and pip's `#!/bin/sh\n'''exec' '<python>'` wrapper.
+      let headerEnd = buf.length;
+      let newlines = 0;
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i] === 0x0a) {
+          newlines++;
+          if (newlines >= 4) { headerEnd = i; break; }
+        }
+      }
+      const header = buf.subarray(0, headerEnd).toString('utf8');
+      if (!header.includes(stagePayloadDir) && !header.includes(stageReal)) continue;
+      const updated = rewritePathRefs(header);
+      writeFileSync(full, Buffer.concat([Buffer.from(updated, 'utf8'), buf.subarray(headerEnd)]));
+    }
+  }
 }
 
 /** Python AST-based self-check: verifies pymobiledevice3 version and imports every pymobiledevice3* module used by the sidecars. */
@@ -239,7 +315,6 @@ export class ComponentManager {
   }
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
-  private pidAlive(pid: number): boolean { return (this.opts.pidAlive ?? defaultPidAlive)(pid); }
   private platformKey(): string { return this.opts.platformKey ?? currentPlatformKey(); }
 
   private rootDir(): string {
@@ -312,13 +387,24 @@ export class ComponentManager {
     }
   }
 
+  private readLastUsedMs(keyDir: string, marker: Partial<ReadyMarker & { lastUsedAt?: string }>): number {
+    const luFile = join(keyDir, LAST_USED_FILE);
+    try {
+      if (existsSync(luFile)) {
+        const ts = Date.parse(readFileSync(luFile, 'utf8').trim());
+        if (Number.isFinite(ts)) return ts;
+      }
+    } catch { /* fall back to marker */ }
+    return Date.parse(marker.lastUsedAt ?? marker.activatedAt ?? '');
+  }
+
   private listReadyKeys(id: ComponentId): { marker: ReadyMarker; binaryPath: string }[] {
     const dir = this.componentDir(id);
     const out: { marker: ReadyMarker; binaryPath: string }[] = [];
     let names: string[];
     try { names = readdirSync(dir); } catch { return out; }
     for (const name of names) {
-      if (name.startsWith('.')) continue;
+      if (name.startsWith('.') || name.startsWith(STAGE_PREFIX)) continue;
       const entry = this.readReady(id, name);
       if (entry) out.push(entry);
     }
@@ -351,23 +437,26 @@ export class ComponentManager {
     return undefined;
   }
 
-  /** Touch `lastUsedAt` on the active managed key (at daemon startup and daily). */
+  /** Touch `.last-used` on the active managed key (separate file written atomically via tmp+rename). */
   touchUsed(id: ComponentId): void {
     const resolved = this.resolveManaged(id);
     if (!resolved || resolved.source !== 'managed' || !resolved.key) return;
-    const entry = this.readReady(id, resolved.key);
-    if (!entry) return;
-    const updated: ReadyMarker = { ...entry.marker, lastUsedAt: new Date(this.now()).toISOString() };
+    const keyDir = join(this.componentDir(id), resolved.key);
+    if (!existsSync(join(keyDir, READY_FILE))) return;
     try {
-      atomicWriteJson(join(this.componentDir(id), resolved.key, READY_FILE), updated);
+      atomicWriteText(join(keyDir, LAST_USED_FILE), new Date(this.now()).toISOString() + '\n');
     } catch { /* best effort */ }
   }
 
-  /** Prune sibling keys that are NOT this daemon's pin, NOT referenced by an env override, and haven't been used in 30 days. */
-  prune(id?: ComponentId): { removedKeys: string[]; removedStaging: string[] } {
+  /**
+   * Prune sibling keys that are NOT this daemon's pin, NOT referenced by an env override, and haven't been used in 30 days.
+   * Also garbage-collects abandoned `stage-*` dirs older than 24 h and any leftover `.trash-*` dirs.
+   */
+  prune(id?: ComponentId): { removedKeys: string[]; removedStaging: string[]; removedTrash: string[] } {
     const ids = id ? [id] : [...COMPONENT_IDS];
     const removedKeys: string[] = [];
     const removedStaging: string[] = [];
+    const removedTrash: string[] = [];
     const now = this.now();
 
     for (const cid of ids) {
@@ -390,42 +479,53 @@ export class ComponentManager {
       let names: string[];
       try { names = readdirSync(dir); } catch { continue; }
       for (const name of names) {
+        const entryPath = join(dir, name);
+        // Clean up leftover .trash-* directories.
+        if (name.startsWith(TRASH_PREFIX)) {
+          try {
+            rmSync(entryPath, { recursive: true, force: true });
+            removedTrash.push(`${cid}/${name}`);
+          } catch { /* ignore */ }
+          continue;
+        }
+        // Clean up abandoned stage-* directories older than 24 h.
+        if (name.startsWith(STAGE_PREFIX)) {
+          try {
+            const st = statSync(entryPath);
+            if (now - st.mtimeMs > STAGING_ORPHAN_MS) {
+              rmSync(entryPath, { recursive: true, force: true });
+              removedStaging.push(`${cid}/${name}`);
+            }
+          } catch { /* ignore */ }
+          continue;
+        }
         if (name.startsWith('.')) continue;
         if (pinned && name === pinned) continue; // never prune this daemon's pin
-        const keyDir = join(dir, name);
-        if (isProtectedByOverride(keyDir)) continue; // never prune a key an active override points into
-        const markerFile = join(keyDir, READY_FILE);
-        if (!existsSync(markerFile)) continue; // don't touch in-progress or foreign dirs without a marker
+        if (isProtectedByOverride(entryPath)) continue; // never prune a key an active override points into
+        const markerFile = join(entryPath, READY_FILE);
+        if (!existsSync(markerFile)) continue;
         try {
-          const marker = JSON.parse(readFileSync(markerFile, 'utf8')) as Partial<ReadyMarker>;
-          const lastUsed = Date.parse(marker.lastUsedAt ?? marker.activatedAt ?? '');
+          const marker = JSON.parse(readFileSync(markerFile, 'utf8')) as Partial<ReadyMarker & { lastUsedAt?: string }>;
+          const lastUsed = this.readLastUsedMs(entryPath, marker);
           if (Number.isFinite(lastUsed) && now - lastUsed > PRUNE_UNUSED_MS) {
-            rmSync(keyDir, { recursive: true, force: true });
+            // Rename to .trash-<random> first, then remove; a losing concurrent pruner gets ENOENT and ignores it.
+            const trashDir = join(dir, `${TRASH_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
+            try {
+              renameSync(entryPath, trashDir);
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+              throw err;
+            }
+            rmSync(trashDir, { recursive: true, force: true });
             removedKeys.push(`${cid}/${name}`);
           }
-        } catch { /* ignore unreadable marker */ }
-      }
-
-      // Clean up abandoned .staging entries only when no lock is held.
-      const lockDir = join(dir, LOCK_DIR_NAME);
-      const stagingRoot = join(dir, STAGING_DIR_NAME);
-      if (!existsSync(lockDir) && existsSync(stagingRoot)) {
-        try {
-          for (const entry of readdirSync(stagingRoot)) {
-            const p = join(stagingRoot, entry);
-            const st = statSync(p);
-            if (now - st.mtimeMs > STAGING_ORPHAN_MS) {
-              rmSync(p, { recursive: true, force: true });
-              removedStaging.push(`${cid}/${entry}`);
-            }
-          }
-        } catch { /* ignore */ }
+        } catch { /* ignore unreadable marker or race */ }
       }
     }
-    return { removedKeys, removedStaging };
+    return { removedKeys, removedStaging, removedTrash };
   }
 
-  /** Start lifecycle hooks: touch active keys, prune stale unused keys, and repeat daily. */
+  /** Start lifecycle hooks: touch active keys, prune stale unused keys & GC abandoned staging/trash, and repeat daily. */
   startLifecycle(): void {
     for (const id of COMPONENT_IDS) this.touchUsed(id);
     this.prune();
@@ -646,50 +746,16 @@ export class ComponentManager {
 
     setProgress('queued', 0, 0, artifact.size, `Preparing ${spec.displayName} ${spec.version}…`, true);
 
-    let releaseLock: (() => void) | undefined;
-    let assertLockOwned: (() => void) | undefined;
-    let stagingDir: string | undefined;
-    let incompleteFinalDir: string | undefined;
+    let stageDir: string | undefined;
 
     try {
-      const acquired = await this.acquireLock(id, key, () => Boolean(this.readReady(id, key)));
-      if (acquired === 'already-ready') {
-        this.touchUsed(id);
-        rt.installing = false;
-        rt.progress = undefined;
-        rt.jobId = undefined;
-        rt.cachedExternal = undefined;
-        rt.consecutiveFailures = 0;
-        rt.nextRetryAt = undefined;
-        rt.promise = undefined;
-        const bin = this.readReady(id, key)!.binaryPath;
-        this.opts.onActivated?.(id, bin);
-        return this.emitStatus(id, true)!;
-      }
-      releaseLock = acquired.release;
-      assertLockOwned = acquired.assertOwned;
+      const compDir = this.componentDir(id);
+      const finalDir = join(compDir, key);
+      stageDir = join(compDir, `${STAGE_PREFIX}${process.pid}-${randomBytes(6).toString('hex')}`);
+      mkdirSync(stageDir, { recursive: true });
 
-      // Re-check inside the lock in case another process activated it just before we entered.
-      if (this.readReady(id, key)) {
-        this.touchUsed(id);
-        rt.installing = false;
-        rt.progress = undefined;
-        rt.jobId = undefined;
-        rt.cachedExternal = undefined;
-        rt.consecutiveFailures = 0;
-        rt.nextRetryAt = undefined;
-        rt.promise = undefined;
-        const bin = this.readReady(id, key)!.binaryPath;
-        this.opts.onActivated?.(id, bin);
-        return this.emitStatus(id, true)!;
-      }
-
-      const stagingRoot = join(this.componentDir(id), STAGING_DIR_NAME);
-      mkdirSync(stagingRoot, { recursive: true });
-      stagingDir = join(stagingRoot, `${key}-${process.pid}-${randomBytes(4).toString('hex')}`);
-      mkdirSync(stagingDir, { recursive: true });
-
-      const archivePath = join(stagingDir, artifact.filename || 'archive.tar.gz');
+      const archivePath = join(stageDir, artifact.filename || 'archive.tar.gz');
+      const payloadDir = join(stageDir, 'payload');
       const dlWeight = spec.kind === 'python-venv' ? 40 : 70;
 
       // 1. Download (streamed, size-capped, host-allowlisted) + incremental sha256
@@ -698,8 +764,6 @@ export class ComponentManager {
         const frac = total > 0 ? Math.min(1, done / total) : 0;
         setProgress('downloading', 1 + frac * (dlWeight - 1), done, total);
       });
-
-      assertLockOwned();
 
       // 2. Verify sha256
       setProgress('verifying', dlWeight, artifact.size, artifact.size, 'Verifying checksum…', true);
@@ -713,58 +777,53 @@ export class ComponentManager {
         );
       }
 
-      // 3. Extract safely inside staging
+      // 3. Extract inside staging using bsdtar secure defaults (never -P) + hardened post-extraction walk
       setProgress('extracting', dlWeight + 5, artifact.size, artifact.size, 'Extracting archive…', true);
-      const payloadDir = join(stagingDir, 'payload');
       await safeExtractTarGz(archivePath, payloadDir);
       rmSync(archivePath, { force: true });
 
-      assertLockOwned();
-
-      const finalDir = join(this.componentDir(id), key);
+      // 4. Component-specific build & self-check inside staging
       let binaryRelPath: string;
-
       if (spec.kind === 'python-venv') {
-        // Python venvs embed absolute paths into symlinks, pyvenv.cfg and script shebangs.
-        // Move the verified extracted runtime to finalDir (still invisible until .ready.json is written atomically),
-        // then build and self-check the venv at its permanent path. Any failure deletes finalDir in finally.
-        if (existsSync(finalDir) && !existsSync(join(finalDir, READY_FILE))) {
-          rmSync(finalDir, { recursive: true, force: true });
-        }
-        renameSync(payloadDir, finalDir);
-        incompleteFinalDir = finalDir;
-        binaryRelPath = await this.buildAndVerifyPythonVenv(spec, finalDir, (phase, pct, detail) => {
+        binaryRelPath = await this.buildAndVerifyPythonVenv(spec, payloadDir, (phase, pct, detail) => {
           setProgress(phase, pct, artifact.size, artifact.size, detail, true);
         });
+        // Rewrite venv paths from staging to finalDir so the single atomic rename activates a working venv.
+        relocateVenvForFinalDir(payloadDir, finalDir);
       } else {
-        // Binary archives are relocatable: self-check inside staging, then atomically rename into place.
         binaryRelPath = await this.verifyBinaryArchive(spec, payloadDir, (phase, pct, detail) => {
           setProgress(phase, pct, artifact.size, artifact.size, detail, true);
         });
-        assertLockOwned();
-        if (existsSync(finalDir) && !existsSync(join(finalDir, READY_FILE))) {
-          rmSync(finalDir, { recursive: true, force: true });
-        }
-        if (!existsSync(finalDir)) {
-          renameSync(payloadDir, finalDir);
-          incompleteFinalDir = finalDir;
-        }
       }
 
-      assertLockOwned();
-
-      // 5. Atomic activation: write .ready.json via tmp+rename LAST so readers never see a half-built key.
+      // 5. Write .ready.json and .last-used INSIDE staging BEFORE the single atomic rename.
       const nowIso = new Date(this.now()).toISOString();
       const marker: ReadyMarker = {
         key,
         version: spec.version,
         activatedAt: nowIso,
-        lastUsedAt: nowIso,
-        sizeBytes: dirSizeBytes(finalDir),
+        sizeBytes: dirSizeBytes(payloadDir),
         binaryRelPath,
       };
-      atomicWriteJson(join(finalDir, READY_FILE), marker);
-      incompleteFinalDir = undefined;
+      writeFileSync(join(payloadDir, READY_FILE), JSON.stringify(marker, null, 2) + '\n', 'utf8');
+      writeFileSync(join(payloadDir, LAST_USED_FILE), nowIso + '\n', 'utf8');
+
+      // 6. Atomic activation: rename(payloadDir, finalDir). If another process won the race, adopt theirs.
+      try {
+        renameSync(payloadDir, finalDir);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if ((code === 'ENOTEMPTY' || code === 'EEXIST') && this.readReady(id, key)) {
+          this.touchUsed(id);
+        } else {
+          throw err;
+        }
+      }
+
+      const ready = this.readReady(id, key);
+      if (!ready) {
+        throw new PhoneDockError(`Activated ${spec.displayName} is not executable`, 'install_failed', 500);
+      }
 
       rt.installing = false;
       rt.progress = undefined;
@@ -775,8 +834,7 @@ export class ComponentManager {
       rt.nextRetryAt = undefined;
       rt.promise = undefined;
 
-      const activatedBin = resolve(finalDir, binaryRelPath);
-      this.opts.onActivated?.(id, activatedBin);
+      this.opts.onActivated?.(id, ready.binaryPath);
       return this.emitStatus(id, true)!;
     } catch (err) {
       const pe = err instanceof PhoneDockError ? err : new PhoneDockError(
@@ -799,13 +857,9 @@ export class ComponentManager {
       this.emitStatus(id, true);
       throw pe;
     } finally {
-      if (incompleteFinalDir) {
-        try { rmSync(incompleteFinalDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      if (stageDir) {
+        try { rmSync(stageDir, { recursive: true, force: true }); } catch { /* best effort */ }
       }
-      if (stagingDir) {
-        try { rmSync(stagingDir, { recursive: true, force: true }); } catch { /* best effort */ }
-      }
-      releaseLock?.();
     }
   }
 
@@ -984,7 +1038,7 @@ export class ComponentManager {
       failureMessage: `Could not install ${spec.displayName} packages`,
     });
 
-    // Self-check (Amendment 5): AST-walk sidecars to collect every pymobiledevice3* module and import each with python -I.
+    // Self-check: AST-walk sidecars to collect every pymobiledevice3* module and import each with python -I.
     onStep('checking', 92, 'Verifying iPhone helpers…');
     const sidecarPaths = (spec.verify.sidecars ?? []).map((name) => join(toolsDir, name));
     for (const sc of sidecarPaths) {
@@ -1013,7 +1067,6 @@ export class ComponentManager {
     } else if (isExecutable(join(payloadDir, 'bin', binName))) {
       relPath = join('bin', binName);
     } else {
-      // Single top-level wrapper folder inside archive
       for (const entry of readdirSync(payloadDir)) {
         const cand = join(payloadDir, entry, binName);
         if (isExecutable(cand)) { relPath = join(entry, binName); break; }
@@ -1042,199 +1095,6 @@ export class ComponentManager {
       );
     }
     return relPath;
-  }
-
-  /** Cross-process lock using atomic mkdir with token-guarded owner.json and dead-PID stale recovery. */
-  private async acquireLock(
-    id: ComponentId,
-    key: string,
-    isTargetReady: () => boolean,
-  ): Promise<'already-ready' | { release: () => void; assertOwned: () => void }> {
-    const dir = this.componentDir(id);
-    const lockDir = join(dir, LOCK_DIR_NAME);
-    const ownerFile = join(lockDir, LOCK_OWNER_FILE);
-    const missingGraceMs = this.opts.lockMissingGraceMs ?? DEFAULT_LOCK_MISSING_GRACE_MS;
-    const heartbeatMs = this.opts.lockHeartbeatMs ?? DEFAULT_LOCK_HEARTBEAT_MS;
-    const pollMs = this.opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
-    const waitTimeoutMs = this.opts.lockWaitTimeoutMs ?? 10 * 60_000;
-    const deadline = this.now() + waitTimeoutMs;
-
-    const readOwnerToken = (): string | undefined => {
-      try {
-        const parsed = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
-        return typeof parsed?.token === 'string' && parsed.token.length > 0 ? parsed.token : undefined;
-      } catch {
-        return undefined;
-      }
-    };
-
-    while (true) {
-      if (isTargetReady()) return 'already-ready';
-      try {
-        mkdirSync(lockDir);
-        const nowIso = new Date(this.now()).toISOString();
-        const token = randomBytes(12).toString('hex');
-        const owner: LockOwner = { pid: process.pid, token, startedAt: nowIso, heartbeatAt: nowIso, key };
-        atomicWriteJson(ownerFile, owner);
-        let lostLock = false;
-        const ownsLock = (): boolean => !lostLock && readOwnerToken() === token;
-        const timer = setInterval(() => {
-          if (!ownsLock()) {
-            lostLock = true;
-            clearInterval(timer);
-            return;
-          }
-          try {
-            atomicWriteJson(ownerFile, { ...owner, heartbeatAt: new Date(this.now()).toISOString() });
-          } catch { /* ignore */ }
-        }, heartbeatMs);
-        timer.unref();
-        let released = false;
-        return {
-          assertOwned: () => {
-            if (!ownsLock()) {
-              lostLock = true;
-              clearInterval(timer);
-              throw new PhoneDockError(
-                `${this.spec(id).displayName} install lock was lost to another process`,
-                'lock_lost',
-                409,
-              );
-            }
-          },
-          release: () => {
-            if (released) return;
-            released = true;
-            clearInterval(timer);
-            // Only remove .lock if owner.json still carries our token; never delete another owner's lock.
-            if (readOwnerToken() === token) {
-              try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* ignore */ }
-            }
-          },
-        };
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      }
-
-      // Lock exists: inspect owner.json safely without spinning on malformed metadata.
-      // Never steal from a live PID based on heartbeat age alone.
-      type StaleReason =
-        | { kind: 'dead-token'; deadToken: string }
-        | { kind: 'malformed'; mtimeKey: string };
-      let stale: StaleReason | undefined;
-      let vanished = false;
-
-      const inspectExistingLock = (): { stale?: StaleReason; vanished: boolean } => {
-        if (existsSync(ownerFile)) {
-          let parsed: Partial<LockOwner> | undefined;
-          try {
-            parsed = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { vanished: true };
-            parsed = undefined;
-          }
-          if (parsed && typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) && parsed.pid > 0) {
-            if (!this.pidAlive(parsed.pid)) {
-              const safeTok = typeof parsed.token === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(parsed.token)
-                ? parsed.token
-                : `pid-${parsed.pid}`;
-              return { stale: { kind: 'dead-token', deadToken: safeTok }, vanished: false };
-            }
-            return { vanished: false };
-          }
-          // Malformed or incomplete owner.json: stale only after missingGraceMs (5s).
-          try {
-            const st = statSync(ownerFile);
-            if (this.now() - st.mtimeMs > missingGraceMs) {
-              return { stale: { kind: 'malformed', mtimeKey: `malformed-${Math.floor(st.mtimeMs)}` }, vanished: false };
-            }
-          } catch (err) {
-            if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { vanished: true };
-          }
-          return { vanished: false };
-        }
-        try {
-          const st = statSync(lockDir);
-          if (this.now() - st.mtimeMs > missingGraceMs) {
-            return { stale: { kind: 'malformed', mtimeKey: `missing-${Math.floor(st.mtimeMs)}` }, vanished: false };
-          }
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { vanished: true };
-        }
-        return { vanished: false };
-      };
-
-      const inspected = inspectExistingLock();
-      stale = inspected.stale;
-      vanished = inspected.vanished;
-
-      if (vanished) {
-        await sleep(Math.min(pollMs, 10));
-        continue;
-      }
-
-      if (stale) {
-        // Gate stale reclamation per dead owner's token via an atomic reclaim marker so two reclaimers
-        // can never race to remove a new live owner's lock (ABA protection).
-        const reclaimKey = stale.kind === 'dead-token' ? stale.deadToken : stale.mtimeKey;
-        if (this.opts.onBeforeReclaim) await this.opts.onBeforeReclaim(reclaimKey);
-        const markerDir = join(dir, `${LOCK_DIR_NAME}.reclaim-${reclaimKey}`);
-        const markerOwner = join(markerDir, LOCK_OWNER_FILE);
-        let acquiredMarker = false;
-        try {
-          mkdirSync(markerDir);
-          atomicWriteJson(markerOwner, { pid: process.pid, startedAt: new Date(this.now()).toISOString() });
-          acquiredMarker = true;
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-            // Reclaim marker already held by another process; clean up only if that reclaimer's PID is dead.
-            try {
-              if (existsSync(markerOwner)) {
-                const mo = JSON.parse(readFileSync(markerOwner, 'utf8')) as { pid?: number };
-                if (typeof mo.pid === 'number' && !this.pidAlive(mo.pid)) {
-                  rmSync(markerDir, { recursive: true, force: true });
-                }
-              } else {
-                const mst = statSync(markerDir);
-                if (this.now() - mst.mtimeMs > missingGraceMs) {
-                  rmSync(markerDir, { recursive: true, force: true });
-                }
-              }
-            } catch { /* ignore race */ }
-          }
-        }
-
-        if (acquiredMarker) {
-          try {
-            // Re-verify .lock STILL holds the exact same dead token (or still malformed) while holding the marker.
-            const recheck = inspectExistingLock();
-            const stillSameDead =
-              recheck.stale !== undefined &&
-              ((stale.kind === 'dead-token' && recheck.stale.kind === 'dead-token' && recheck.stale.deadToken === stale.deadToken) ||
-                (stale.kind === 'malformed' && recheck.stale.kind === 'malformed'));
-            if (stillSameDead) {
-              const trash = join(dir, `.lock.stale-${process.pid}-${randomBytes(4).toString('hex')}`);
-              try {
-                renameSync(lockDir, trash);
-                rmSync(trash, { recursive: true, force: true });
-              } catch { /* vanished concurrently */ }
-            }
-          } finally {
-            try { rmSync(markerDir, { recursive: true, force: true }); } catch { /* ignore */ }
-          }
-          continue;
-        }
-      }
-
-      if (this.now() >= deadline) {
-        throw new PhoneDockError(
-          `Timed out waiting for another ${this.spec(id).displayName} install to finish`,
-          'lock_timeout',
-          504,
-        );
-      }
-      await sleep(pollMs);
-    }
   }
 }
 

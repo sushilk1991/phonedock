@@ -10,7 +10,8 @@
 //     --allow-recent-pkg ansilogs,apple-symbols,ipsw-parser,pycrashreport
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -170,6 +171,59 @@ async function verifyLockAges(lockText, cutoffIso, exceptionsByPkg) {
   return pkgs.length;
 }
 
+/**
+ * Pin-time archive listing check: downloads the archive, verifies its sha256, and refuses any pin
+ * containing absolute paths, `..` segments, or anything other than regular files, directories, and symlinks.
+ */
+async function verifyPinnedArchiveListing(label, url, expectedSha256) {
+  const work = mkdtempSync(join(tmpdir(), 'pd-pin-check-'));
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'PhoneDock-update-components/1.0' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status} downloading ${url}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    const actualSha = sha256(buf);
+    if (expectedSha256 && actualSha !== expectedSha256.toLowerCase()) {
+      throw new Error(`${label} sha256 mismatch: expected ${expectedSha256}, got ${actualSha}`);
+    }
+    const tarPath = join(work, 'archive.tar.gz');
+    writeFileSync(tarPath, buf);
+
+    const namesOut = execFileSync('/usr/bin/tar', ['-tzf', tarPath], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    const names = namesOut.split(/\r?\n/).filter((l) => l.length > 0);
+    if (!names.length) throw new Error(`${label}: archive is empty`);
+    for (const entry of names) {
+      if (entry.startsWith('/') || entry.startsWith('\\') || entry.split(/[\\/]+/).includes('..')) {
+        throw new Error(`${label}: rejected unsafe path in archive: ${entry}`);
+      }
+    }
+
+    const verbOut = execFileSync('/usr/bin/tar', ['-tvzf', tarPath], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    let files = 0;
+    let dirs = 0;
+    let symlinks = 0;
+    for (const line of verbOut.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const mode = line[0];
+      if (mode === '-') files++;
+      else if (mode === 'd') dirs++;
+      else if (mode === 'l') {
+        symlinks++;
+        const arrow = line.indexOf(' -> ');
+        const target = arrow >= 0 ? line.slice(arrow + 4) : '';
+        if (!target || target.startsWith('/') || target.startsWith('\\') || target.split(/[\\/]+/).includes('..')) {
+          throw new Error(`${label}: rejected unsafe symlink in archive: ${line}`);
+        }
+      } else {
+        throw new Error(`${label}: rejected disallowed entry type "${mode}" in archive: ${line}`);
+      }
+    }
+    console.log(`  archive listing ok (${label}): ${files} files, ${dirs} dirs, ${symlinks} symlinks (sha256=${actualSha.slice(0, 12)})`);
+    return { sha256: actualSha, size: buf.length, files, dirs, symlinks };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 async function resolveAxe(version, cutoffIso, allowRecent) {
   const tag = version.startsWith('v') ? version : `v${version}`;
   const cleanVer = tag.replace(/^v/, '');
@@ -181,9 +235,10 @@ async function resolveAxe(version, cutoffIso, allowRecent) {
   if (!asset) throw new Error(`Asset ${assetName} not found in cameroncooke/AXe@${tag}`);
   let digest = typeof asset.digest === 'string' ? asset.digest.replace(/^sha256:/, '') : '';
   if (!/^[0-9a-f]{64}$/i.test(digest)) {
-    const res = await fetch(asset.browser_download_url, { headers: { 'User-Agent': 'PhoneDock-update-components/1.0' } });
-    if (!res.ok) throw new Error(`Failed to download ${asset.browser_download_url}: HTTP ${res.status}`);
-    digest = sha256(Buffer.from(await res.arrayBuffer()));
+    const verified = await verifyPinnedArchiveListing(assetName, asset.browser_download_url, '');
+    digest = verified.sha256;
+  } else {
+    await verifyPinnedArchiveListing(assetName, asset.browser_download_url, digest);
   }
   return {
     id: 'axe',
@@ -234,6 +289,7 @@ async function resolvePythonArtifact(pythonRelease, pythonVersion, cutoffIso, al
     digest = asset.digest.replace(/^sha256:/, '').toLowerCase();
   }
   if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error(`Could not determine sha256 for ${filename}`);
+  await verifyPinnedArchiveListing(filename, asset.browser_download_url, digest);
   return {
     publishedAt,
     artifact: {
@@ -341,6 +397,11 @@ async function runCheck(opts) {
   if (!opts.offline) {
     const count = await verifyLockAges(lockText, cutoff, excMap);
     console.log(`check ok: ${count} locked packages verified against cutoff ${cutoff} (${excMap.size} recorded exception(s))`);
+    for (const comp of [ios, axe]) {
+      for (const art of comp.artifacts ?? []) {
+        await verifyPinnedArchiveListing(art.filename, art.url, art.sha256);
+      }
+    }
   } else {
     const count = parseLockedPackages(lockText).length;
     console.log(`check ok (offline): ${count} locked packages, lock sha256 matches`);

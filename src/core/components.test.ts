@@ -1,5 +1,6 @@
-// Unit tests for managed components: manifest/lock validation, checksum & tar traversal rejection,
-// atomic activation, pruning, cross-process locking + stale recovery, lookup order, and auto-trigger dedupe/backoff.
+// Unit tests for managed components: manifest/lock validation, bsdtar argv & post-extraction tree walk,
+// lock-free atomic activation & concurrent races, failure cleanup at every step, .last-used & pruning/GC,
+// python-venv pre-rename relocation, lookup order, and auto-trigger dedupe/backoff.
 // Uses local HTTP fixture servers and fake tarballs only (never hits the network).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,14 +8,15 @@ import { createServer, type Server } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync,
+  chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
+  readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ComponentManager, isolatedPythonEnv, safeExtractTarGz, setComponentManager, getComponentManager, verifyExtractedSymlinks,
+  ComponentManager, getComponentManager, isolatedPythonEnv, safeExtractTarGz, setComponentManager,
+  tarExtractArgv, verifyExtractedTree,
 } from './components.ts';
-import { inspectTarGzHeaders } from './tar-inspect.ts';
 import {
   assertAllowedUrl, componentKey, loadManifest, sha256Hex, validateLockContent, validateManifest,
   type ComponentManifest,
@@ -170,41 +172,67 @@ test('isolatedPythonEnv drops inherited PIP_* and PYTHON* vars and enforces isol
   assert.equal(env.LANG, 'en_US.UTF-8');
 });
 
-test('sha256 mismatch is rejected and leaves nothing behind', async () => {
-  const work = makeTempDir('pd-comp-sha-');
+test('safeExtractTarGz invokes /usr/bin/tar with secure defaults and never passes -P', async () => {
+  const work = makeTempDir('pd-comp-tar-argv-');
   try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    const tampered = Buffer.from(tar.buf);
-    tampered[tampered.length - 1] ^= 0xff;
-
-    await withServer((_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tampered.length) });
-      res.end(tampered);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-      const mgr = new ComponentManager({ rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, externalLookup: () => undefined, envOverride: () => undefined });
-      await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'checksum_mismatch');
-      const st = mgr.status('axe');
-      assert.equal(st.state, 'failed');
-      assert.equal(st.error?.code, 'checksum_mismatch');
-      // Nothing activated and staging cleaned up
-      const entries = readdirSync(join(rootDir, 'axe'));
-      assert.ok(!entries.some((n) => !n.startsWith('.')));
-      const staging = join(rootDir, 'axe', '.staging');
-      assert.equal(existsSync(staging) ? readdirSync(staging).length : 0, 0);
+    const dest = join(work, 'dest');
+    const calls: { cmd: string; args: string[] }[] = [];
+    await safeExtractTarGz('/tmp/archive.tar.gz', dest, async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
     });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].cmd, '/usr/bin/tar');
+    assert.deepEqual(calls[0].args, ['-xzf', '/tmp/archive.tar.gz', '-C', dest, '--no-same-owner']);
+    assert.deepEqual(tarExtractArgv('/tmp/archive.tar.gz', dest), ['-xzf', '/tmp/archive.tar.gz', '-C', dest, '--no-same-owner']);
+    for (const arg of calls[0].args) {
+      assert.ok(arg !== '-P' && arg !== '--absolute-names', `must never pass ${arg} to tar`);
+      assert.ok(!/^-[^-]*P/.test(arg), `must never combine -P into ${arg}`);
+    }
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
 });
 
-test('tar traversal, absolute paths, and escaping symlinks are rejected', async () => {
-  const work = makeTempDir('pd-comp-tar-');
+test('post-extraction walk rejects FIFOs, escaping symlinks, symlink chains, dangling symlinks, and nlink > 1 files while allowing valid frameworks', async () => {
+  const work = makeTempDir('pd-comp-walk-');
   try {
-    // Build a malicious tar.gz with `../evil.txt` via python tarfile (no shell strings)
-    const makeTar = (kind: string, outPath: string) => {
+    // 1. FIFO rejected
+    const fifoDir = join(work, 'fifo-dir');
+    mkdirSync(fifoDir, { recursive: true });
+    execFileSync('/usr/bin/mkfifo', [join(fifoDir, 'pipe')]);
+    assert.throws(() => verifyExtractedTree(fifoDir), (e: any) => e.code === 'unsafe_archive');
+
+    // 2. Direct escaping symlink rejected
+    const escDir = join(work, 'esc-dir');
+    mkdirSync(escDir, { recursive: true });
+    writeFileSync(join(work, 'outside.txt'), 'secret');
+    symlinkSync('../outside.txt', join(escDir, 'leak'));
+    assert.throws(() => verifyExtractedTree(escDir), (e: any) => e.code === 'unsafe_archive');
+
+    // 3. Escaping symlink chain rejected
+    const chainDir = join(work, 'chain-dir');
+    mkdirSync(chainDir, { recursive: true });
+    symlinkSync('.', join(chainDir, 'a'));
+    symlinkSync('a/..', join(chainDir, 'b'));
+    symlinkSync('b/outside.txt', join(chainDir, 'axe'));
+    assert.throws(() => verifyExtractedTree(chainDir), (e: any) => e.code === 'unsafe_archive');
+
+    // 4. Dangling/unresolvable symlink rejected
+    const danglingDir = join(work, 'dangling-dir');
+    mkdirSync(danglingDir, { recursive: true });
+    symlinkSync('does-not-exist', join(danglingDir, 'broken'));
+    assert.throws(() => verifyExtractedTree(danglingDir), (e: any) => e.code === 'unsafe_archive');
+
+    // 5. Hardlinked regular file (nlink > 1) rejected
+    const hardlinkDir = join(work, 'hardlink-dir');
+    mkdirSync(hardlinkDir, { recursive: true });
+    writeFileSync(join(hardlinkDir, 'orig.txt'), 'hello');
+    linkSync(join(hardlinkDir, 'orig.txt'), join(hardlinkDir, 'copy.txt'));
+    assert.throws(() => verifyExtractedTree(hardlinkDir), (e: any) => e.code === 'unsafe_archive');
+
+    // 6. Real tarballs with traversal, FIFO, escaping symlink, or hardlink are rejected by safeExtractTarGz
+    const buildTar = (kind: string, outPath: string) => {
       execFileSync('python3', ['-c', `
 import io, tarfile, sys
 kind, out = sys.argv[1], sys.argv[2]
@@ -214,32 +242,240 @@ with tarfile.open(out, 'w:gz') as tf:
         data = b'pwn'
         ti.size = len(data)
         tf.addfile(ti, io.BytesIO(data))
-    elif kind == 'absolute':
-        ti = tarfile.TarInfo('/tmp/pd-abs-evil.txt')
-        data = b'pwn'
-        ti.size = len(data)
-        tf.addfile(ti, io.BytesIO(data))
+    elif kind == 'fifo':
+        ti = tarfile.TarInfo('pipe')
+        ti.type = tarfile.FIFOTYPE
+        tf.addfile(ti)
     elif kind == 'symlink':
         ti = tarfile.TarInfo('badlink')
         ti.type = tarfile.SYMTYPE
         ti.linkname = '../../../etc/passwd'
         tf.addfile(ti)
+    elif kind == 'hardlink':
+        f = tarfile.TarInfo('orig.txt')
+        data = b'hello'
+        f.size = len(data)
+        f.mode = 0o644
+        tf.addfile(f, io.BytesIO(data))
+        h = tarfile.TarInfo('copy.txt')
+        h.type = tarfile.LNKTYPE
+        h.linkname = 'orig.txt'
+        tf.addfile(h)
+    elif kind == 'valid-framework':
+        for d in ['Frameworks', 'Frameworks/Foo.framework', 'Frameworks/Foo.framework/Versions', 'Frameworks/Foo.framework/Versions/A']:
+            ti = tarfile.TarInfo(d)
+            ti.type = tarfile.DIRTYPE
+            ti.mode = 0o755
+            tf.addfile(ti)
+        f = tarfile.TarInfo('Frameworks/Foo.framework/Versions/A/Foo')
+        data = b'ok'
+        f.size = len(data)
+        f.mode = 0o644
+        tf.addfile(f, io.BytesIO(data))
+        l1 = tarfile.TarInfo('Frameworks/Foo.framework/Versions/Current')
+        l1.type = tarfile.SYMTYPE
+        l1.linkname = 'A'
+        tf.addfile(l1)
+        l2 = tarfile.TarInfo('Frameworks/Foo.framework/Foo')
+        l2.type = tarfile.SYMTYPE
+        l2.linkname = 'Versions/Current/Foo'
+        tf.addfile(l2)
 `, kind, outPath]);
     };
 
-    for (const kind of ['traversal', 'absolute', 'symlink']) {
-      const tarPath = join(work, `${kind}.tar.gz`);
-      const dest = join(work, `extract-${kind}`);
-      makeTar(kind, tarPath);
-      await assert.rejects(() => safeExtractTarGz(tarPath, dest), (e: any) => e.code === 'unsafe_archive');
-    }
+    const travTar = join(work, 'traversal.tar.gz');
+    buildTar('traversal', travTar);
+    await assert.rejects(() => safeExtractTarGz(travTar, join(work, 'out-traversal')));
     assert.equal(existsSync(join(work, 'escape.txt')), false);
+
+    for (const bad of ['fifo', 'symlink', 'hardlink']) {
+      const p = join(work, `${bad}.tar.gz`);
+      buildTar(bad, p);
+      await assert.rejects(() => safeExtractTarGz(p, join(work, `out-${bad}`)), (e: any) => e.code === 'unsafe_archive', `expected ${bad} to be rejected`);
+    }
+
+    // 7. Valid relative framework symlinks (same layout as AXe) pass
+    const okTar = join(work, 'valid-framework.tar.gz');
+    buildTar('valid-framework', okTar);
+    await safeExtractTarGz(okTar, join(work, 'out-ok'));
+    assert.equal(readFileSync(join(work, 'out-ok', 'Frameworks/Foo.framework/Foo'), 'utf8'), 'ok');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
 });
 
-test('atomic activation, pin bump coexistence, and 30-day pruning rules', async () => {
+test('two ComponentManager instances racing concurrently on the same key: one wins, the other adopts, zero staging left', async () => {
+  const work = makeTempDir('pd-comp-race-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    let downloads = 0;
+    let releaseBoth!: () => void;
+    const bothArrived = new Promise<void>((r) => {
+      let seen = 0;
+      releaseBoth = () => { if (++seen >= 2) r(); };
+    });
+
+    await withServer(async (_req, res) => {
+      downloads++;
+      releaseBoth();
+      await bothArrived;
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
+
+      const mgr1 = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      const mgr2 = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+
+      // Both managers start simultaneously on the same key and proceed through download, extract, self-check, and rename.
+      const [st1, st2] = await Promise.all([mgr1.install('axe'), mgr2.install('axe')]);
+      assert.equal(st1.state, 'ready');
+      assert.equal(st2.state, 'ready');
+      assert.equal(st1.installedVersion, '1.8.0');
+      assert.equal(st2.installedVersion, '1.8.0');
+      assert.equal(downloads, 2, 'both concurrent processes downloaded independently before atomic rename race');
+
+      // Activated key has both .ready.json and .last-used, and zero stage-* dirs remain.
+      const axeDir = join(rootDir, 'axe');
+      const entries = readdirSync(axeDir);
+      assert.deepEqual(entries, [key]);
+      assert.ok(existsSync(join(axeDir, key, '.ready.json')));
+      assert.ok(existsSync(join(axeDir, key, '.last-used')));
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('failure at every install step never creates a key dir without .ready.json and leaves no staging behind', async () => {
+  const work = makeTempDir('pd-comp-failures-');
+  let uncaught: unknown;
+  const onUncaught = (err: unknown) => { uncaught = err; };
+  process.on('uncaughtException', onUncaught);
+  try {
+    const goodTar = makeFakeAxeTarGz(work, '1.8.0');
+    const badVerTar = makeFakeAxeTarGz(work, '9.9.9');
+    const tamperedBuf = Buffer.from(goodTar.buf);
+    tamperedBuf[tamperedBuf.length - 1] ^= 0xff;
+
+    // Build a tarball containing a FIFO (valid sha256, fails post-extraction walk)
+    const fifoTarPath = join(work, 'fifo-payload.tar.gz');
+    execFileSync('python3', ['-c', `
+import tarfile, sys
+with tarfile.open(sys.argv[1], 'w:gz') as tf:
+    ti = tarfile.TarInfo('pipe')
+    ti.type = tarfile.FIFOTYPE
+    tf.addfile(ti)
+`, fifoTarPath]);
+    const fifoBuf = readFileSync(fifoTarPath);
+    const fifoSha = sha256Hex(fifoBuf);
+
+    let mode: 'http500' | 'tampered' | 'fifo' | 'badver' | 'enospc' = 'http500';
+    await withServer((_req, res) => {
+      if (mode === 'http500') {
+        res.writeHead(500);
+        res.end('server error');
+        return;
+      }
+      if (mode === 'enospc') {
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(goodTar.buf.length) });
+        setTimeout(() => res.end(goodTar.buf), 80);
+        return;
+      }
+      const buf = mode === 'tampered' ? tamperedBuf : mode === 'fifo' ? fifoBuf : badVerTar.buf;
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(buf.length) });
+      res.end(buf);
+    }, async (base) => {
+      const assertClean = (rootDir: string) => {
+        const axeDir = join(rootDir, 'axe');
+        if (!existsSync(axeDir)) return;
+        const entries = readdirSync(axeDir);
+        assert.deepEqual(entries, [], `expected empty axe dir after failure, found ${entries.join(', ')}`);
+      };
+
+      // Step 1a: Download HTTP 500
+      {
+        mode = 'http500';
+        const toolsDir = join(work, 't-http500');
+        const rootDir = join(work, 'c-http500');
+        writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: goodTar.sha256, size: goodTar.buf.length, version: '1.8.0' });
+        const mgr = new ComponentManager({ rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, externalLookup: () => undefined, envOverride: () => undefined });
+        await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'download_failed');
+        assertClean(rootDir);
+      }
+
+      // Step 1b: Async download write stream ENOSPC
+      {
+        mode = 'enospc';
+        const toolsDir = join(work, 't-enospc');
+        const rootDir = join(work, 'c-enospc');
+        writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: goodTar.sha256, size: goodTar.buf.length, version: '1.8.0' });
+        const fakeStreamFactory = (() => {
+          const em = new EventEmitter() as any;
+          em.write = () => true;
+          em.end = () => {};
+          em.destroy = () => {};
+          setTimeout(() => em.emit('error', Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })), 15);
+          return em;
+        }) as any;
+        const mgr = new ComponentManager({
+          rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+          createWriteStream: fakeStreamFactory, externalLookup: () => undefined, envOverride: () => undefined,
+        });
+        await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'download_write_failed');
+        assert.equal(uncaught, undefined);
+        assertClean(rootDir);
+      }
+
+      // Step 2: Checksum mismatch
+      {
+        mode = 'tampered';
+        const toolsDir = join(work, 't-sha');
+        const rootDir = join(work, 'c-sha');
+        writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: goodTar.sha256, size: goodTar.buf.length, version: '1.8.0' });
+        const mgr = new ComponentManager({ rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, externalLookup: () => undefined, envOverride: () => undefined });
+        await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'checksum_mismatch');
+        assertClean(rootDir);
+      }
+
+      // Step 3: Post-extraction tree walk rejection (FIFO)
+      {
+        mode = 'fifo';
+        const toolsDir = join(work, 't-fifo');
+        const rootDir = join(work, 'c-fifo');
+        writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: fifoSha, size: fifoBuf.length, version: '1.8.0' });
+        const mgr = new ComponentManager({ rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, externalLookup: () => undefined, envOverride: () => undefined });
+        await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'unsafe_archive');
+        assertClean(rootDir);
+      }
+
+      // Step 4: Self-check failure (wrong version output)
+      {
+        mode = 'badver';
+        const toolsDir = join(work, 't-badver');
+        const rootDir = join(work, 'c-badver');
+        writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: badVerTar.sha256, size: badVerTar.buf.length, version: '1.8.0' });
+        const mgr = new ComponentManager({ rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true, externalLookup: () => undefined, envOverride: () => undefined });
+        await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'self_check_failed');
+        assertClean(rootDir);
+      }
+    });
+  } finally {
+    process.off('uncaughtException', onUncaught);
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('atomic activation, .last-used file, pin bump coexistence, 30-day pruning, and startup GC of stage-* (>24h) and .trash-*', async () => {
   const work = makeTempDir('pd-comp-act-');
   try {
     const tar1 = makeFakeAxeTarGz(work, '1.8.0');
@@ -265,7 +501,14 @@ test('atomic activation, pin bump coexistence, and 30-day pruning rules', async 
       assert.equal(st1.state, 'ready');
       assert.equal(st1.installedVersion, '1.8.0');
       assert.equal(st1.updateAvailable, false);
-      assert.ok(existsSync(join(rootDir, 'axe', key1, '.ready.json')));
+      const readyBefore = readFileSync(join(rootDir, 'axe', key1, '.ready.json'), 'utf8');
+      assert.ok(existsSync(join(rootDir, 'axe', key1, '.last-used')));
+
+      // touchUsed updates .last-used without rewriting .ready.json
+      nowMs += 120_000;
+      mgr.touchUsed('axe');
+      assert.equal(readFileSync(join(rootDir, 'axe', key1, '.ready.json'), 'utf8'), readyBefore);
+      assert.equal(readFileSync(join(rootDir, 'axe', key1, '.last-used'), 'utf8').trim(), new Date(nowMs).toISOString());
 
       // Bump pin to 1.9.0: old 1.8.0 stays usable via fallback until 1.9.0 activates
       const m2 = writeTestTools(toolsDir, { url: `${base}/axe-1.9.0.tar.gz`, sha256: tar2.sha256, size: tar2.buf.length, version: '1.9.0' });
@@ -286,84 +529,35 @@ test('atomic activation, pin bump coexistence, and 30-day pruning rules', async 
       assert.ok(existsSync(join(rootDir, 'axe', key1, '.ready.json')));
       assert.ok(existsSync(join(rootDir, 'axe', key2, '.ready.json')));
 
-      // 10 days later: key1 must NOT be pruned (another daemon version may still use it)
-      nowMs += 10 * 86_400_000;
-      assert.deepEqual(mgr.prune('axe').removedKeys, []);
+      // Seed abandoned stage-* (>24h), fresh stage-* (<24h), and leftover .trash-*
+      const oldStage = join(rootDir, 'axe', 'stage-old-dead');
+      const freshStage = join(rootDir, 'axe', 'stage-fresh-live');
+      const leftoverTrash = join(rootDir, 'axe', '.trash-dead');
+      mkdirSync(oldStage, { recursive: true });
+      mkdirSync(freshStage, { recursive: true });
+      mkdirSync(leftoverTrash, { recursive: true });
+      const twoDaysAgo = new Date(nowMs - 48 * 3_600_000);
+      const oneHourAgo = new Date(nowMs - 3_600_000);
+      utimesSync(oldStage, twoDaysAgo, twoDaysAgo);
+      utimesSync(freshStage, oneHourAgo, oneHourAgo);
+
+      // 10 days later: key1 must NOT be pruned; old stage & trash ARE removed; fresh stage is checked against nowMs
+      const gc1 = mgr.prune('axe');
+      assert.deepEqual(gc1.removedKeys, []);
+      assert.deepEqual(gc1.removedStaging, ['axe/stage-old-dead']);
+      assert.deepEqual(gc1.removedTrash, ['axe/.trash-dead']);
+      assert.equal(existsSync(oldStage), false);
+      assert.equal(existsSync(leftoverTrash), false);
+      assert.equal(existsSync(freshStage), true);
       assert.ok(existsSync(join(rootDir, 'axe', key1)));
 
-      // 25 more days later (35 days since key1 lastUsed): key1 IS pruned, pinned key2 is NEVER pruned even if untouched
-      nowMs += 25 * 86_400_000;
+      // 35 days later: key1 IS pruned via .trash-* rename+remove, pinned key2 is NEVER pruned
+      nowMs += 35 * 86_400_000;
       const pruned = mgr.prune('axe');
       assert.deepEqual(pruned.removedKeys, [`axe/${key1}`]);
       assert.equal(existsSync(join(rootDir, 'axe', key1)), false);
       assert.equal(existsSync(join(rootDir, 'axe', key2)), true);
-    });
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('cross-process lock contention and stale-lock recovery (dead PID and stale heartbeat)', async () => {
-  const work = makeTempDir('pd-comp-lock-');
-  try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    let downloads = 0;
-    let nowMs = Date.parse('2026-11-24T00:00:00Z');
-
-    await withServer((_req, res) => {
-      downloads++;
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      res.end(tar.buf);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
-
-      // 1. Stale lock from a dead PID is reclaimed automatically
-      const lockDir = join(rootDir, 'axe', '.lock');
-      mkdirSync(lockDir, { recursive: true });
-      writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
-        pid: 999_999, token: 'dead-tok', startedAt: new Date(nowMs).toISOString(), heartbeatAt: new Date(nowMs).toISOString(), key,
-      }));
-      const mgr1 = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        now: () => nowMs, pidAlive: (pid) => pid === process.pid,
-        lockPollMs: 20, externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      const st = await mgr1.install('axe');
-      assert.equal(st.state, 'ready');
-      assert.equal(downloads, 1);
-      assert.equal(existsSync(lockDir), false);
-
-      // 2. Contention: live lock held by another manager; once it activates target key, waiter exits without re-downloading
-      rmSync(join(rootDir, 'axe', key), { recursive: true, force: true });
-      mkdirSync(lockDir, { recursive: true });
-      writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
-        pid: 424242, token: 'live-tok', startedAt: new Date(nowMs).toISOString(), heartbeatAt: new Date(nowMs).toISOString(), key,
-      }));
-      const mgr2 = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        now: () => nowMs, pidAlive: () => true,
-        lockPollMs: 20, lockStaleMs: 60_000, externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      const waiter = mgr2.install('axe');
-      // Simulate the lock holder finishing activation after 60 ms
-      setTimeout(() => {
-        const finalDir = join(rootDir, 'axe', key);
-        mkdirSync(finalDir, { recursive: true });
-        const fakeBin = join(finalDir, 'axe');
-        writeFileSync(fakeBin, '#!/bin/sh\necho 1.8.0\n');
-        chmodSync(fakeBin, 0o755);
-        writeFileSync(join(finalDir, '.ready.json'), JSON.stringify({
-          key, version: '1.8.0', activatedAt: new Date(nowMs).toISOString(), lastUsedAt: new Date(nowMs).toISOString(),
-          sizeBytes: 10, binaryRelPath: 'axe',
-        }));
-        rmSync(lockDir, { recursive: true, force: true });
-      }, 60);
-      const st2 = await waiter;
-      assert.equal(st2.state, 'ready');
-      assert.equal(downloads, 1); // waiter did NOT re-download!
+      assert.ok(!readdirSync(join(rootDir, 'axe')).some((n) => n.startsWith('.trash-')));
     });
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -390,8 +584,9 @@ test('lookup order: env override -> pinned key -> newest other ready managed key
       const dir = join(rootDir, 'axe', key);
       const bin = mkBin(join(dir, 'axe'));
       writeFileSync(join(dir, '.ready.json'), JSON.stringify({
-        key, version: ver, activatedAt, lastUsedAt: activatedAt, sizeBytes: 10, binaryRelPath: 'axe',
+        key, version: ver, activatedAt, sizeBytes: 10, binaryRelPath: 'axe',
       }));
+      writeFileSync(join(dir, '.last-used'), activatedAt + '\n');
       return bin;
     };
 
@@ -426,13 +621,11 @@ test('lookup order: env override -> pinned key -> newest other ready managed key
     setComponentManager(mgr);
     invalidatePymd3PythonCache();
     assert.equal(pymd3Python(), undefined);
-    // Activate a fake python3.12-like script in managed ios-tools key
     const iosKey = componentKey(m.components['ios-tools'], m.components['ios-tools'].artifacts[0]);
     const iosDir = join(rootDir, 'ios-tools', iosKey);
     const pyBin = mkBin(join(iosDir, 'venv', 'bin', 'python'));
     writeFileSync(join(iosDir, '.ready.json'), JSON.stringify({
-      key: iosKey, version: '11.63.1', activatedAt: '2026-11-24T00:00:00Z', lastUsedAt: '2026-11-24T00:00:00Z',
-      sizeBytes: 10, binaryRelPath: 'venv/bin/python',
+      key: iosKey, version: '11.63.1', activatedAt: '2026-11-24T00:00:00Z', sizeBytes: 10, binaryRelPath: 'venv/bin/python',
     }));
     invalidatePymd3PythonCache();
     assert.equal(pymd3Python(), pyBin);
@@ -484,11 +677,9 @@ test('auto-trigger respects PHONEDOCK_COMPONENTS_AUTO=0, deduplicates concurrent
         externalLookup: () => undefined, envOverride: () => undefined,
       });
       assert.equal(mgr.triggerAuto('axe'), true);
-      // Wait for failure to settle
       await new Promise((r) => setTimeout(r, 80));
       assert.equal(hits, 1);
       assert.equal(mgr.status('axe').state, 'failed');
-      // Still inside backoff window -> auto trigger refused
       assert.equal(mgr.triggerAuto('axe'), false);
       assert.equal(hits, 1);
 
@@ -496,7 +687,7 @@ test('auto-trigger respects PHONEDOCK_COMPONENTS_AUTO=0, deduplicates concurrent
       nowMs += 11_000;
       shouldFail = false;
       assert.equal(mgr.triggerAuto('axe'), true);
-      assert.equal(mgr.triggerAuto('axe'), false); // deduped while installing
+      assert.equal(mgr.triggerAuto('axe'), false);
       const p1 = mgr.install('axe');
       const p2 = mgr.install('axe');
       assert.strictEqual(p1, p2);
@@ -509,294 +700,117 @@ test('auto-trigger respects PHONEDOCK_COMPONENTS_AUTO=0, deduplicates concurrent
   }
 });
 
-test('python-venv install activates working non-broken venv symlinks and cleans up on self-check failure', async () => {
+test('python-venv stages, relocates symlinks/pyvenv.cfg/shebangs before atomic rename, and cleans up on self-check failure', async () => {
   const work = makeTempDir('pd-comp-venv-');
   try {
-    // Fake python runtime tarball whose python3 creates a real symlink in venv/bin/python -> <base>/python/bin/python3
-    // mimicking CPython's venv absolute symlink behavior.
-    const src = join(work, 'py-src');
-    const pyBinDir = join(src, 'python', 'bin');
-    mkdirSync(pyBinDir, { recursive: true });
-    const fakePy = join(pyBinDir, 'python3');
-    writeFileSync(fakePy, [
-      '#!/bin/sh',
-      'SELF="$0"',
-      'if [ "$1" = "-I" ] && [ "$2" = "-m" ] && [ "$3" = "venv" ]; then',
-      '  VDIR="$4"',
-      '  mkdir -p "$VDIR/bin"',
-      '  ln -s "$SELF" "$VDIR/bin/python"',
-      '  exit 0',
-      'fi',
-      'if [ "$1" = "-I" ] && [ "$2" = "-m" ] && [ "$3" = "pip" ]; then',
-      '  exit 0',
-      'fi',
-      'if [ "$1" = "-I" ] && [ "$2" = "-c" ]; then',
-      '  if [ "${FAIL_CHECK:-0}" = "1" ]; then exit 1; fi',
-      '  echo "ok:11.63.1:1"',
-      '  exit 0',
-      'fi',
-      'echo "fake-python"',
-      '',
-    ].join('\n'), 'utf8');
-    chmodSync(fakePy, 0o755);
-    const tarPath = join(work, 'py.tar.gz');
-    execFileSync('/usr/bin/tar', ['-czf', tarPath, '-C', src, '.']);
-    const buf = readFileSync(tarPath);
+    const makeFakePythonTar = (failSelfCheck: boolean) => {
+      const src = join(work, `py-src-${failSelfCheck ? 'fail' : 'ok'}`);
+      const pyBinDir = join(src, 'python', 'bin');
+      mkdirSync(pyBinDir, { recursive: true });
+      const fakePy = join(pyBinDir, 'python3');
+      writeFileSync(fakePy, [
+        '#!/bin/sh',
+        'SELF="$0"',
+        'if [ "$1" = "-I" ] && [ "$2" = "-m" ] && [ "$3" = "venv" ]; then',
+        '  VDIR="$4"',
+        '  mkdir -p "$VDIR/bin"',
+        '  ln -s "$SELF" "$VDIR/bin/python3"',
+        '  ln -s "python3" "$VDIR/bin/python"',
+        '  printf "home = %s\\nexecutable = %s\\n" "$(dirname "$SELF")" "$SELF" > "$VDIR/pyvenv.cfg"',
+        `  printf '#!/bin/sh\\n'"'''exec' '%s/bin/python' \"\\$0\" \"\\$@\"\\n' '''\\nprint(1)\\n" "$VDIR" > "$VDIR/bin/pymd3-cli"`,
+        '  chmod +x "$VDIR/bin/pymd3-cli"',
+        '  exit 0',
+        'fi',
+        'if [ "$1" = "-I" ] && [ "$2" = "-m" ] && [ "$3" = "pip" ]; then',
+        '  exit 0',
+        'fi',
+        'if [ "$1" = "-I" ] && [ "$2" = "-c" ]; then',
+        failSelfCheck ? '  exit 1' : '  echo "ok:11.63.1:1"; exit 0',
+        'fi',
+        'echo "fake-python"',
+        '',
+      ].join('\n'), 'utf8');
+      chmodSync(fakePy, 0o755);
+      const tarPath = join(work, `py-${failSelfCheck ? 'fail' : 'ok'}.tar.gz`);
+      execFileSync('/usr/bin/tar', ['-czf', tarPath, '-C', src, '.']);
+      const buf = readFileSync(tarPath);
+      return { buf, sha256: sha256Hex(buf) };
+    };
 
-    await withServer((_req, res) => {
+    const okPy = makeFakePythonTar(false);
+    const failPy = makeFakePythonTar(true);
+
+    await withServer((req, res) => {
+      const buf = req.url?.includes('fail') ? failPy.buf : okPy.buf;
       res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(buf.length) });
       res.end(buf);
     }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
-      m.components['ios-tools'].artifacts[0].url = `${base}/py.tar.gz`;
-      m.components['ios-tools'].artifacts[0].sha256 = sha256Hex(buf);
-      m.components['ios-tools'].artifacts[0].size = buf.length;
-      writeFileSync(join(toolsDir, 'components.json'), JSON.stringify(m, null, 2));
+      // 1. Failing self-check never activates a key dir and leaves zero staging dirs
+      {
+        const toolsDir = join(work, 'tools-fail');
+        const rootDir = join(work, 'comp-fail');
+        const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
+        m.components['ios-tools'].artifacts[0].url = `${base}/py-fail.tar.gz`;
+        m.components['ios-tools'].artifacts[0].sha256 = failPy.sha256;
+        m.components['ios-tools'].artifacts[0].size = failPy.buf.length;
+        writeFileSync(join(toolsDir, 'components.json'), JSON.stringify(m, null, 2));
+        const mgr = new ComponentManager({
+          rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+          externalLookup: () => undefined, envOverride: () => undefined,
+        });
+        await assert.rejects(() => mgr.install('ios-tools'));
+        assert.deepEqual(readdirSync(join(rootDir, 'ios-tools')), []);
+      }
 
-      const mgr = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
+      // 2. Successful install activates atomically with relative python3 symlink & rewritten pyvenv.cfg/shebangs
+      {
+        const toolsDir = join(work, 'tools-ok');
+        const rootDir = join(work, 'comp-ok');
+        const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
+        m.components['ios-tools'].artifacts[0].url = `${base}/py-ok.tar.gz`;
+        m.components['ios-tools'].artifacts[0].sha256 = okPy.sha256;
+        m.components['ios-tools'].artifacts[0].size = okPy.buf.length;
+        writeFileSync(join(toolsDir, 'components.json'), JSON.stringify(m, null, 2));
+        const key = componentKey(m.components['ios-tools'], m.components['ios-tools'].artifacts[0]);
 
-      const st = await mgr.install('ios-tools');
-      assert.equal(st.state, 'ready');
-      const resolved = mgr.resolveManaged('ios-tools');
-      assert.ok(resolved);
-      // Symlink must resolve cleanly after staging is deleted!
-      const out = execFileSync(resolved.path, [], { encoding: 'utf8' }).trim();
-      assert.equal(out, 'fake-python');
+        const mgr = new ComponentManager({
+          rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+          externalLookup: () => undefined, envOverride: () => undefined,
+        });
+        const st = await mgr.install('ios-tools');
+        assert.equal(st.state, 'ready');
+        assert.deepEqual(readdirSync(join(rootDir, 'ios-tools')), [key]);
+
+        const finalDir = join(rootDir, 'ios-tools', key);
+        const py3Link = join(finalDir, 'venv', 'bin', 'python3');
+        assert.ok(lstatSync(py3Link).isSymbolicLink());
+        assert.equal(readlinkSync(py3Link), '../../python/bin/python3');
+
+        const pyvenvCfg = readFileSync(join(finalDir, 'venv', 'pyvenv.cfg'), 'utf8');
+        assert.ok(!pyvenvCfg.includes('stage-'), `pyvenv.cfg must not reference staging: ${pyvenvCfg}`);
+        assert.ok(pyvenvCfg.includes(key));
+
+        const cliScript = readFileSync(join(finalDir, 'venv', 'bin', 'pymd3-cli'), 'utf8');
+        assert.ok(!cliScript.includes('stage-'), `shebang wrapper must not reference staging: ${cliScript}`);
+        assert.ok(cliScript.includes(key));
+
+        const resolved = mgr.resolveManaged('ios-tools');
+        assert.ok(resolved);
+        const out = execFileSync(resolved.path, [], { encoding: 'utf8' }).trim();
+        assert.equal(out, 'fake-python');
+      }
     });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
 });
 
-test('P1 #1: live PID lock is never stolen on old heartbeat, and token mismatch aborts without clobbering new owner', async () => {
-  const work = makeTempDir('pd-comp-p1-lock-');
-  try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    let releaseDownload!: () => void;
-    const downloadGate = new Promise<void>((r) => { releaseDownload = r; });
-
-    await withServer(async (_req, res) => {
-      await downloadGate;
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      res.end(tar.buf);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
-      const lockDir = join(rootDir, 'axe', '.lock');
-      const ownerFile = join(lockDir, 'owner.json');
-
-      // Part A: Live PID with 2-hour-old heartbeat MUST NOT be stolen
-      mkdirSync(lockDir, { recursive: true });
-      const ancient = new Date(Date.now() - 2 * 3_600_000).toISOString();
-      const origOwner = { pid: 55555, token: 'live-owner-tok', startedAt: ancient, heartbeatAt: ancient, key };
-      writeFileSync(ownerFile, JSON.stringify(origOwner));
-      const waiterMgr = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        pidAlive: () => true, lockPollMs: 15, lockWaitTimeoutMs: 70,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      await assert.rejects(() => waiterMgr.install('axe'), (e: any) => e.code === 'lock_timeout');
-      assert.deepEqual(JSON.parse(readFileSync(ownerFile, 'utf8')).token, 'live-owner-tok');
-      rmSync(lockDir, { recursive: true, force: true });
-
-      // Part B: If lock token changes mid-install, original owner aborts cleanly and does not overwrite or delete new lock
-      const ownerMgr = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        lockHeartbeatMs: 25, externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      const installP = ownerMgr.install('axe');
-      // Wait for ownerMgr to acquire .lock
-      for (let i = 0; i < 40 && !existsSync(ownerFile); i++) await new Promise((r) => setTimeout(r, 10));
-      assert.ok(existsSync(ownerFile));
-      const replacement = { pid: 77777, token: 'new-owner-tok', startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), key };
-      writeFileSync(ownerFile, JSON.stringify(replacement));
-      // Let a heartbeat cycle fire and verify it did NOT overwrite replacement token
-      await new Promise((r) => setTimeout(r, 60));
-      assert.equal(JSON.parse(readFileSync(ownerFile, 'utf8')).token, 'new-owner-tok');
-      releaseDownload();
-      await assert.rejects(() => installP, (e: any) => e.code === 'lock_lost');
-      // New owner's lock MUST still exist untouched, staging cleaned up, target NOT activated
-      assert.ok(existsSync(ownerFile));
-      assert.equal(JSON.parse(readFileSync(ownerFile, 'utf8')).token, 'new-owner-tok');
-      assert.equal(existsSync(join(rootDir, 'axe', key)), false);
-      const staging = join(rootDir, 'axe', '.staging');
-      assert.equal(existsSync(staging) ? readdirSync(staging).length : 0, 0);
-    });
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('P1 #2: malformed lock metadata yields without spinning and reclaims after missing-grace timeout', async () => {
-  const work = makeTempDir('pd-comp-p1-malformed-');
-  try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    await withServer((_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      res.end(tar.buf);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-      const lockDir = join(rootDir, 'axe', '.lock');
-      const ownerFile = join(lockDir, 'owner.json');
-      mkdirSync(lockDir, { recursive: true });
-      writeFileSync(ownerFile, '{'); // malformed JSON
-
-      // Fresh malformed owner.json must yield and honor lockWaitTimeoutMs cleanly (no synchronous spin)
-      let timerFired = false;
-      const t = setTimeout(() => { timerFired = true; }, 20);
-      const mgrFresh = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        lockPollMs: 15, lockWaitTimeoutMs: 70, lockMissingGraceMs: 5_000,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      await assert.rejects(() => mgrFresh.install('axe'), (e: any) => e.code === 'lock_timeout');
-      clearTimeout(t);
-      assert.equal(timerFired, true, 'event loop was not blocked while waiting on malformed owner.json');
-
-      // Backdate owner.json mtime past 5s grace -> reclaimed and install succeeds
-      const past = new Date(Date.now() - 10_000);
-      utimesSync(ownerFile, past, past);
-      const mgrStale = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        lockPollMs: 15, lockMissingGraceMs: 5_000,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      const st = await mgrStale.install('axe');
-      assert.equal(st.state, 'ready');
-    });
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('P1 #3: async download write stream error rejects cleanly without uncaughtException and cleans staging', async () => {
-  const work = makeTempDir('pd-comp-p1-enos-');
-  let uncaught: unknown;
-  const onUncaught = (err: unknown) => { uncaught = err; };
-  process.on('uncaughtException', onUncaught);
-  try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    await withServer((_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      // Delay response slightly so write stream error fires while awaiting network data
-      setTimeout(() => res.end(tar.buf), 80);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-
-      const fakeStreamFactory = (() => {
-        const em = new EventEmitter() as any;
-        em.write = () => true;
-        em.end = () => {};
-        em.destroy = () => {};
-        setTimeout(() => em.emit('error', Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })), 15);
-        return em;
-      }) as any;
-
-      const mgr = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        createWriteStream: fakeStreamFactory,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'download_write_failed');
-      assert.equal(uncaught, undefined);
-      const staging = join(rootDir, 'axe', '.staging');
-      assert.equal(existsSync(staging) ? readdirSync(staging).length : 0, 0);
-    });
-  } finally {
-    process.off('uncaughtException', onUncaught);
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('P2 #4: archive validation rejects escaping symlink chains and unsafe hardlinks while allowing valid framework symlinks', async () => {
-  const work = makeTempDir('pd-comp-p2-links-');
-  try {
-    const buildTar = (kind: string, outPath: string) => {
-      execFileSync('python3', ['-c', `
-import io, tarfile, sys
-kind, out = sys.argv[1], sys.argv[2]
-with tarfile.open(out, 'w:gz') as tf:
-    if kind == 'chain':
-        for name, target in [('a', '.'), ('b', 'a/..'), ('axe', 'b/fixture')]:
-            ti = tarfile.TarInfo(name)
-            ti.type = tarfile.SYMTYPE
-            ti.linkname = target
-            tf.addfile(ti)
-    elif kind == 'hardlink-dotdot':
-        ti = tarfile.TarInfo('axe')
-        ti.type = tarfile.LNKTYPE
-        ti.linkname = '../outside'
-        tf.addfile(ti)
-    elif kind == 'hardlink-abs':
-        ti = tarfile.TarInfo('axe')
-        ti.type = tarfile.LNKTYPE
-        ti.linkname = '/etc/passwd'
-        tf.addfile(ti)
-    elif kind == 'valid-framework':
-        for d in ['Frameworks', 'Frameworks/Foo.framework', 'Frameworks/Foo.framework/Versions', 'Frameworks/Foo.framework/Versions/A']:
-            ti = tarfile.TarInfo(d)
-            ti.type = tarfile.DIRTYPE
-            ti.mode = 0o755
-            tf.addfile(ti)
-        f = tarfile.TarInfo('Frameworks/Foo.framework/Versions/A/Foo')
-        data = b'ok'
-        f.size = len(data)
-        f.mode = 0o644
-        tf.addfile(f, io.BytesIO(data))
-        l1 = tarfile.TarInfo('Frameworks/Foo.framework/Versions/Current')
-        l1.type = tarfile.SYMTYPE
-        l1.linkname = 'A'
-        tf.addfile(l1)
-        l2 = tarfile.TarInfo('Frameworks/Foo.framework/Foo')
-        l2.type = tarfile.SYMTYPE
-        l2.linkname = 'Versions/Current/Foo'
-        tf.addfile(l2)
-`, kind, outPath]);
-    };
-
-    for (const bad of ['chain', 'hardlink-dotdot', 'hardlink-abs']) {
-      const p = join(work, `${bad}.tar.gz`);
-      buildTar(bad, p);
-      await assert.rejects(() => safeExtractTarGz(p, join(work, `out-${bad}`)), (e: any) => e.code === 'unsafe_archive');
-    }
-
-    // Also verify post-extraction realpath check catches an escaping chain directly on disk
-    const chainDir = join(work, 'direct-chain');
-    mkdirSync(chainDir, { recursive: true });
-    writeFileSync(join(work, 'fixture'), 'secret');
-    symlinkSync('.', join(chainDir, 'a'));
-    symlinkSync('a/..', join(chainDir, 'b'));
-    symlinkSync('b/fixture', join(chainDir, 'axe'));
-    assert.throws(() => verifyExtractedSymlinks(chainDir), (e: any) => e.code === 'unsafe_archive');
-
-    // Valid relative framework symlinks (same layout as AXe) must pass
-    const okTar = join(work, 'valid-framework.tar.gz');
-    buildTar('valid-framework', okTar);
-    await safeExtractTarGz(okTar, join(work, 'out-ok'));
-    assert.equal(readFileSync(join(work, 'out-ok', 'Frameworks/Foo.framework/Foo'), 'utf8'), 'ok');
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('P2 #5: progress throttling skips status/external probes on chunk updates', async () => {
-  const work = makeTempDir('pd-comp-p2-throttle-');
+test('progress throttling skips status/external probes on chunk updates', async () => {
+  const work = makeTempDir('pd-comp-throttle-');
   try {
     const tar = makeFakeAxeTarGz(work, '1.8.0', { 'pad.txt': 'x'.repeat(20_000) });
     await withServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      // Send in 40 small chunks
       const chunkSize = Math.ceil(tar.buf.length / 40);
       let off = 0;
       const sendNext = () => {
@@ -828,8 +842,8 @@ test('P2 #5: progress throttling skips status/external probes on chunk updates',
   }
 });
 
-test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid override blocks auto-install, external never claims updateAvailable', () => {
-  const work = makeTempDir('pd-comp-p2-overrides-');
+test('override protects old key from pruning, invalid override blocks auto-install, external never claims updateAvailable', () => {
+  const work = makeTempDir('pd-comp-overrides-');
   try {
     const toolsDir = join(work, 'tools');
     const rootDir = join(work, 'components');
@@ -843,13 +857,13 @@ test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid ov
     chmodSync(oldBin, 0o755);
     const oldIso = '2026-09-01T00:00:00Z';
     writeFileSync(join(oldDir, '.ready.json'), JSON.stringify({
-      key: oldKey, version: '1.7.0', activatedAt: oldIso, lastUsedAt: oldIso, sizeBytes: 10, binaryRelPath: 'axe',
+      key: oldKey, version: '1.7.0', activatedAt: oldIso, sizeBytes: 10, binaryRelPath: 'axe',
     }));
-    // Symlink pointing into the old managed key
+    writeFileSync(join(oldDir, '.last-used'), oldIso + '\n');
     const aliasLink = join(work, 'axe-override-link');
     symlinkSync(oldBin, aliasLink);
 
-    // P2 #6: prune() 60 days later MUST NOT delete oldKey when envOverride resolves into it (directly or via symlink)
+    // prune() 60 days later MUST NOT delete oldKey when envOverride resolves into it (directly or via symlink)
     const nowMs = Date.parse('2026-11-24T00:00:00Z');
     const mgrOverride = new ComponentManager({
       rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
@@ -859,7 +873,7 @@ test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid ov
     assert.deepEqual(mgrOverride.prune('axe').removedKeys, []);
     assert.ok(existsSync(oldBin));
 
-    // P2 #7: invalid override blocks auto-install and reports invalid_override
+    // invalid override blocks auto-install and reports invalid_override
     const missingOverride = join(work, 'does-not-exist', 'axe');
     const mgrInvalid = new ComponentManager({
       rootDir, toolsDir, platformKey: 'darwin-arm64', autoEnabled: () => true,
@@ -873,7 +887,7 @@ test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid ov
     assert.equal(invalidSt.updateAvailable, false);
     assert.equal(invalidSt.error?.code, 'invalid_override');
 
-    // Item #9: external copy has updateAvailable=false and clear detail text
+    // external copy has updateAvailable=false and clear detail text
     rmSync(oldDir, { recursive: true, force: true });
     const extBin = join(work, 'host-axe');
     writeFileSync(extBin, '#!/bin/sh\necho 1.8.0\n');
@@ -888,211 +902,6 @@ test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid ov
     assert.equal(extSt.source, 'external');
     assert.equal(extSt.updateAvailable, false);
     assert.match(extSt.detail ?? '', /installed on this Mac/i);
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('Round 2 #1 (P1): exact A/B/D ABA interleaving — A never steals B live lock after observing dead D', async () => {
-  const work = makeTempDir('pd-comp-r2-aba-');
-  try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    let releaseBDownload!: () => void;
-    const bDownloadGate = new Promise<void>((r) => { releaseBDownload = r; });
-
-    await withServer(async (_req, res) => {
-      await bDownloadGate;
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      res.end(tar.buf);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
-      const lockDir = join(rootDir, 'axe', '.lock');
-      const ownerFile = join(lockDir, 'owner.json');
-
-      // Dead owner D holds .lock
-      mkdirSync(lockDir, { recursive: true });
-      const nowIso = new Date().toISOString();
-      writeFileSync(ownerFile, JSON.stringify({ pid: 999_991, token: 'dead-D', startedAt: nowIso, heartbeatAt: nowIso, key }));
-
-      let aPausedAtReclaim!: () => void;
-      const aPaused = new Promise<void>((r) => { aPausedAtReclaim = r; });
-      let letAResume!: () => void;
-      const aResumeGate = new Promise<void>((r) => { letAResume = r; });
-
-      // Installer A observes dead D, then pauses right before reclaiming
-      const mgrA = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        pidAlive: (pid) => pid === process.pid,
-        lockPollMs: 15, lockWaitTimeoutMs: 150,
-        onBeforeReclaim: async (reclaimKey) => {
-          assert.equal(reclaimKey, 'dead-D');
-          aPausedAtReclaim();
-          await aResumeGate;
-        },
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-
-      // Installer B reclaims D and acquires a live lock (blocked on download gate)
-      const mgrB = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        pidAlive: (pid) => pid === process.pid,
-        lockPollMs: 15,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-
-      const aPromise = mgrA.install('axe');
-      await aPaused;
-
-      // B runs while A is paused: reclaims D and acquires .lock with its own fresh live token
-      const bPromise = mgrB.install('axe');
-      let bToken = '';
-      for (let i = 0; i < 60; i++) {
-        try {
-          const cur = JSON.parse(readFileSync(ownerFile, 'utf8'));
-          if (cur.token && cur.token !== 'dead-D') { bToken = cur.token; break; }
-        } catch { /* reclaiming */ }
-        await new Promise((r) => setTimeout(r, 10));
-      }
-      assert.ok(bToken && bToken !== 'dead-D', 'B must have reclaimed dead D and acquired a new live token');
-
-      // Resume A: A must see B's new live token, NOT remove B's .lock, and time out cleanly
-      letAResume();
-      await assert.rejects(() => aPromise, (e: any) => e.code === 'lock_timeout');
-
-      // B's live lock MUST still exist untouched with bToken!
-      assert.ok(existsSync(ownerFile), 'A must never delete B live lock');
-      assert.equal(JSON.parse(readFileSync(ownerFile, 'utf8')).token, bToken);
-
-      // Now let B finish its download and activate cleanly
-      releaseBDownload();
-      const stB = await bPromise;
-      assert.equal(stB.state, 'ready');
-    });
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('Round 2 #1 (P1): stale reclaim marker from a dead reclaimer PID is cleaned up', async () => {
-  const work = makeTempDir('pd-comp-r2-marker-');
-  try {
-    const tar = makeFakeAxeTarGz(work, '1.8.0');
-    await withServer((_req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
-      res.end(tar.buf);
-    }, async (base) => {
-      const toolsDir = join(work, 'tools');
-      const rootDir = join(work, 'components');
-      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
-      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
-      const lockDir = join(rootDir, 'axe', '.lock');
-      const deadMarker = join(rootDir, 'axe', '.lock.reclaim-dead-D2');
-      mkdirSync(lockDir, { recursive: true });
-      mkdirSync(deadMarker, { recursive: true });
-      const nowIso = new Date().toISOString();
-      writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({ pid: 999_992, token: 'dead-D2', startedAt: nowIso, heartbeatAt: nowIso, key }));
-      writeFileSync(join(deadMarker, 'owner.json'), JSON.stringify({ pid: 999_993, startedAt: nowIso }));
-
-      const mgr = new ComponentManager({
-        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
-        pidAlive: (pid) => pid === process.pid, lockPollMs: 15,
-        externalLookup: () => undefined, envOverride: () => undefined,
-      });
-      const st = await mgr.install('axe');
-      assert.equal(st.state, 'ready');
-      assert.equal(existsSync(deadMarker), false);
-    });
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
-});
-
-test('Round 2 #2 (P2): binary tar header parser catches tricky filenames with " -> " / " link to ", PAX/GNU links, bad hardlinks, and FIFOs', async () => {
-  const work = makeTempDir('pd-comp-r2-tar-');
-  try {
-    const buildTar = (kind: string, outPath: string) => {
-      execFileSync('python3', ['-c', `
-import io, tarfile, sys
-kind, out = sys.argv[1], sys.argv[2]
-fmt = tarfile.PAX_FORMAT if kind.startswith('pax-') else (tarfile.GNU_FORMAT if kind.startswith('gnu-') else tarfile.USTAR_FORMAT)
-with tarfile.open(out, 'w:gz', format=fmt) as tf:
-    if kind == 'arrow-symlink-dotdot':
-        ti = tarfile.TarInfo('foo -> safe')
-        ti.type = tarfile.SYMTYPE
-        ti.linkname = '../outside'
-        tf.addfile(ti)
-    elif kind == 'arrow-symlink-abs':
-        ti = tarfile.TarInfo('foo -> safe')
-        ti.type = tarfile.SYMTYPE
-        ti.linkname = '/etc/passwd'
-        tf.addfile(ti)
-    elif kind == 'linkto-hardlink-dotdot':
-        ti = tarfile.TarInfo('foo link to safe')
-        ti.type = tarfile.LNKTYPE
-        ti.linkname = '../outside'
-        tf.addfile(ti)
-    elif kind == 'linkto-hardlink-abs':
-        ti = tarfile.TarInfo('foo link to safe')
-        ti.type = tarfile.LNKTYPE
-        ti.linkname = '/etc/passwd'
-        tf.addfile(ti)
-    elif kind == 'hardlink-unseen':
-        ti = tarfile.TarInfo('alias')
-        ti.type = tarfile.LNKTYPE
-        ti.linkname = 'not-yet-created.txt'
-        tf.addfile(ti)
-    elif kind == 'pax-linkpath-dotdot':
-        ti = tarfile.TarInfo('a' * 120)
-        ti.type = tarfile.SYMTYPE
-        ti.linkname = '../' + 'b' * 120
-        tf.addfile(ti)
-    elif kind == 'gnu-longlink-dotdot':
-        ti = tarfile.TarInfo('a' * 120)
-        ti.type = tarfile.SYMTYPE
-        ti.linkname = '../' + 'b' * 120
-        tf.addfile(ti)
-    elif kind == 'fifo':
-        ti = tarfile.TarInfo('pipe')
-        ti.type = tarfile.FIFOTYPE
-        tf.addfile(ti)
-    elif kind == 'valid-hardlink':
-        f = tarfile.TarInfo('orig.txt')
-        data = b'hello'
-        f.size = len(data)
-        f.mode = 0o644
-        tf.addfile(f, io.BytesIO(data))
-        h = tarfile.TarInfo('copy.txt')
-        h.type = tarfile.LNKTYPE
-        h.linkname = 'orig.txt'
-        tf.addfile(h)
-`, kind, outPath]);
-    };
-
-    for (const bad of [
-      'arrow-symlink-dotdot',
-      'arrow-symlink-abs',
-      'linkto-hardlink-dotdot',
-      'linkto-hardlink-abs',
-      'hardlink-unseen',
-      'pax-linkpath-dotdot',
-      'gnu-longlink-dotdot',
-      'fifo',
-    ]) {
-      const p = join(work, `${bad}.tar.gz`);
-      buildTar(bad, p);
-      await assert.rejects(() => inspectTarGzHeaders(p, join(work, `dest-${bad}`)), (e: any) => e.code === 'unsafe_archive', `expected ${bad} to be rejected`);
-    }
-
-    // Valid hardlink targeting an earlier entry inside root passes both preflight and extraction
-    const okPath = join(work, 'valid-hardlink.tar.gz');
-    buildTar('valid-hardlink', okPath);
-    const entries = await inspectTarGzHeaders(okPath, join(work, 'dest-ok'));
-    assert.equal(entries.length, 2);
-    await safeExtractTarGz(okPath, join(work, 'dest-ok'));
-    assert.equal(readFileSync(join(work, 'dest-ok', 'copy.txt'), 'utf8'), 'hello');
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
