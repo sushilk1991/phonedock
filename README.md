@@ -1,271 +1,52 @@
 <div align="center">
 
-<img src="docs/media/readme/icon.png" width="112" height="112" alt="PhoneDock app icon: a bright phone in front of a dimmed one">
+<img src="docs/media/readme/icon.png" width="112" height="112" alt="PhoneDock app icon">
 
 # PhoneDock
 
-**Your agent, on a real phone.**
+**Let your AI agent use a real phone.**
 
-A free, open-source Mac app that lets Claude Code, Codex, Cursor and Pi use your iPhone, your Android phone,
-iOS simulators and Android emulators. You watch every step live, and the agent asks you when it needs your face or your password.
+PhoneDock is a free, open-source Mac app that connects Claude Code, Codex, Cursor and Pi to iPhones, Android phones, simulators and emulators. Watch what your agent does live and take over whenever you want.
 
-[![Latest release](https://img.shields.io/github/v/release/sushilk1991/phonedock?style=flat-square&label=release&color=6a5cf5)](https://github.com/sushilk1991/phonedock/releases/latest)
-[![macOS 15 or later on Apple silicon](https://img.shields.io/badge/macOS_15+-Apple_silicon-1f1f24?style=flat-square&logo=apple)](#requirements)
-[![Works with Claude Code, Codex, Cursor and Pi](https://img.shields.io/badge/MCP-Claude_Code_%C2%B7_Codex_%C2%B7_Cursor_%C2%B7_Pi-1f1f24?style=flat-square)](#for-agents)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-1f1f24?style=flat-square)](LICENSE)
-
-[**Download for Mac**](https://github.com/sushilk1991/phonedock/releases/latest) &nbsp;·&nbsp;
-[Website](https://sushilk1991.github.io/phonedock/) &nbsp;·&nbsp;
-[Watch the 47-second video](https://sushilk1991.github.io/phonedock/#film)
+[**Download for Mac**](https://github.com/sushilk1991/phonedock/releases/latest) · [Watch the 47-second demo](https://sushilk1991.github.io/phonedock/#film) · [Website](https://sushilk1991.github.io/phonedock/)
 
 </div>
 
-<br>
+<a href="https://sushilk1991.github.io/phonedock/#film"><img src="docs/media/readme/hero.png" alt="Claude Code runs a test on an iPhone simulator while PhoneDock shows the screen and a Take Over button"></a>
 
-<a href="https://sushilk1991.github.io/phonedock/#film"><img src="docs/media/readme/hero.png" alt="Your agent, on every phone: the PhoneDock window while Claude Code runs a saved test on an iPhone simulator, with Claude Code in control and Take Over one click away"></a>
+## Get started
 
-## See it work
+1. **Install PhoneDock.** Download the `.dmg` and drag PhoneDock into Applications.
+2. **Connect your agent.** In PhoneDock, click **Connect an Agent…**, then **Set Up** next to your agent.
+3. **Add a device.** Plug in your phone or use **Add Device** to connect wirelessly or create a simulator or emulator. Start a new agent session and try: “Use PhoneDock to open Settings on my phone and tell me what’s on screen.”
 
-Real recordings at real speed, with the waits trimmed. Nobody touches the phones.
+### What you need
 
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <img src="docs/media/readme/iphone-snackdoku.gif" width="300" alt="Screen recording on a real iPhone: Claude Code opens Snackdoku and goes through Daily Bake, the Bakery, Settings, How to Play and Recipe Road, then drags a cookie onto the board">
-    </td>
-    <td width="50%" align="center">
-      <img src="docs/media/readme/android-play-store.gif" width="300" alt="Screen recording on a real Android phone: Claude Code opens Duolingo in the Play Store, goes to its reviews and sorts them by rating">
-    </td>
-  </tr>
-  <tr>
-    <td align="center"><b>Testing an app on a real iPhone</b><br><sub>Claude Code goes through Snackdoku screen by screen, drags a cookie onto the board and writes a QA report.</sub></td>
-    <td align="center"><b>Research on a real Android phone</b><br><sub>Claude Code opens Duolingo in the Play Store and sorts its reviews by rating.</sub></td>
-  </tr>
-</table>
+| Device | Setup |
+| --- | --- |
+| iPhone on iOS 27 or later | Xcode and [one-time pairing](docs/IPHONE-WIFI.md). USB or Wi-Fi. Nothing to install on the phone. |
+| Android phone | Android SDK tools. USB debugging or wireless debugging. |
+| iOS simulator | Xcode. Use a simulator build of your app, not the App Store version. |
+| Android emulator | Android SDK and an emulator image. [Virtual phones are in beta](docs/VIRTUAL-PHONES.md). |
+| iPhone on iOS 26 or earlier | [Beta setup with WebDriverAgent](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent). |
 
-## One window for every phone
+PhoneDock requires **an Apple silicon Mac with macOS 15 or later**. The first time you use iPhone control on iOS 27 or later, or need simulator controls, PhoneDock downloads the tools automatically. Keep the Mac online for first setup. On a supported iPhone, live video starts when the tools are ready. Check progress or retry in **Settings → Advanced → Components**.
 
-<img src="docs/media/readme/window.png" alt="One window for every phone: a Pixel 8 virtual phone running in PhoneDock, with an iPhone simulator and an iPad in the sidebar and the phone's settings in the inspector">
+<img src="docs/media/readme/setup.png" alt="PhoneDock’s Components settings show iPhone Control and Simulator Control ready">
 
-- **Watch live** at up to 60 fps while an agent works, in the app or in a separate window.
-- **Real phones and virtual ones.** iPhones on iOS 27 or later connect over USB or Wi-Fi with nothing installed on
-  the phone. Android phones connect over USB or Wi-Fi. Create Android emulators and iOS simulators from real system
-  images, with snapshots and clones.
-- **Every step in the Activity list.** Each tap, swipe and screenshot, who did it and when.
-- **Take over and hand back** at any time. While you hold a device, agents wait.
-- **Inspect** the UI tree, logs (coloured by level, for one app or all), crashes and installed apps. Switch dark mode,
-  text size and contrast to check a layout.
-- **Record** the screen to an `.mp4`, or save a screenshot. What you capture in the app goes where macOS saves your
-  own screenshots. Recordings an agent starts stay in PhoneDock's data folder, and the agent is told the path.
+## What you can do
 
-## Virtual phones
+- **Test an app on a real phone.** Ask your agent to try a new flow, check what broke and capture screenshots for a bug report.
+- **Work in apps without a web version.** Have your agent inspect a screen or collect information. You can see its taps and swipes as they happen.
+- **Take over for sensitive steps.** When the agent asks you to sign in or use Face ID, take over and hand the device back when you’re done.
+- **Replay a test.** Save a flow, run it again after a change and share the result from the **Runs** tab. [Run tests in CI](docs/CI.md).
 
-<a href="https://sushilk1991.github.io/phonedock/#virtual-phones"><img src="docs/media/launch/5-virtual-phones.png" alt="Virtual phones, new in PhoneDock 0.4.0: the PhoneDock window running a Pixel 7a virtual phone, beside the New Virtual Phone form set to a Google Pixel 8"></a>
+<img src="docs/media/readme/window.png" alt="PhoneDock shows a live Android screen, an iPhone simulator and an iPad in one window">
 
-Some apps won't run on an emulator. A virtual phone is an Android emulator with Google Play that carries a real
-handset's identity: the model, build, IMEI, serial and carrier of a Pixel, Galaxy or OnePlus. Choose **＋ Add Device ›
-Virtual Phone**, pick the phone, and your agent drives it like any other. The first one on a system image takes a few
-minutes while PhoneDock patches that image once; later ones are ready in under a minute.
+<img src="docs/media/readme/runs.png" alt="The Runs tab shows a saved test’s result, device, app build and step timings">
 
-It's in **Beta**. It's Wi-Fi only, so apps usually see no SIM, and apps that check hardware-backed security (Play
-Integrity's device verdict, key attestation) can still tell it's virtual. Presenting as a real phone can break an app's
-terms. [Details and limits](docs/VIRTUAL-PHONES.md)
+## Privacy
 
-## Put your agent to work
+PhoneDock has no telemetry. It can go online to check for updates, download files you request and set up device tools automatically. You can [turn off automatic device-tool downloads](docs/IPHONE-WIFI.md#ios-27-and-later). Your agent’s model provider can see screenshots your agent sends it.
 
-<img src="docs/media/launch/3-uses.png" alt="Put your agent to work: replying to Instagram comments on an Android phone, testing Snackdoku on an iPhone, and research in Google and the Play Store on Android">
-
-- **Run your social accounts.** Reply to comments and go through the feed in the real apps.
-- **Test your apps.** Go through a build screen by screen, attach screenshots to the PR, and save the run as a test.
-- **Research in apps that have no website or API.** Read and sort reviews in the Play Store, or look things up in
-  any app on the phone.
-
-## It asks when it needs you
-
-<img src="docs/media/launch/4-handoff.png" alt="It asks when it needs you: Claude Code's request in PhoneDock, asking you to sign in, with Take Over, Can't Do It and Done">
-
-Some steps stay yours: Face ID, passwords, sign-ins, CAPTCHAs and payments. The agent stops and asks. If you're in
-another app, a notification asks you. Click **Take Over**, do the step, click **Done**, and the agent carries on from
-where it stopped. **Can't Do It** tells it why, so it can change course.
-
-## Quick start
-
-You need Xcode for iPhone simulators, or the Android SDK for Android emulators ([requirements](#requirements)).
-PhoneDock shows what's ready and what's missing, with the command that fixes it.
-
-1. **Install.** Download `PhoneDock-<version>.dmg` from the
-   [latest release](https://github.com/sushilk1991/phonedock/releases/latest) and drag PhoneDock to Applications.
-   It's signed and notarized by Apple.
-2. **Connect your agent.** Open PhoneDock, click **Connect an Agent…**, then **Set Up** next to Claude Code, Codex,
-   Cursor or Pi. Or run it in Terminal:
-
-   ```sh
-   /Applications/PhoneDock.app/Contents/Resources/bin/phonedock setup
-   ```
-
-3. **Ask your agent.** Start a new session and try:
-
-   > Use PhoneDock to create an iPhone simulator, open Settings and turn on Dark Mode.
-
-<details>
-<summary><b>What <code>phonedock setup</code> changes</b></summary>
-<br>
-
-For every client it finds, setup registers PhoneDock's MCP server (user scope, so it works in every project),
-installs the `phonedock` agent skill and links `phonedock` into a folder on your PATH (if none can take a link, it
-gives you the line for your shell profile; agents use the full path, so they work either way). Then it checks each
-step and tells you what to fix if one fails.
-
-It never replaces settings it didn't write: it reports them instead, and it backs up every file it changes.
-`--dry-run` shows the exact changes first; `--uninstall` takes them out again.
-
-</details>
-
-## Supported devices
-
-| Device | Status | Notes |
-|---|---|---|
-| iPhone on iOS 27 or later | ✅ | USB or Wi-Fi with no app on the phone: live video, input and UI tree. [Setup](docs/IPHONE-WIFI.md) |
-| Android phone | ✅ | USB, or Wi-Fi with wireless debugging |
-| iOS simulator | ✅ | Simulator-built apps only |
-| Android emulator | ✅ | Android SDK emulator, Google APIs and Play Store images |
-| Virtual phone (Android) | **Beta** | An emulator with Google Play that presents as a real Pixel, Galaxy or OnePlus: **＋ Add Device › Virtual Phone**. Wi-Fi only. [Details and limits](docs/VIRTUAL-PHONES.md) |
-| iPhone on iOS 26 or earlier | **Beta** | Needs WebDriverAgent on the phone. [Setup](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent) |
-
-Generic OS images (QEMU) and Corellium cloud devices are experimental; see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#experimental-backends).
-
-<details>
-<summary><b>Connect an Android phone over Wi-Fi</b></summary>
-<br>
-
-1. On the phone, turn on Settings › Developer options › Wireless debugging, then tap **Pair device with pairing code**
-   and keep that screen open.
-2. In PhoneDock choose **＋ Add Device › Physical Device › Android** (or File › Connect a Physical Device…). Your phone appears in the list (or run
-   `phonedock discover --android`). If it doesn't, **Use a QR code instead** shows a code to scan from the phone's
-   Pair device with QR code, and **Enter an address** takes the IP address and port the phone shows.
-3. Type the six-digit code next to the phone and click **Pair**, or run `phonedock pair 123456`.
-4. That's it: PhoneDock connects and the phone shows up in the sidebar. Next time, if the phone is already paired,
-   click **Connect** (or run `phonedock connect`).
-
-If macOS blocks it, PhoneDock says why. Either turn on PhoneDock in System Settings › Privacy & Security ›
-Local Network, or click **Restart adb and Try Again** (CLI: `--restart-adb`; it briefly disconnects other tools that
-use adb, such as Android Studio).
-
-</details>
-
-<details>
-<summary><b>Connect an iPhone</b></summary>
-<br>
-
-iPhones on iOS 27 or later need Developer Mode, pairing with your Mac and UI Automation turned on. Nothing gets
-installed on the phone, and USB or Wi-Fi both work. The steps are in [docs/IPHONE-WIFI.md](docs/IPHONE-WIFI.md).
-
-</details>
-
-## For agents
-
-| Use | How |
-|---|---|
-| **MCP** | `phonedock mcp` (stdio) or `phonedock mcp --http <port>`. `phonedock setup` registers it with Claude Code, Codex, Cursor and Pi. Manual setup for other clients, the tool list and the recommended agent loop are in [docs/AGENTS-GUIDE.md](docs/AGENTS-GUIDE.md). |
-| **Skill** | [skills/phonedock](skills/phonedock/SKILL.md) teaches an agent the fast loop (read the screen, act by text, check), when to take a screenshot, batching, handoffs and leases, plus recipes for PR evidence, crashes and App Store screenshots. `phonedock setup` installs it in `~/.claude/skills` and `~/.agents/skills`. |
-| **CLI** | `phonedock` lives inside the app at `PhoneDock.app/Contents/Resources/bin/phonedock`; `phonedock setup` links it onto your PATH when it can. |
-| **SDKs** | TypeScript ([src/sdk](src/sdk/index.ts)) and Python ([sdk/python](sdk/python/README.md)). The HTTP API is in [docs/API.md](docs/API.md). |
-
-```sh
-phonedock create --backend android-emulator --name Pixel --profile pixel_9 --boot
-phonedock ui Pixel                    # accessibility outline with refs: e12 Button "Settings" @(540,1210)
-phonedock tap Pixel --text "Settings"
-phonedock screenshot Pixel -o shot.png
-```
-
-## From exploration to regression test
-
-Ask your agent to test a flow once, save it, and run it on every PR.
-
-1. The agent does the task on a device ("open the sample app, greet Ada, turn notifications on") and then calls
-   `save_flow`, or you run `phonedock flow save <device> -o flows/greet.yaml` afterwards. PhoneDock turns what it did
-   into a readable file. Text taps become text selectors and fills stay one step. Retries, timed-out waits and undone
-   taps are left out, and checks are added for the first screen and the last:
-
-   ```yaml
-   name: Greet Ada and turn on notifications
-   appId: dev.phonedock.sample
-   platform: android
-   minOS: "16"
-   steps:
-     - launch: dev.phonedock.sample
-     - assert_visible: PhoneDock Sample
-     - fill: { field: Your name, value: Ada }
-     - tap: Greet
-     - wait_for: { visible: "Hello, Ada!" }
-     - tap: { text: Notifications, type: Switch }
-     - assert_visible: Notifications on
-   ```
-
-2. `phonedock test flows/ --device <id> --junit junit.xml` replays it: PASS/FAIL per step with timings. It waits for
-   each element and lets the screen settle between steps. Exit code 0 only if everything passed. A failure says
-   what was expected and what was on screen, and saves a screenshot, the UI tree and recent logs.
-3. Run the same command in CI on a macOS runner: [docs/CI.md](docs/CI.md). `phonedock flow export --maestro` writes a
-   Maestro version of a flow. The format, the conversion rules and the runner are in [docs/API.md](docs/API.md#flows).
-4. Every run is saved with what it ran on: the app's version and build, the flow file's hash and the git commit. Open
-   it in the inspector's **Runs** tab, or with `phonedock runs` and `phonedock runs show <id>`. **Copy PR Summary** (or
-   `phonedock runs export <id> --format md`) gives you a summary to paste into a pull request, without local paths.
-
-<img src="docs/media/readme/runs.png" alt="Every run, on the record: the Runs tab's detail of a saved flow's run in PhoneDock, marked PASS, with the app's version and build, the flow's hash, the git commit, the device, the agent that ran it, and each step's time">
-
-## Requirements
-
-- A Mac with Apple silicon (M1 or later) on macOS 15 or later.
-- **iOS simulators and iPhones:** Xcode.
-- **Android:** the Android SDK command-line tools and emulator (`brew install --cask android-commandlinetools`).
-  `scrcpy` and `ffmpeg` are optional (separate windows, recording, live streaming).
-- **Node.js:** PhoneDock.app includes its own runtime. Running from source needs Node.js 24 or later.
-
-<img src="docs/media/readme/setup.png" alt="It sets itself up: PhoneDock's Settings, Advanced, Components, with iPhone Control and Simulator Control both ready, above the output of phonedock components install ios-tools">
-
-PhoneDock installs the rest itself, the first time it's needed: [AXe](https://github.com/cameroncooke/AXe) for
-simulators (about 40 MB on disk), and for iPhones on iOS 27 or later, Python 3.12 with `pymobiledevice3` (about
-240 MB). Each comes from the tool's own release and is checked against a checksum built into PhoneDock, so there's no
-Homebrew or Python setup. When an update pins a newer version, PhoneDock installs it in the background and keeps the
-current one working until the new one passes its checks.
-
-- **Settings › Advanced › Components** and `phonedock components` show each tool's state; `phonedock backends` shows
-  what else is ready on your Mac.
-- A copy you installed yourself (`axe` on your PATH, or `uv tool install --python 3.12 pymobiledevice3`) still works
-  until PhoneDock has its own. `PHONEDOCK_AXE` and `PHONEDOCK_PYMD3_PYTHON` point PhoneDock at a copy of your choice.
-- `PHONEDOCK_COMPONENTS_AUTO=0` turns the automatic downloads off, for CI or offline Macs.
-
-## Privacy and security
-
-- The PhoneDock service listens on `127.0.0.1` only. Every request needs a token that's stored in your user
-  account's PhoneDock data folder (`~/Library/Application Support/PhoneDock`).
-- macOS may ask for **Local Network** access when PhoneDock connects to a phone over Wi-Fi; that's what lets it
-  reach phones on your network. Simulators, emulators and USB phones don't need it.
-- There's no telemetry. PhoneDock goes online for things you ask for (downloading system images or WebDriverAgent,
-  mounting an iPhone's developer disk image, or a cloud backend you configure), and to download the simulator and
-  iPhone tools in [Requirements](#requirements) from their own GitHub and PyPI releases the first time they're
-  needed. `PHONEDOCK_COMPONENTS_AUTO=0` turns that off.
-- Your agent's model provider sees the screenshots the agent sends it, the same as anything else in its context.
-- Leases keep agents from colliding: while one agent or you hold a device, input from anyone else is refused. An
-  agent's lease ends when its session ends, when its process exits, or after 10 minutes unused; yours lasts until
-  you hand the device back.
-
-## Limitations
-
-- App Store apps can't run in the iOS simulator; use a real iPhone for those.
-- On a real iPhone, only one app can show the phone's screen at a time, so close Xcode's device window or iPhone
-  Mirroring first. iOS doesn't let PhoneDock switch light/dark mode, rotate the phone, read app logs or tell which app
-  is in front ([details](docs/IPHONE-WIFI.md)).
-- iPhones on iOS 26 or earlier are Beta: WebDriverAgent must be rebuilt every 7 days with a free Apple ID.
-- Restarting the PhoneDock service clears leases. Devices keep running.
-- On Android, PhoneDock reads the screen's elements through UiAutomation, which allows one client at a time. While
-  you run your own UiAutomator or Espresso tests on the same device, set `PHONEDOCK_ANDROID_HELPER=0`.
-
-## Build from source
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## License
-
-[Apache-2.0](LICENSE). Free to use, change and share.
+[Agent setup and tools](docs/AGENTS-GUIDE.md) · [API and SDKs](docs/API.md) · [Build from source](CONTRIBUTING.md) · [Apache 2.0 license](LICENSE)
