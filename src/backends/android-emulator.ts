@@ -822,18 +822,23 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     processCache = undefined;   // its process as of now (a list from before it started wouldn't have it)
     const proc = await emulatorProcessOf(name, s);   // the stop is bound to this process, on this console port
     if (!proc) throw abort('PhoneDock can’t tell which process is its emulator');
-    // From here only this sleep's own exit save can be loaded: the old one goes (its snapshot.pb; see the disk rule), and a
-    // record no boot can match stands until the proof replaces it. Whatever happens next (a crash, this daemon dying, the
-    // sleep called off) no boot loads a state older than the disk; a phone that keeps running saves a new one on exit.
+    // From here only this sleep's own exit save can be loaded: the old one goes (its snapshot.pb; see the disk rule), so a
+    // crash from now on boots cold. A record no boot can match stands until the proof replaces it (should this daemon die
+    // after the stop is sent); a sleep that goes no further takes it back, and the phone's next exit saves a new state.
     try { writeExitSaveRecord(a, { v: 1, pbMtimeMs: -1, disks: {} }); rmSync(snapshotPb(a), { force: true }); }
     catch (e) { throw abort(`its saved state couldn’t be set aside (${(e as NodeJS.ErrnoException).code})`); }
-    // Writes still in the guest's memory would be lost if the next boot starts fresh: flushed, or no stop.
-    const sync = await A.adb(s, ['shell', 'sync'], { allowFail: true, timeoutMs: 30_000 });
-    if (sync.code !== 0) throw abort('its writes couldn’t be flushed to its disk');
-    // Still this emulator on that serial (its console port is free for another once it is gone), asked now.
-    if ((await managedSerial(name)) !== s || !processAlive(proc.pid)) throw abort('its adb connection changed');
-    const why = opts.confirm?.();   // the daemon's last look (use, leases, the setting), with no await before the stop
-    if (why) throw new PhoneDockError(`It keeps running: ${why}`, 'sleep_called_off', 409);
+    try {
+      // Writes still in the guest's memory would be lost if the next boot starts fresh: flushed, or no stop.
+      const sync = await A.adb(s, ['shell', 'sync'], { allowFail: true, timeoutMs: 30_000 });
+      if (sync.code !== 0) throw abort('its writes couldn’t be flushed to its disk');
+      // Still this emulator on that serial (its console port is free for another once it is gone), asked now.
+      if ((await managedSerial(name)) !== s || !processAlive(proc.pid)) throw abort('its adb connection changed');
+      const why = opts.confirm?.();   // the daemon's last look (use, leases, the setting), with no await before the stop
+      if (why) throw new PhoneDockError(`It keeps running: ${why}`, 'sleep_called_off', 409);
+    } catch (e) {
+      try { rmSync(exitSaveRecord(a), { force: true }); } catch { /* it stays: the next boot is cold, the data kept */ }
+      throw e;
+    }
     const t0 = Date.now();
     await A.adb(s, ['emu', 'kill'], { allowFail: true, timeoutMs: 10_000 });
     // Its memory is free once its process is gone and adb no longer lists it.

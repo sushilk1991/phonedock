@@ -259,6 +259,21 @@ test('once the stop is committed the old quick-boot state can’t be loaded: a c
   assert.equal(adb(serialOf()!, 'shell', 'cat /data/local/tmp/pd-late.txt'), 'after-the-save');
 });
 
+test('a sleep called off at the last look, or given up before the stop, takes its placeholder back: the next ordinary exit saves, and the next boot loads it', async () => {
+  for (const how of ['called off', 'sync fails'] as const) {
+    if (!serialOf()) await backend.boot!(NAME, { headless: true });
+    sdk.set({ syncFails: how === 'sync fails' });
+    await assert.rejects(backend.stopForSleep!(NAME, await backend.prepareSleep!(NAME), { confirm: () => 'a request came' }),
+      (e: PhoneDockError) => e.code === (how === 'called off' ? 'sleep_called_off' : 'sleep_failed'));
+    sdk.set({ syncFails: false });
+    assert.ok(!existsSync(join(dir, 'phonedock-exit-save.json')), `${how}: no placeholder left`);
+    const id = adb(serialOf()!, 'shell', 'cat /proc/sys/kernel/random/boot_id');
+    await backend.shutdown!(NAME);                            // an ordinary stop: the emulator saves its state on the way out
+    await backend.boot!(NAME, { headless: true });
+    assert.equal(adb(serialOf()!, 'shell', 'cat /proc/sys/kernel/random/boot_id'), id, `${how}: the next boot loads that save`);
+  }
+});
+
 test('the emulator dies during the guest’s sync, before the stop: nothing of its old quick-boot state loads after', async () => {
   await backend.boot!(NAME, { headless: true });
   await backend.wakeFromSleep!(NAME, await putToSleep());   // a proven save to load, then awake again

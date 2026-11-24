@@ -105,6 +105,7 @@ function writeMarker(id: string, m: SleepMarker) {
 }
 export function clearMarker(id: string): boolean {
   const had = existsSync(markerPath(id));
+  outcomes.delete(id);   // how that sleep's wake came back goes with it
   rmSync(markerPath(id), { force: true });
   return had;
 }
@@ -141,8 +142,10 @@ const failures = new Map<string, { at: string; code: string; message: string }>(
 interface SleepOp { phase: 'saving' | 'stopping'; cancelled: boolean; settled: Promise<void> }
 const ops = new Map<string, SleepOp>();
 const wakes = new Map<string, Promise<WakeResult | undefined>>();
-/** A wake whose phone booted but didn't read running in time (not_ready): the next request finishes it with this. */
-const outcomes = new Map<string, WakeResult>();
+/** A wake whose phone booted but didn't read running in time (not_ready): the next request finishes it with this, or
+ *  the sweep does once it is `KEEP_OUTCOME_SEC` old (by then a retry isn't coming). */
+const outcomes = new Map<string, WakeResult & { keptAt: number }>();
+const KEEP_OUTCOME_SEC = 120;
 
 // Every use also touches a stamp, so use through another service (a test one on another port) counts here too.
 const stampPath = (id: string) => join(stateDir('devices'), safeId(id), 'last-use');
@@ -339,7 +342,7 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
     try {
       report = prior?.report ?? await b.wakeFromSleep(nativeId, marker.state, { ...boot, onProgress });
       try { await untilRunning(id, backend); }
-      catch (e) { outcomes.set(id, prior ?? { ms: Date.now() - t0, name: marker.name, report }); throw e; }
+      catch (e) { outcomes.set(id, prior ?? { ms: Date.now() - t0, name: marker.name, report, keptAt: now() }); throw e; }
     } catch (e) {
       const pe = e as PhoneDockError;
       logAction(id, by, { action: 'device.wake_failed', error: [pe.message ?? String(e), pe.hints?.[0]].filter(Boolean).join(' ').slice(0, 400) });
@@ -349,19 +352,21 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
         ['Nothing was sent. Try again; if it keeps failing, use Cold Boot (its apps and data are kept).', ...(pe.hints ?? [])],
         [pe.message, pe.detail].filter(Boolean).join('\n'), 'not_sent');
     }
-    const ms = (prior?.ms ?? 0) + Date.now() - t0;
-    outcomes.delete(id);
-    clearMarker(id);
-    touchUse(id);
-    const secs = (ms / 1000).toFixed(1);
-    logAction(id, by, {
-      action: 'device.wake', summary: report.resumed ? `Woke ${marker.name} (${secs} s)` : `Woke ${marker.name} (${secs} s), started fresh: ${report.note ?? 'its saved state didn’t load'}`,
-      ms, resumed: report.resumed, via: report.via, ...(report.clock ? { clock: report.clock } : {}), ...(report.note ? { note: report.note } : {}),
-    });
-    return { ms, name: marker.name, report };
+    return wakeDone(id, by, { ms: (prior?.ms ?? 0) + Date.now() - t0, name: marker.name, report });
   })().finally(() => { if (wakes.get(id) === p) wakes.delete(id); });
   wakes.set(id, p);
   return p;
+}
+function wakeDone(id: string, by: string, w: WakeResult): WakeResult {
+  const { ms, name, report } = w;
+  clearMarker(id);
+  touchUse(id);
+  const secs = (ms / 1000).toFixed(1);
+  logAction(id, by, {
+    action: 'device.wake', summary: report.resumed ? `Woke ${name} (${secs} s)` : `Woke ${name} (${secs} s), started fresh: ${report.note ?? 'its saved state didn’t load'}`,
+    ms, resumed: report.resumed, via: report.via, ...(report.clock ? { clock: report.clock } : {}), ...(report.note ? { note: report.note } : {}),
+  });
+  return { ms, name, report };
 }
 /** Waiting requests go once a fresh device list says running (their handlers read it); past one deadline they fail
  *  unsent rather than run on a phone that isn't ready. Tests make it short. */
@@ -465,9 +470,14 @@ export async function sweep(): Promise<void> {
         continue;
       }
       if (d.state !== 'running' || sleepIneligible(d) || ops.has(d.id) || wakes.has(d.id) || lifecycles.has(d.id)) continue;
-      // Running with a marker no sleep or wake here is handling: someone else started it (stale), as a fresh read confirms.
+      // Running with a marker no sleep or wake here is handling, as a fresh read confirms: someone else started it (stale),
+      // or a wake here that wasn't ready in time and that no request has finished since (the sweep finishes it).
       if (readMarker(d.id)) {
-        if ((await getDevice(d.id, true).catch(() => undefined))?.state === 'running' && !ops.has(d.id) && !wakes.has(d.id) && !outcomes.has(d.id)) { clearMarker(d.id); invalidateDevices(); }
+        if ((await getDevice(d.id, true).catch(() => undefined))?.state !== 'running' || ops.has(d.id) || wakes.has(d.id)) continue;
+        const kept = outcomes.get(d.id);
+        if (kept && now() - kept.keptAt < KEEP_OUTCOME_SEC * 1000) continue;
+        if (kept) wakeDone(d.id, 'daemon', kept); else clearMarker(d.id);
+        invalidateDevices();
         continue;
       }
       const b = backends.find((x) => x.id === d.backend);

@@ -721,6 +721,27 @@ test('a wake that booted but wasn’t ready in time keeps how it came back: afte
   } finally { S.wakeTiming.readyMs = 30_000; }
 });
 
+test('a wake kept for a request that never comes is finished by the sweep two minutes on: logged, and the phone can sleep again', async () => {
+  await putToSleep();
+  S.wakeTiming.readyMs = 300; hooks.wakeLeavesStopped = true;
+  hooks.wakeReport = { resumed: false, via: 'cold', note: 'Its disk or saved state changed while it slept.' };
+  try {
+    await assert.rejects(S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell'), (e: PhoneDockError) => e.code === 'not_ready');
+    states.set('pdtest-a', 'running'); core.invalidateDevices();
+    advance(60); await S.sweep();
+    assert.ok(S.readMarker(ID), 'still kept for a retry');
+    advance(61); await S.sweep();
+    assert.equal(S.readMarker(ID), undefined, 'finished');
+    const log = core.readActions(ID, 5) as { action: { action: string; summary?: string } }[];
+    assert.match(log.find((e) => e.action.action === 'device.wake')?.action.summary ?? '', /started fresh: Its disk or saved state changed/);
+    const { c } = ctx(ID);
+    const leave = await enterInput(c);
+    await c.beforeRun?.();                                    // a tap now goes through: the phone is just awake
+    leave?.();
+    assert.deepEqual(calls, ['wake:pdtest-a'], 'one wake');
+  } finally { S.wakeTiming.readyMs = 30_000; }
+});
+
 test('a sleeping id whose AVD was deleted outside PhoneDock is forgotten by the sweep: the id is what it names now', async () => {
   await putToSleep(); hooks.avdGone = true;
   advance(5); await S.sweep();
