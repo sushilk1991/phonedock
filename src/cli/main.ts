@@ -67,7 +67,11 @@ Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <co
             connect [<host:port>] [--serial S]   (no address: the one phone with Wireless debugging)
             (Android Wi-Fi commands take --restart-adb to restart a blocked adb server; see docs/API.md)
             connect --ios <ip|wda-url> [--name N] [--udid U] | discover --ios
-            ios wda-setup --udid <id> [--team TEAMID] [--name N]   (build + run WebDriverAgent; see docs/IPHONE-WIFI.md)
+            ios wda-setup --udid <id> [--team TEAMID] [--name N] [--share]   (older iPhones: Set Up Control, private to this Mac;
+                          --share: this launch also listens on the Wi-Fi, without a password; see docs/IPHONE-WIFI.md)
+              [--api-key-path AuthKey.p8 --api-key-id KEYID --api-key-issuer ISSUER]   (instead of an Apple ID in Xcode)
+            ios wda-stop --udid <id>   (Stop Control: ends every WebDriverAgent on the iPhone)
+            ios wda-teams   (the signing teams Xcode is signed in to)
 Human:      handoff request <id> <reason…> [--timeout S] [--wait] | handoff ls [--state S|--all] | handoff show|wait <hid>
             handoff resolve <hid> done|cancelled [--note N]   (also: handoff done|cancel <hid>)
 Recording:  actions <id> [--limit N] | replay <id> <file.json> | record <id> start|stop|status [--max S]
@@ -230,12 +234,34 @@ export function devicesTable(list: Device[]): string {
   const waiting = list.filter((d) => humanCell(d));
   const sleeping = list.filter((d) => d.sleep);
   const notSleeping = list.filter((d) => d.sleepFailure && d.state === 'running');
-  return table(rows, cols)
+  return table(rows, cols) + sharingNotes(list)
     + (sleeping.length ? `\n\n${sleeping.map((d) => `${d.name} is ${SLEEPING_NOTE}.`).join('\n')}` : '')
     + (notSleeping.length ? `\n\n${notSleeping.map((d) => `${d.name} couldn’t go to sleep, so it keeps running: ${d.sleepFailure!.message}`).join('\n')}` : '')
     + (waiting.length
     ? `\n\n${waiting.map((d) => `${d.name} is waiting for a person: ${d.handoff!.reason}\n  Do it on the device (as the person: --owner app:human, no lease needed), then: phonedock handoff done ${d.handoff!.id} [--note "…"]   (or: phonedock handoff cancel ${d.handoff!.id})`).join('\n')}`
     : '');
+}
+
+/** wda-setup's done line. "Only from this Mac" only when the result says `shared: false`: a daemon from before 0.7.0
+ *  launched WebDriverAgent on every address and says nothing about it. */
+export function setupDoneText(result: unknown): string {
+  const r = (result ?? {}) as { wdaUrl?: string; sharedUrl?: string; shared?: boolean };
+  const reach = r.shared === true
+    ? `, shared on the Wi-Fi${r.sharedUrl ? `: other Macs run \`phonedock connect --ios ${r.sharedUrl}\`` : ''}. Anyone on this Wi-Fi can control the iPhone until Stop Control or a restart of the iPhone`
+    : r.shared === false ? ' (reachable only from this Mac)'
+    : '. This PhoneDock didn’t say whether other Macs on the Wi-Fi can reach it: update it, or run `phonedock ios wda-stop` if you didn’t mean to share';
+  return `WebDriverAgent running at ${r.wdaUrl}${reach}. It doesn’t come back by itself after the iPhone or PhoneDock restarts.`;
+}
+
+/** Older iPhones whose control is shared on the Wi-Fi (or can't be checked): said under the table, every time. */
+export function sharingNotes(list: Device[]): string {
+  const lines = list.flatMap((d) => {
+    const stop = `Stop Control ends it: phonedock ios wda-stop --udid ${d.nativeId}`;
+    if (d.meta?.wdaSharing === 'shared') return [`${d.name}: anyone on this Wi-Fi can control it, without a password${d.meta.wdaSharedUrl ? ` (other Macs: phonedock connect --ios ${d.meta.wdaSharedUrl})` : ''}. ${stop}`];
+    if (d.meta?.wdaSharing === 'unknown') return [`${d.name}: couldn’t check whether other Macs on this Wi-Fi can control it (allow PhoneDock under Privacy & Security › Local Network). ${stop}`];
+    return [];
+  });
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
 }
 
 function progressPrinter(quiet: boolean) {
@@ -1000,10 +1026,29 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     case 'ios': {
-      if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--name N]');
+      if (p[1] === 'wda-teams') {
+        const r = await c.wdaTeams();
+        out(r, () => !r.xcode ? 'Xcode isn’t installed (or xcode-select points at the Command Line Tools).'
+          : r.teams.length ? table(r.teams.map((t) => ({ team: t.id, name: t.name, kind: t.free ? 'personal (free)' : t.type ?? '' })), ['team', 'name', 'kind'])
+          : 'Xcode isn’t signed in to any team. Add your Apple ID in Xcode › Settings › Accounts, or pass an App Store Connect API key to `ios wda-setup`.');
+        return 0;
+      }
+      if (p[1] === 'wda-stop') {
+        const udid = str(a.flags, 'udid') ?? p[2]; if (!udid) usage('Missing --udid <id>');
+        const r = await c.wdaStop(udid);
+        out(r, () => `${r.stopped ? `Stopped control on ${udid}` : `No WebDriverAgent was running on ${udid}`}.${r.confirmed ? ' None is left on the iPhone.' : ' PhoneDock couldn’t confirm the iPhone has none left (is it connected?): run it again.'} \`phonedock ios wda-setup --udid ${udid}\` starts it again.`);
+        return r.confirmed ? 0 : 1;
+      }
+      if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--share] [--api-key-path P --api-key-id K --api-key-issuer I] | phonedock ios wda-stop --udid <id> | phonedock ios wda-teams');
       const udid = str(a.flags, 'udid') ?? p[2]; if (!udid) usage('Missing --udid <id>');
-      const job = await c.wdaSetup(udid, { team: str(a.flags, 'team'), destination: str(a.flags, 'destination'), name: str(a.flags, 'name'), wait: wantWait(a), onProgress: progressPrinter(quiet) });
-      out(job, () => job.state === 'done' ? `WebDriverAgent running at ${(job.result as { wdaUrl?: string })?.wdaUrl} – the device now shows up as Wi-Fi in \`phonedock devices\`` : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
+      const job = await c.wdaSetup(udid, {
+        team: str(a.flags, 'team'), destination: str(a.flags, 'destination'), name: str(a.flags, 'name'),
+        apiKeyPath: str(a.flags, 'apiKeyPath'), apiKeyId: str(a.flags, 'apiKeyId'), apiKeyIssuerId: str(a.flags, 'apiKeyIssuer') ?? str(a.flags, 'apiKeyIssuerId'),
+        ...(a.flags.share === true || a.flags.share === 'true' ? { share: true } : {}),
+        wait: wantWait(a), onProgress: progressPrinter(quiet),
+      });
+      out(job, () => job.state === 'done' ? setupDoneText(job.result)
+        : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
       return job.state === 'failed' ? 1 : 0;
     }
     case 'pair': {

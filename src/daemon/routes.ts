@@ -844,7 +844,9 @@ type IosConnector = {
   connectWda: (input: string, o?: { name?: string; udid?: string }) => Promise<{ nativeId: string; wdaUrl: string; status: unknown }>;
   disconnect: (nid: string) => Promise<boolean>;
   discover: () => Promise<unknown[]>;
-  wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string }, p?: (l: string) => void) => Promise<unknown>;
+  wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string; share?: boolean }, p?: (l: string) => void) => Promise<unknown>;
+  wdaTeams: () => Promise<unknown>;
+  wdaStop: (udid: string) => Promise<{ udid: string; stopped: boolean; confirmed: boolean }>;
 };
 function iosBackend(): Backend & IosConnector {
   const b = backends.find((x) => x.id === 'ios-device') as (Backend & Partial<IosConnector>) | undefined;
@@ -891,13 +893,28 @@ r.post('/v1/ios/wda-setup', async (c) => {
   assertPhysicalAllowed('wda-setup');
   const body = await c.body(); if (!body.udid) throw badRequest('udid required');
   const b = iosBackend();
+  const opt = (k: string) => (body[k] !== undefined && body[k] !== null && body[k] !== '' ? String(body[k]) : undefined);
   const job = startJob('wda-setup', async (p) => {
-    const res = await b.wdaSetup(String(body.udid), { team: body.team ? String(body.team) : undefined, destination: body.destination ? String(body.destination) : undefined, name: body.name ? String(body.name) : undefined }, p);
+    const res = await b.wdaSetup(String(body.udid), {
+      team: opt('team'), destination: opt('destination'), name: opt('name'),
+      apiKeyPath: opt('apiKeyPath'), apiKeyId: opt('apiKeyId'), apiKeyIssuerId: opt('apiKeyIssuerId'), ...(body.share === true ? { share: true } : {}),
+    }, p);
     invalidateDevices();
     return res;
-  });
+  }, `ios-device:${String(body.udid)}`);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
 });
+// Stop Control: end every WebDriverAgent on the phone (and the xcodebuild this service started); the phone stays paired.
+r.post('/v1/ios/wda-stop', async (c) => {
+  assertPhysicalAllowed('wda-stop');
+  const body = await c.body(); if (!body.udid) throw badRequest('udid required');
+  const res = await iosBackend().wdaStop(String(body.udid));
+  uiCache.delete(`ios-device:${res.udid}`);
+  invalidateDevices();
+  return { ok: true, ...res };
+});
+// Reads Xcode's signed-in teams only (no phone).
+r.get('/v1/ios/wda-teams', async () => iosBackend().wdaTeams());
 r.get('/v1/android/discover', async () => {
   assertPhysicalAllowed('discover');
   const b = androidDevice();

@@ -73,6 +73,11 @@ enum Clipboard {
 ///   {"op":"mark","text":"ready-1"}                      logs "MARK ready-1" (sync point for an outside script)
 ///   {"op":"badge","expect":"1"}                         check the Dock badge ("" = none)
 ///   {"op":"fakeScreenError","message":"…","hints":["…"]}   stop the frame loop and show that error
+///   {"op":"fakeControl","device":"ios-device:…","run":"running","line":"Building…"}  an older iPhone's Set Up Control
+///                                                       run without running it: checking | choose ("teams":[…]) | running
+///                                                       ("firstTime") | done ("shared","sharedUrl") | stopping | stopped |
+///                                                       failed ("error":{code,message,hints,cause},"progress") | unconfirmed | none.
+///                                                       Whether control is on is the fake device's meta.wdaReady.
 ///   {"op":"fakeBusy","device":"PhoneDock-Pixel","label":"Saving snapshot…"}  show a snapshot/clone in progress
 ///                                                       without running one ("" clears)
 ///   {"op":"activate"}                                   bring the app to the front (active selection styling); skipped
@@ -344,6 +349,27 @@ enum SelfTest {
                 m.setSelfTestDevice(nil)
                 log("#\(i) fakeDevice cleared")
             }
+        case "fakeControl":   // see the doc comment; the error goes through the same copy as a real failure
+            guard let m = model, let id = s["device"] as? String else { fail("#\(i) fakeControl FAIL no model/device"); return }
+            let share = s["share"] as? Bool ?? false
+            switch s["run"] as? String ?? "none" {
+            case "checking": m.controlRuns[id] = .checking
+            case "choose":
+                let teams = (try? JSONDecoder().decode([WdaTeam].self, from: JSONSerialization.data(withJSONObject: s["teams"] ?? []))) ?? []
+                m.controlRuns[id] = .chooseTeam(teams, share: share)
+            case "running": m.controlRuns[id] = .running(s["line"] as? String ?? "Building WebDriverAgent…", firstTime: s["firstTime"] as? Bool ?? true)
+            case "done": m.controlRuns[id] = .done(shared: s["shared"] as? Bool ?? (s["sharedUrl"] != nil), sharedUrl: s["sharedUrl"] as? String)
+            case "stopping": m.controlRuns[id] = .stopping
+            case "stopped": m.controlRuns[id] = .stopped
+            case "unconfirmed": m.controlRuns[id] = .failed(AppModel.stopUnconfirmed, retry: .stop)
+            case "failed":   // a failed job as the service sends it, decoded like a real one (error.cause included)
+                let raw: [String: Any] = ["id": "fake", "state": "failed", "progress": s["progress"] ?? [], "error": s["error"] ?? [:]]
+                guard let job = try? JSONDecoder().decode(Job.self, from: JSONSerialization.data(withJSONObject: raw)) else { fail("#\(i) fakeControl FAIL job"); return }
+                m.controlRuns[id] = .failed(AppModel.controlProblem(job.apiError, job: job, title: "Couldn’t set up control"),
+                                            retry: job.apiError?.specificCode == "wda_running" ? .stop : .setUp(team: nil, share: share))
+            default: m.controlRuns[id] = nil
+            }
+            log("#\(i) fakeControl \(s["run"] as? String ?? "none")")
         case "appearance": // {"op":"appearance","mode":"light"|"dark"|"system"}
             let mode = s["mode"] as? String ?? "system"
             NSApp.appearance = mode == "light" ? NSAppearance(named: .aqua) : mode == "dark" ? NSAppearance(named: .darkAqua) : nil

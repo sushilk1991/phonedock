@@ -105,6 +105,8 @@ function fmtDevice(d: Device): string {
   if (d.handoff) bits.push(`waiting-for-human=${JSON.stringify(d.handoff.reason.slice(0, 60))}`);
   if (!d.managed) bits.push('unmanaged');
   if (d.error) bits.push(`error=${d.error}`);
+  if (d.meta?.wdaSharing === 'shared') bits.push(`shared-on-wifi: anyone on this Wi-Fi can control it${d.meta.wdaSharedUrl ? ` at ${d.meta.wdaSharedUrl}` : ''} (iphone_control action="stop" ends it; tell the user)`);
+  if (d.meta?.wdaSharing === 'unknown') bits.push('sharing=unknown (couldn’t check whether other Macs on the Wi-Fi can control it)');
   return bits.join(' | ');
 }
 
@@ -166,6 +168,7 @@ const TOOL_META: Record<string, [string, Hints]> = {
   device_settings: ['Read or change device display settings', { ...SAFE, idempotentHint: true }],
   set_appearance: ['Set dark / light appearance', { ...SAFE, idempotentHint: true }], set_location: ['Set GPS location', { ...SAFE, idempotentHint: true }],
   connect_device: ['Connect phone over Wi-Fi', { destructiveHint: false, openWorldHint: true }],
+  iphone_control: ['Set up or stop control of an older iPhone', { destructiveHint: false, openWorldHint: true }],
   fill: ['Fill text field', SAFE], wait_for: ['Wait for screen state', SAFE], batch: ['Run several steps', SAFE],
   request_human: ['Ask the person for help', SAFE], record_screen: ['Record screen', SAFE], app_data: ['Save / restore app data', DESTRUCTIVE],
   hide_keyboard: ['Hide keyboard', { ...SAFE, idempotentHint: true }], double_tap: ['Double-tap', SAFE], pinch: ['Pinch', SAFE],
@@ -988,6 +991,30 @@ export function createMcpServer(ctx: McpContext): McpServer {
     // No address: the phone named by `serial`, or the only phone advertising Wireless debugging.
     const r = await c.connect(a.address, { serial: a.serial, restartAdb: a.restart_adb });
     return { content: [text(`Connected ${a.address ?? r.device?.name ?? 'the phone'}${r.device ? ` → ${r.device.id}` : ''}`)] };
+  });
+
+  tool('iphone_control', 'Older iPhones (iOS 26 and earlier) take taps, typing and the UI tree through WebDriverAgent. action="set_up" (Set Up Control) builds it once with the person\'s Apple ID in Xcode (the first time takes minutes, then ~8 s) and starts it private to this Mac; "stop" (Stop Control) ends every WebDriverAgent on the phone; "teams" lists the signing teams. Set up only a phone the user asked you to use. A failed setup names what to fix in its cause: team_required → ask which team and pass team; wda_running → a WebDriverAgent already runs there (another Mac\'s, Xcode\'s, or an earlier one) and was left alone, so tell the user (stop it only if they ask). Never pass share unless the user asks for another Mac to drive the phone: anyone on the Wi-Fi could control it.', {
+    action: z.enum(['set_up', 'stop', 'teams']),
+    device: z.string().optional().describe('The iPhone (id, UDID or name from list_devices); not needed for teams'),
+    team: z.string().optional().describe('Team ID (10 characters) when Xcode has several teams'),
+    share: z.boolean().optional().describe('Also let other Macs on this Wi-Fi control it, without a password, until stop or a restart of the phone'),
+    wait_seconds: z.number().int().min(0).max(600).optional().describe('How long to wait for set_up before returning the job id (default 120)'),
+  }, async (a) => {
+    if (a.action === 'teams') {
+      const r = await c.wdaTeams();
+      return { content: [text(r.teams.length ? r.teams.map((t) => `${t.id} ${t.name}${t.free ? ' (personal)' : ''}`).join('\n') : 'Xcode isn’t signed in to any team: the person adds an Apple ID in Xcode › Settings › Accounts.')] };
+    }
+    if (!a.device) throw new Error('device is required');
+    const d = await c.resolveDevice(a.device);
+    if (d.backend !== 'ios-device') throw new Error(`${d.name} isn’t a real iPhone`);
+    if (a.action === 'stop') {
+      const r = await c.wdaStop(d.nativeId);
+      return { content: [text(r.confirmed ? `Stopped control of ${d.name}: no WebDriverAgent left on it.` : `Couldn’t confirm WebDriverAgent ended on ${d.name}; keep it connected and stop again.`)], isError: !r.confirmed };
+    }
+    const job = await c.wdaSetup(d.nativeId, { team: a.team, share: a.share, wait: false });
+    const j = await waitJobUpTo(c, job, a.wait_seconds ?? 120);
+    const cause = j.error && typeof j.error === 'object' && j.error.cause ? ` (cause: ${j.error.cause})` : '';
+    return { content: [text(j.state === 'running' ? `Still setting up. Poll with get_job job_id=${j.id}.\n${jobText(j)}` : jobText(j) + cause)], isError: j.state === 'failed' };
   });
 
   tool('discover_android_phones', 'Find Android phones on the Wi-Fi that have Wireless debugging on (takes ~3 s). Each has serial, model, ip, connectPort (Wireless debugging is on), pairingPort (only while the phone shows "Pair device with pairing code") and connected (already in list_devices). Next: pair_android_phone with the code the user reads off the phone, or connect_device with the serial.', {}, async () => {

@@ -204,7 +204,8 @@ export interface Job {
   startedAt: string;
   endedAt?: string;
 }
-export interface JobError { code: string; message: string; hints?: string[]; detail?: string }
+/** `cause`: the specific failure behind a catch-all code kept for compatibility (wda-setup: `wda_setup_failed`). */
+export interface JobError { code: string; message: string; hints?: string[]; detail?: string; cause?: string }
 
 /** A failed job's error as one readable line: the message, then its hints. */
 export function jobErrorText(error: Job['error']): string {
@@ -1044,11 +1045,24 @@ export class PhoneDockClient {
   disconnect(id: string): Promise<{ ok: boolean }> { return this.request('DELETE', `/v1/connect/${encodeURIComponent(id)}`); }
   /** Scan for iPhones on the network (Bonjour + devicectl). */
   discoverIos(): Promise<{ name: string; host?: string; udid?: string; source: string; service?: string; deviceId?: string }[]> { return this.request('GET', '/v1/ios/discover'); }
-  /** Build + run WebDriverAgent on a device (Job; resolves when WDA prints its URL, which is saved for the device). */
-  async wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string } & WaitOptions = {}): Promise<Job> {
+  /** Set Up Control for an iPhone on iOS 26 or older (Job): build the pinned WebDriverAgent once for the team, start it
+   *  bound to this Mac's connection to the phone, check it's private, and resolve with its address. Nothing restarts it
+   *  later on its own. `team` when Xcode is signed in to several (wdaTeams); `apiKey*` instead of an Apple ID in Xcode;
+   *  `share`: this launch also listens on the phone's Wi-Fi address (anyone on that network can control it). A
+   *  simulator `destination` runs the old clone + build + run. */
+  async wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string; share?: boolean } & WaitOptions = {}): Promise<Job> {
     const { wait, timeoutMs, onProgress, ...body } = opts;
     const r = await this.request<{ job: Job }>('POST', '/v1/ios/wda-setup', { body: { udid, ...body } });
     return wait === false ? r.job : this.waitJob(r.job.id, { timeoutMs: timeoutMs ?? 30 * 60_000, onProgress });
+  }
+  /** Stop Control: end every WebDriverAgent on the phone. `stopped`: something was running; `confirmed`: devicectl
+   *  shows none left. */
+  wdaStop(udid: string): Promise<{ ok: boolean; udid: string; stopped: boolean; confirmed: boolean }> {
+    return this.request('POST', '/v1/ios/wda-stop', { body: { udid } });
+  }
+  /** The signing teams Xcode is signed in to on the daemon's Mac (for wdaSetup's `team`). */
+  wdaTeams(): Promise<{ teams: { id: string; name: string; type?: string; free: boolean }[]; xcode: boolean; xcodeVersion?: string; minIos?: string }> {
+    return this.request('GET', '/v1/ios/wda-teams');
   }
   pair(address: string, code: string, opts: { restartAdb?: boolean } = {}): Promise<{ ok: boolean }> { return this.request('POST', '/v1/pair', { body: { address, code, ...opts } }); }
   /** Scan the Wi-Fi for Android phones with Wireless debugging (about 3 s). A phone offers `pairingPort` only while its pairing screen is open. */

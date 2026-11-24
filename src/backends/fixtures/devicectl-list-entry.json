@@ -1,0 +1,42 @@
+{
+ "identifier": "<id>",
+ "connectionProperties": {
+  "authenticationType": "<value>",
+  "isMobileDeviceOnly": false,
+  "lastConnectionDate": "<value>",
+  "localHostnames": [
+   "<value>",
+   "<value>",
+   "<value>"
+  ],
+  "pairingState": "<value>",
+  "potentialHostnames": [
+   "<value>",
+   "<value>",
+   "<value>"
+  ],
+  "transportType": "<value>",
+  "tunnelIPAddress": "<value>",
+  "tunnelState": "<value>",
+  "tunnelTransportProtocol": "<value>"
+ },
+ "properties": {
+  "connection": {
+   "authenticationType": "<value>",
+   "lastConnectionDate": 0,
+   "pairingState": "<value>",
+   "screenViewingURL": {
+    "relative": "<value>"
+   },
+   "state": "<value>",
+   "transportType": "<value>",
+   "tunnelIPAddressString": "<value>",
+   "tunnelTransportProtocol": "<value>"
+  }
+ },
+ "hardwareProperties": {
+  "platform": "iOS",
+  "reality": "physical",
+  "udid": "<udid>"
+ }
+}

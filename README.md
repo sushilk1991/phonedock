@@ -28,7 +28,7 @@ PhoneDock is a free, open-source Mac app that connects Claude Code, Codex, Curso
 | Android phone | Android SDK tools. USB debugging or wireless debugging. |
 | iOS simulator | Xcode. Use a simulator build of your app, not the App Store version. |
 | Android emulator | Android SDK and an emulator image. [Virtual phones are in beta](docs/VIRTUAL-PHONES.md). |
-| iPhone on iOS 26 or earlier | [Beta setup with WebDriverAgent](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent). |
+| iPhone on iOS 26 or earlier | Press **Set Up Control** once per start: PhoneDock builds WebDriverAgent and keeps it private to this Mac ([beta](docs/IPHONE-WIFI.md#ios-26-and-older-webdriveragent)). |
 
 PhoneDock requires **an Apple silicon Mac with macOS 15 or later**. The first time you use iPhone control on iOS 27 or later, or need simulator controls, PhoneDock downloads the tools automatically. Keep the Mac online for first setup. On a supported iPhone, live video starts when the tools are ready. Check progress or retry in **Settings → Advanced → Components**.
 

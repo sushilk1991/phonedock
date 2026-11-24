@@ -13,6 +13,10 @@ struct APIError: LocalizedError, Sendable, Hashable {
     var hints: [String] = []
     /// Raw cause from the daemon (command, exit code, stderr). Only shown under Details.
     var detail: String? = nil
+    /// The specific failure behind a catch-all code kept for compatibility (wda-setup: `wda_setup_failed`).
+    var cause: String? = nil
+    /// What to branch on: the specific failure when the service names one.
+    var specificCode: String { cause ?? code }
     var errorDescription: String? {
         hints.isEmpty ? message : message + "\n" + hints.map { "• " + $0 }.joined(separator: "\n")
     }
@@ -76,7 +80,7 @@ struct DaemonClient: Sendable {
         guard let http = resp as? HTTPURLResponse else { throw APIError(status: 0, code: "bad_response", message: "No HTTP response") }
         if !(200..<300).contains(http.statusCode) {
             if let e = try? JSONDecoder().decode(APIErrorBody.self, from: data) {
-                throw APIError(status: http.statusCode, code: e.error.code ?? "error", message: e.error.message ?? "HTTP \(http.statusCode)", hints: e.error.hints ?? [], detail: e.error.detail)
+                throw APIError(status: http.statusCode, code: e.error.code ?? "error", message: e.error.message ?? "HTTP \(http.statusCode)", hints: e.error.hints ?? [], detail: e.error.detail, cause: e.error.cause)
             }
             throw APIError(status: http.statusCode, code: "http_\(http.statusCode)", message: String(data: data, encoding: .utf8)?.prefix(300).description ?? "HTTP \(http.statusCode)")
         }
@@ -153,7 +157,7 @@ struct DaemonClient: Sendable {
             let (body, response) = try await Self.session.data(for: req)
             guard let response = response as? HTTPURLResponse else { throw APIError(status: 0, code: "bad_response", message: "No HTTP response") }
             guard (200..<300).contains(response.statusCode) || response.statusCode == 304 else {
-                if let e = try? JSONDecoder().decode(APIErrorBody.self, from: body) { throw APIError(status: response.statusCode, code: e.error.code ?? "error", message: e.error.message ?? "HTTP \(response.statusCode)", hints: e.error.hints ?? [], detail: e.error.detail) }
+                if let e = try? JSONDecoder().decode(APIErrorBody.self, from: body) { throw APIError(status: response.statusCode, code: e.error.code ?? "error", message: e.error.message ?? "HTTP \(response.statusCode)", hints: e.error.hints ?? [], detail: e.error.detail, cause: e.error.cause) }
                 throw APIError(status: response.statusCode, code: "http_\(response.statusCode)", message: String(data: body, encoding: .utf8)?.prefix(300).description ?? "HTTP \(response.statusCode)")
             }
             (data, http) = (body, response)

@@ -3,6 +3,7 @@
   "minAgeDays": 14,
   "allowedHosts": [
     "github.com",
+    "codeload.github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
     "files.pythonhosted.org",
@@ -101,6 +102,35 @@
           "--version"
         ],
         "expectedVersion": "1.8.0"
+      }
+    },
+    "wda": {
+      "id": "wda",
+      "displayName": "iPhone WebDriverAgent",
+      "description": "appium/WebDriverAgent source. PhoneDock builds it once per Mac and signing team so iPhones on iOS 26 and older take taps, typing and the UI tree.",
+      "kind": "source-archive",
+      "version": "16.15.3",
+      "publishedAt": "2026-10-16T21:41:13Z",
+      "estimatedDiskBytes": 5000000,
+      "licenseFile": "licenses/WebDriverAgent-LICENSE",
+      "artifacts": [
+        {
+          "platforms": [
+            "darwin-arm64",
+            "darwin-x64"
+          ],
+          "filename": "WebDriverAgent-16.15.3.tar.gz",
+          "url": "https://github.com/appium/WebDriverAgent/archive/refs/tags/v16.15.3.tar.gz",
+          "sha256": "a232b9faaa47e33d5348dea362910a772ebf6f3b405d2a680ba9d488e30266e5",
+          "size": 589433
+        }
+      ],
+      "verify": {
+        "sourceDir": "WebDriverAgent-16.15.3",
+        "requiredFiles": [
+          "WebDriverAgent.xcodeproj/project.pbxproj",
+          "LICENSE"
+        ]
       }
     }
   }

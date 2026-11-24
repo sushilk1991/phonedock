@@ -466,7 +466,7 @@ struct Job: Codable, Hashable, Identifiable, Sendable {
         if let e = try? c.decodeIfPresent(String.self, forKey: .error) { errorText = e }
         else if let e = try? c.decodeIfPresent(APIErrorBody.Inner.self, forKey: .error), let message = e.message {
             errorText = message
-            apiError = APIError(status: 0, code: e.code ?? "job_failed", message: message, hints: e.hints ?? [], detail: e.detail)
+            apiError = APIError(status: 0, code: e.code ?? "job_failed", message: message, hints: e.hints ?? [], detail: e.detail, cause: e.cause)
         } else if let e = try? c.decodeIfPresent(JSONValue.self, forKey: .error) {
             errorText = e["message"]?.description ?? e.description
         }
@@ -533,7 +533,7 @@ struct ComponentStatus: Codable, Hashable, Identifiable, Sendable {
 }
 
 struct APIErrorBody: Decodable, Sendable {
-    struct Inner: Decodable, Sendable { var code: String?; var message: String?; var hints: [String]?; var detail: String? }
+    struct Inner: Decodable, Sendable { var code: String?; var message: String?; var hints: [String]?; var detail: String?; var cause: String? }
     var error: Inner
 }
 

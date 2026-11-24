@@ -465,7 +465,7 @@ export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise
 }
 
 // ── jobs ────────────────────────────────────────────────────────────────────
-export interface Job { id: string; kind: string; state: 'running' | 'done' | 'failed'; progress: string[]; result?: unknown; error?: { code: string; message: string; hints?: string[]; detail?: string }; startedAt: string; endedAt?: string; deviceId?: string }
+export interface Job { id: string; kind: string; state: 'running' | 'done' | 'failed'; progress: string[]; result?: unknown; error?: { code: string; message: string; hints?: string[]; detail?: string; cause?: string }; startedAt: string; endedAt?: string; deviceId?: string }
 const jobs = new Map<string, Job>();
 export function getJob(id: string): Job {
   const j = jobs.get(id); if (!j) throw new PhoneDockError("Couldn’t find the job", 'not_found', 404, undefined, `No job ${id}`); return j;
@@ -494,7 +494,7 @@ export function startJob(kind: string, fn: (progress: (l: string) => void, job: 
     catch (e) {
       const pe = e as PhoneDockError;
       job.state = 'failed';
-      job.error = { code: pe.code ?? 'internal', message: pe.message ?? String(e), hints: pe.hints, detail: pe.detail ?? (e instanceof Error && !(e instanceof PhoneDockError) ? e.stack : undefined) };
+      job.error = { code: pe.code ?? 'internal', message: pe.message ?? String(e), hints: pe.hints, detail: pe.detail ?? (e instanceof Error && !(e instanceof PhoneDockError) ? e.stack : undefined), ...(typeof pe.cause === 'string' ? { cause: pe.cause } : {}) };
       progress(`failed: ${job.error.message}`);
     }
     job.endedAt = new Date().toISOString();

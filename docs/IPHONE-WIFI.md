@@ -121,29 +121,78 @@ If something here fails on your phone, please open an issue on GitHub.
 
 ## iOS 26 and older: WebDriverAgent
 
-Older iPhones need [WebDriverAgent](https://github.com/appium/WebDriverAgent) (WDA) running on the phone. It's a
-test runner that PhoneDock builds and installs for you. WDA handles the screen, the UI tree, input, and launching
-apps. Xcode's `devicectl` handles installing apps and listing them.
+Older iPhones take taps, typing and the UI tree through [WebDriverAgent](https://github.com/appium/WebDriverAgent)
+(WDA), a test runner on the phone. PhoneDock ships a pinned copy of its source (16.15.3, SHA-256 checked), builds it
+once for your signing team and starts it when you press **Set Up Control**. Xcode's `devicectl` handles screenshots,
+installing and listing apps, crash logs and the rest, with or without WDA.
 
-### Set it up once (needs a cable)
+### Set up control (needs a cable once)
 
-1. Plug the iPhone in by USB, unlock it and tap **Trust This Computer**.
-2. In Xcode › Window › **Devices and Simulators**, select the phone and tick **Connect via network**.
-3. On the iPhone, open Settings › Privacy & Security › **Developer Mode** and turn it on. The phone restarts.
-4. Add your Apple ID in Xcode › Settings › Accounts and note its **Team ID** (10 characters). A free Apple ID
-   works.
-5. Find the phone's UDID with `phonedock devices --backend ios-device` (or `xcrun devicectl list devices`).
-6. Build and start WebDriverAgent. Once step 2 is done, this also works over Wi-Fi:
+1. **Turn on Developer Mode** on the iPhone: Settings › Privacy & Security › **Developer Mode**. It restarts.
+2. **Trust this Mac:** plug the iPhone in by USB, unlock it and tap **Trust**. For Wi-Fi later, tick **Connect via
+   network** for the phone in Xcode › Window › Devices and Simulators.
+3. **Sign in to Xcode:** Xcode › Settings › **Accounts** › add your Apple ID. A free Apple ID works.
+4. **Set up control:** select the iPhone in PhoneDock and press **Set Up Control** in its Info tab. From a terminal:
 
    ```sh
-   phonedock ios wda-setup --udid <UDID> --team <TEAMID> --name "My iPhone"
+   phonedock ios wda-setup --udid <UDID>    # the UDID is in `phonedock devices --backend ios-device`
    ```
 
-   The first run downloads and builds WebDriverAgent, which takes a few minutes.
-   - If the iPhone says "Untrusted Developer", open Settings › General › **VPN & Device Management**, trust your
-     certificate and run the command again.
-   - When it's ready, the phone appears in PhoneDock with full controls.
-   - Keep PhoneDock running; it keeps WebDriverAgent alive.
+   With several teams in Xcode, PhoneDock asks which one signs it (`phonedock ios wda-teams` lists them; pass
+   `--team <TEAMID>`), then remembers it. The first time it downloads the source (under 1 MB) and builds it, which takes
+   a few minutes; after that, setting up takes about 8 seconds. Keep the iPhone unlocked meanwhile. If the phone says
+   **Untrusted Developer** (personal teams), open Settings › General › **VPN & Device Management**, tap your Apple ID,
+   tap **Trust**, and set up control again.
+
+What it does, in order: plain checks first (Xcode, an Apple ID or API key, the phone connected, trusted, unlocked,
+Developer Mode on, iOS new enough for your Xcode), then the build if there is none for this team and Xcode yet
+(`build-for-testing`, registering the phone with the team), then the launch.
+
+**Private by default.** WebDriverAgent has no password: anyone who can reach it can control the phone. So PhoneDock
+starts it bound to the phone's end of this Mac's developer connection (the CoreDevice tunnel Xcode uses, over USB or
+Wi-Fi), and checks that it answers there and that the phone's Wi-Fi address refuses it. If it can't confirm that, it
+stops what it just started and says why (allow PhoneDock under Privacy & Security › Local Network if it keeps saying
+so).
+
+**What's already running is left alone.** If WebDriverAgent already runs on the phone and is provably private to
+this Mac (it answers on this Mac's tunnel and the phone's Wi-Fi address refuses it), Set Up Control uses it. If one
+runs that isn't, or can't be shown to be (another Mac's, Xcode's, a shared one, several at once, or a phone with no
+Wi-Fi address to check), setup leaves it running and says so: **Stop Control** ends it, then Set Up Control starts PhoneDock's.
+
+**Control doesn't come back by itself.** When the iPhone restarts, or PhoneDock restarts (an update, say), control
+may stop: taps then say `wda_not_ready`. Press Set Up Control again (about 8 seconds); if WebDriverAgent is still
+running and private, it is used as it is. A free Apple ID's signing lasts 7 days; after
+that Set Up Control builds and signs it again.
+
+**Stop Control** (the Info tab, the phone's right-click menu, or `phonedock ios wda-stop --udid <UDID>`) ends every
+WebDriverAgent on the phone, whoever started it. The phone stays paired and listed; screenshots, apps and installs
+keep working.
+
+### Let another Mac control it
+
+Turn on **Let other Macs on this Wi-Fi control this iPhone** when you set up control (or pass `--share`). That launch
+listens on the phone's Wi-Fi address too, and the Info tab shows the address. **Anyone on that Wi-Fi can then control
+the iPhone, without a password, until you press Stop Control or the iPhone restarts.** Sharing isn't a setting: to
+turn it off, press Stop Control, then Set Up Control without it. About once a minute PhoneDock checks whether the
+phone answers on its Wi-Fi address and says so in the app, under `phonedock devices` and in the MCP device list, also
+after a restart or a setup from the CLI; when it can't check (Local Network permission), it says that, never
+"private". While WebDriverAgent runs, setting up again (shared
+or not) says it is already running; Stop Control first. On the other Mac:
+
+```sh
+phonedock connect --ios <iphone-ip> --name "Wi-Fi iPhone"
+```
+
+### No Apple ID in Xcode? Use an App Store Connect API key
+
+With a paid developer membership, an API key (App Store Connect › Users and Access › Integrations) can sign instead:
+
+```sh
+phonedock ios wda-setup --udid <UDID> --team <TEAMID> \
+  --api-key-path ~/Downloads/AuthKey_<KEYID>.p8 --api-key-id <KEYID> --api-key-issuer <ISSUER-ID>
+```
+
+PhoneDock doesn't remember the key: pass these options each time you set up control.
 
 ### Already running WebDriverAgent?
 
@@ -160,8 +209,15 @@ Agents use the MCP tools `discover_devices` and `connect_device`. The HTTP route
 
 - Apple requires one USB pairing and a signing team. Before iOS 27 there's no way to do the first pairing without a
   cable.
-- With a free Apple ID, WebDriverAgent stops working after **7 days**. Run `phonedock ios wda-setup` again.
-- After the iPhone restarts, or if PhoneDock stops, run `wda-setup` again to relaunch WebDriverAgent.
+- With a free Apple ID, the signing lasts **7 days**. Set Up Control signs it again.
+- After the iPhone restarts, or PhoneDock restarts, press Set Up Control again: nothing relaunches WebDriverAgent by
+  itself.
+- Simulators: `phonedock ios wda-setup --udid <id> --destination 'platform=iOS Simulator,id=<id>'` works as before. A
+  destination must name the same device as `--udid`.
+- A WebDriverAgent repackaged under another app name isn't recognised as one: Stop Control doesn't see it.
+- The private check asks the phone's Wi-Fi address from this Mac. If this Mac is on another network whose addresses
+  overlap the phone's (the phone on USB), another device can answer for it.
+- WebDriverAgent is © Facebook and contributors, BSD licence ([tools/licenses/WebDriverAgent-LICENSE](../tools/licenses/WebDriverAgent-LICENSE)).
 - The phone and the Mac must be on the same network. Keep the phone unlocked; Auto-Lock › Never helps.
 - Back is an edge swipe.
 - The live screen is a series of screenshots, so it updates about once a second rather than at full frame rate.

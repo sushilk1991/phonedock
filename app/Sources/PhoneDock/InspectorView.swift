@@ -360,6 +360,14 @@ struct InfoTab: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     overview.padding(.horizontal, Theme.Space.l)
+                    if device.isOlderPairedIphone {
+                        sectionDivider
+                        VStack(alignment: .leading, spacing: 0) {
+                            SectionHeader("Control")
+                            OlderIphoneControlPanel(device: device).id(device.id).padding(.horizontal, Theme.Space.l)
+                        }
+                        .testAnchor("inspector-control")
+                    }
                     if device.can("settings") || device.backend == "ios-device" {
                         sectionDivider
                         DeviceSettingsView(device: device).id(device.id)

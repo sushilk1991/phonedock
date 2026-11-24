@@ -67,7 +67,7 @@ export function sendError(res: ServerResponse, e: unknown) {
   if (e instanceof PhoneDockError) {
     // input routes: how far the input got, and whether sending it again is safe (src/daemon/delivery.ts)
     const dl = e.delivery ? { delivery: e.delivery, retrySafe: e.delivery === 'not_sent' } : {};
-    sendJson(res, e.status || 400, { error: { code: e.code, message: e.message, hints: e.hints, detail: e.detail, ...dl } });
+    sendJson(res, e.status || 400, { error: { code: e.code, message: e.message, hints: e.hints, detail: e.detail, ...(typeof e.cause === 'string' ? { cause: e.cause } : {}), ...dl } });
   } else {
     const err = e as Error;
     sendJson(res, 500, { error: { code: 'internal', message: 'Something went wrong', detail: err?.stack ?? err?.message ?? String(e) } });
