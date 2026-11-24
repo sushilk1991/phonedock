@@ -29,7 +29,8 @@ Setup:      setup [--agent claude|codex|cursor|pi|all] [--dry-run] [--check] [--
               phonedock skill, links phonedock onto your PATH, then checks each stage. Default: every agent found.
               --dry-run prints the exact changes, --check only verifies, --uninstall removes what setup added.
 Daemon:     daemon start|stop|status|logs|install-agent [--load]|uninstall-agent
-Catalog:    backends | images [backend] | images install <backend> <image> | profiles <backend>
+Catalog:    backends | components | components install [id] [--no-wait]
+            images [backend] | images install <backend> <image> | profiles <backend>
 Devices:    devices|ls [--backend B --platform P --state S]
             create --backend B --name N [--image I --profile P --cpus N --ram MB --storage MB
                    --width W --height H --dpi D --disguise [PROFILE] --carrier C --seed HEX
@@ -442,6 +443,54 @@ export async function run(argv: string[]): Promise<number> {
       out(list, () => table(list.map((b) => ({ id: b.id, name: b.displayName, platform: b.platform, kind: b.kind,
         available: b.availability?.ok ? 'yes' : 'no', detail: b.availability?.ok ? (b.availability.version ?? '') : (b.availability?.reason ?? '') })),
       ['id', 'name', 'platform', 'kind', 'available', 'detail']));
+      return 0;
+    }
+    case 'components': {
+      const fmtSize = (bytes?: number) => {
+        if (bytes === undefined) return '';
+        if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+        if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+        if (bytes >= 1_000) return `${Math.round(bytes / 1_000)} KB`;
+        return `${bytes} B`;
+      };
+      if (p[1] === 'install') {
+        const target = p[2];
+        const ids = target
+          ? [target]
+          : (await c.components()).filter((x) => x.state !== 'ready' || x.updateAvailable).map((x) => x.id);
+        if (!ids.length) {
+          out({ ok: true, installed: [] }, () => 'All managed components are already up to date.');
+          return 0;
+        }
+        const results: Job[] = [];
+        for (const id of ids) {
+          const job = await c.installComponent(id, { wait: wantWait(a), onProgress: progressPrinter(quiet) });
+          results.push(job);
+        }
+        out(target ? results[0] : results, () => results.map((j, i) => `Component ${ids[i]}: ${j.state}`).join('\n'));
+        return 0;
+      }
+      const list = await c.components();
+      out(list, () => table(list.map((x) => {
+        const ver = x.installedVersion && x.installedVersion !== x.pinnedVersion
+          ? `${x.installedVersion} → ${x.pinnedVersion}`
+          : (x.installedVersion ?? x.pinnedVersion);
+        const detail = x.state === 'installing'
+          ? `${x.progress?.phase ?? 'installing'}${x.progress?.percent !== undefined ? ` (${x.progress.percent}%)` : ''}`
+          : x.state === 'failed'
+            ? (x.error?.message ?? x.detail ?? 'failed')
+            : x.updateAvailable
+              ? `update available (${x.pinnedVersion})`
+              : (x.detail ?? (x.source === 'override' ? 'env override' : ''));
+        return {
+          id: x.id,
+          state: x.state,
+          version: ver,
+          source: x.source,
+          size: fmtSize(x.sizeBytes ?? x.estimatedBytes),
+          detail,
+        };
+      }), ['id', 'state', 'version', 'source', 'size', 'detail']));
       return 0;
     }
     case 'images': {

@@ -32,6 +32,9 @@ final class AppModel {
     var client: DaemonClient?
     var devices: [Device] = []
     var backends: [BackendInfo] = []
+    var components: [ComponentStatus] = []
+    private var componentsPinnedBySelfTest = false
+    private var devicesPinnedBySelfTest = false
     var selection: String? { didSet { if let selection { UserDefaults.standard.set(selection, forKey: "lastSelection") } } }
     private var restoredSelection = false
     var jobs: [String: Job] = [:]           // tracked jobs by id
@@ -104,6 +107,8 @@ final class AppModel {
 
     private var eventsTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
+    private var componentPollTask: Task<Void, Never>?
+    private var componentPollGeneration = 0
     private var started = false
 
     var selectedDevice: Device? { devices.first { $0.id == selection } }
@@ -193,11 +198,12 @@ final class AppModel {
             if await DaemonLocator.health(port: c.base.port ?? 0) == nil {
                 connection = .failed("Daemon stopped responding")
                 client = nil
-                eventsTask?.cancel(); pollTask?.cancel()
+                eventsTask?.cancel(); pollTask?.cancel(); cancelComponentPolling()
                 Task { await connect() }
             }   // background polling never alerts; the connection pill shows trouble
         }
         if backends.isEmpty { await loadBackends() }
+        if components.isEmpty { await loadComponents() }
     }
 
     /// Only on an explicit user click: stops the attached daemon and launches it again as a child of this app, so it
@@ -216,7 +222,7 @@ final class AppModel {
         Task {
             defer { restartingDaemon = false }
             let pid = daemonPid
-            eventsTask?.cancel(); pollTask?.cancel()
+            eventsTask?.cancel(); pollTask?.cancel(); cancelComponentPolling()
             client = nil; liveUpdates = false
             connection = .connecting("Stopping daemon…")
             if let pid, !(await DaemonLocator.stop(pid: pid)) {
@@ -249,6 +255,97 @@ final class AppModel {
         return true
     }
 
+    func component(_ id: String) -> ComponentStatus? {
+        components.first { $0.id == id }
+    }
+
+    /// Refreshes `components`; false when the service didn't answer (the last list is kept).
+    @discardableResult
+    func loadComponents() async -> Bool {
+        if componentsPinnedBySelfTest { return true }
+        guard let c = client else { return false }
+        let wasInstalling = Set(components.filter { $0.state == "installing" }.map(\.id))
+        guard let list = try? await c.components() else { return false }
+        components = list
+        ensureComponentPolling()
+        let becameReady = list.contains { wasInstalling.contains($0.id) && $0.state == "ready" }
+        if becameReady {
+            Task { await refresh(); _ = await loadBackends() }
+        }
+        return true
+    }
+
+    private func cancelComponentPolling() {
+        componentPollGeneration += 1
+        componentPollTask?.cancel()
+        componentPollTask = nil
+    }
+
+    /// While any component is installing, poll every 3 s so a missed SSE terminal event can never leave the UI stuck.
+    /// Guarded by `componentPollGeneration` so a cancelled poller's `defer` can never clear a replacement's handle.
+    private func ensureComponentPolling() {
+        guard !componentsPinnedBySelfTest else { cancelComponentPolling(); return }
+        let anyInstalling = components.contains { $0.state == "installing" }
+        if !anyInstalling {
+            cancelComponentPolling()
+            return
+        }
+        guard componentPollTask == nil else { return }
+        componentPollGeneration += 1
+        let gen = componentPollGeneration
+        componentPollTask = Task { [weak self] in
+            defer {
+                if let self, self.componentPollGeneration == gen {
+                    self.componentPollTask = nil
+                }
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled, let self, self.componentPollGeneration == gen,
+                      self.client != nil, !self.componentsPinnedBySelfTest else { return }
+                _ = await self.loadComponents()
+                if !self.components.contains(where: { $0.state == "installing" }) { return }
+            }
+        }
+    }
+
+    func installComponent(_ id: String) {
+        guard let c = client else { return }
+        Task {
+            do {
+                _ = try await c.installComponent(id)
+                _ = await loadComponents()
+            } catch {
+                fail("Couldn’t start component install", error)
+            }
+        }
+    }
+
+    /// Self-test only: pin fake components so background refreshes don't overwrite deterministic screenshots.
+    func setSelfTestComponents(_ list: [ComponentStatus]?) {
+        guard SelfTest.enabled else { return }
+        if let list {
+            componentsPinnedBySelfTest = true
+            components = list
+        } else {
+            componentsPinnedBySelfTest = false
+            Task { _ = await loadComponents() }
+        }
+    }
+
+    /// Self-test only: inject a fake device and select it so stage overlays can be rendered deterministically.
+    func setSelfTestDevice(_ device: Device?) {
+        guard SelfTest.enabled else { return }
+        if let device {
+            devicesPinnedBySelfTest = true
+            devices = [device]
+            selection = device.id
+        } else {
+            devicesPinnedBySelfTest = false
+            Task { await refresh() }
+        }
+    }
+
     /// Self-test only: device-id prefixes to leave out of the window (`PHONEDOCK_APP_SELFTEST_HIDE=ios-device:`), so
     /// screenshots for docs never show a personal phone. `name:<prefix>` matches device names instead (simulator ids
     /// are UDIDs).
@@ -274,6 +371,7 @@ final class AppModel {
     }
 
     private func applyDevices(_ list: [Device]) {
+        if devicesPinnedBySelfTest { return }
         var list = Self.selfTestHidden.isEmpty ? list : list.filter { !Self.selfTestHides($0) }
         if !Self.selfTestRename.isEmpty { list = list.map(Self.relabel) }
         let sorted = list.sorted { ($0.kind, $0.name.lowercased()) < ($1.kind, $1.name.lowercased()) }
@@ -347,6 +445,7 @@ final class AppModel {
                     let (bytes, resp) = try await DaemonClient.session.bytes(for: req)
                     guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw APIError(status: 0, code: "sse", message: "no events") }
                     self?.liveUpdates = true
+                    Task { _ = await self?.loadComponents() }
                     var event = "message"; var data = ""
                     for try await line in bytes.lines {
                         if line.hasPrefix("event:") { event = line.dropFirst(6).trimmingCharacters(in: .whitespaces) }
@@ -393,8 +492,24 @@ final class AppModel {
             else if let obj = try? JSONDecoder().decode(JSONValue.self, from: d), let inner = obj["handoff"],
                     let dd = try? JSONEncoder().encode(inner), let h = try? JSONDecoder().decode(Handoff.self, from: dd) { applyHandoff(h) }
             else { Task { await refresh() } }
+        case "component":
+            if !componentsPinnedBySelfTest, let st = try? JSONDecoder().decode(ComponentStatus.self, from: d) {
+                upsertComponent(st)
+                if st.state == "ready" {
+                    Task { await refresh(); _ = await loadBackends() }
+                }
+            }
         default: break
         }
+    }
+
+    private func upsertComponent(_ st: ComponentStatus) {
+        if let i = components.firstIndex(where: { $0.id == st.id }) {
+            components[i] = st
+        } else {
+            components.append(st)
+        }
+        ensureComponentPolling()
     }
 
     // MARK: Handoffs

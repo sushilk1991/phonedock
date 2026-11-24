@@ -14,6 +14,7 @@ import type {
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
+  ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
 } from '../core/types.ts';
 import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
@@ -29,6 +30,7 @@ export type {
   Delivery, Expect, ExpectReport, UiWindow, UiWindowRole, TextSizeInput, SettingsInput, SettingsRead, SettingsResult, DeviceSettings, SettingKey,
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
+  ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
 };
 
 /** Every input result: how far it got (`delivery`: sent / not_sent), whether sending it again is safe (`retrySafe`:
@@ -542,6 +544,12 @@ export class PhoneDockClient {
   backends(): Promise<BackendInfo[]> { return this.request('GET', '/v1/backends'); }
   backendsDebug(): Promise<{ backends: BackendInfo[]; failures: { module: string; error: string }[] }> {
     return this.request('GET', '/v1/backends', { query: { debug: 1 } });
+  }
+  components(): Promise<ComponentStatus[]> { return this.request('GET', '/v1/components'); }
+  async installComponent(id: string, opts: WaitOptions = {}): Promise<Job> {
+    const res = await this.request<{ job: Job; component: ComponentStatus } | Job>('POST', `/v1/components/${enc(id)}/install`);
+    const job = 'job' in res ? res.job : res;
+    return opts.wait === false ? job : this.waitJob(job.id, { timeoutMs: opts.timeoutMs ?? 15 * 60_000, onProgress: opts.onProgress });
   }
   images(backend: string): Promise<OsImage[]> { return this.request('GET', `/v1/backends/${enc(backend)}/images`); }
   async installImage(backend: string, image: string, opts: WaitOptions = {}): Promise<Job> {

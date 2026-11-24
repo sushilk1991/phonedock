@@ -157,3 +157,33 @@ Use throwaway copies and a throwaway key. Never use /Applications/PhoneDock.app 
 Copies that aren't Developer ID signed are checked for the same identifier and a valid signature only. The team check
 needs real Developer ID builds, so check it on the first real release: update a copy of the previous release from the
 live feed. (Done for 0.2.2 → 0.2.3 on 2026-11-05: no password prompt, about 3 s from Update to the relaunched app.)
+
+## Bumping managed component pins
+
+Managed components (`ios-tools` for Python 3.12 + `pymobiledevice3`, and `axe` for iOS simulator control) are pinned in
+`tools/components.json` and `tools/ios-tools.lock`. `scripts/build-app.sh` bundles both into `PhoneDock.app`. When a
+new PhoneDock release changes a pin, existing installs keep using their previous verified key in the background until
+the new key downloads, verifies its SHA-256 and self-checks cleanly.
+
+Use `scripts/update-components.mjs` to update pins:
+
+```sh
+# Validate the current manifest and lock against PyPI timestamps and SHA-256s
+node scripts/update-components.mjs --check
+
+# Bump AXe (must be at least 14 days old)
+node scripts/update-components.mjs --axe <version>
+
+# Bump pymobiledevice3 and/or python-build-standalone (recompiles tools/ios-tools.lock with --universal --exclude-newer)
+node scripts/update-components.mjs --pymd3 <version> --python-release <tag> --python-version <ver>
+```
+
+Supply-chain rules enforced by the script:
+- **14-day age gate across the entire lock:** every release (the Python tarball, AXe, `pymobiledevice3`, and every
+  transitive package in `tools/ios-tools.lock`) must be at least 14 days old.
+- **Explicit exceptions:** if a newer release is required (e.g. a hardware fix), pass
+  `--allow-recent "<reason>"` (and `--allow-recent-pkg <pkg1,pkg2>` for any transitive dependencies newer than the
+  cutoff). The cutoff and every exception are recorded in `tools/components.json`.
+- **Single universal lock:** `tools/ios-tools.lock` is compiled with `uv pip compile --universal --python-version 3.12
+  --generate-hashes --only-binary :all:` and consumed by both users (macOS) and `.github/workflows/test.yml`. After
+  bumping, verify with `node scripts/update-components.mjs --check`, `npx tsc --noEmit -p .`, and `npm test`.

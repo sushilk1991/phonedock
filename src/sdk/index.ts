@@ -17,4 +17,5 @@ export type {
   CrashReport, ElementMatch, Handoff, HandoffState, PromptButton, PromptKind, SystemPrompt, TapSelector,
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
+  ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
 } from './client.ts';

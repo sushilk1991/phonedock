@@ -14,9 +14,10 @@ import { basename, dirname, join } from 'node:path';
 import { run, runBuffer, type RunOptions } from '../core/exec.ts';
 import { assertInputFence } from '../core/input-fence.ts';
 import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
+import { getComponentManager } from '../core/components.ts';
 import {
   PhoneDockError,
-  type AppInfo, type Availability, type Backend, type Capability, type CrashReport, type Device, type DeviceState, type KeyName,
+  type AppInfo, type Availability, type Backend, type Capability, type ComponentStatus, type CrashReport, type Device, type DeviceState, type KeyName,
   type LaunchOptions, type ScreenInfo, type UiElement, type UiTree,
 } from '../core/types.ts';
 import { hasLaunchOptions, iosLaunchArgv, iosPrefixedEnv } from '../core/launch-options.ts';
@@ -83,6 +84,10 @@ async function ensureNative(udid: string): Promise<boolean> {
     const d = await findDev(dc).catch(() => undefined);
     const v = (d as any)?.deviceProperties?.osVersionNumber;
     if (v) osByUdid.set(dc, String(v));
+  }
+  const osv = osByUdid.get(dc);
+  if (iosMajor(osv) >= 27) {
+    try { getComponentManager().triggerAuto('ios-tools'); } catch { /* ignore */ }
   }
   const ok = nativeInput(udid);
   if (ok) axWarm(dc);
@@ -290,16 +295,32 @@ export async function wdaStatus(base: string, timeoutMs = 2500, fresh = false): 
  * The error when this iPhone has no input path. iOS 27+ is controlled natively, with no WebDriverAgent. It only lands
  * here when this Mac is missing what that path runs on, so name that instead of pointing at WebDriverAgent.
  */
-export function noControlError(udid: string, osVersion: string | undefined, tools: { pymd3: boolean; hid: boolean }): PhoneDockError {
+export function noControlError(
+  udid: string,
+  osVersion: string | undefined,
+  tools: { pymd3: boolean; hid: boolean; component?: ComponentStatus },
+): PhoneDockError {
   if (iosMajor(osVersion) >= 27 && (!tools.pymd3 || !tools.hid)) {
-    return tools.pymd3
-      ? new PhoneDockError('PhoneDock can’t control this iPhone', 'not_supported', 501, ['Reinstall PhoneDock: its iPhone input helper is missing.'],
-        `iOS ${osVersion} is controlled natively, but tools/pd-ios-hid.py wasn't found next to PhoneDock.`)
-      : new PhoneDockError('PhoneDock can’t control this iPhone yet', 'not_supported', 501,
-        ['Install pymobiledevice3 on this Mac: uv tool install --python 3.12 pymobiledevice3'],
-        `iOS ${osVersion} is controlled natively (taps, keys, typing and live video over USB or Wi-Fi), which needs pymobiledevice3 ` +
-        'in a Python 3.11 or later environment. PhoneDock looks for the pymobiledevice3 command on PATH and for uv or pipx installs, ' +
-        'or set PHONEDOCK_PYMD3_PYTHON to its Python. No restart is needed.');
+    if (tools.pymd3) {
+      return new PhoneDockError('PhoneDock can’t control this iPhone', 'not_supported', 501,
+        ['Reinstall PhoneDock: its iPhone input helper is missing.'],
+        `iOS ${osVersion} is controlled natively, but tools/pd-ios-hid.py wasn't found next to PhoneDock.`);
+    }
+    const st = tools.component;
+    if (st?.state === 'installing') {
+      const pct = st.progress?.percent !== undefined ? ` (${st.progress.percent}%)` : '';
+      return new PhoneDockError(`PhoneDock is setting up iPhone control${pct}`, 'not_supported', 501,
+        ['Wait a moment for setup to finish, then try again.'],
+        `iOS ${osVersion} is controlled natively (taps, keys, typing and live video over USB or Wi-Fi). PhoneDock is setting up iPhone control (${st.progress?.phase ?? 'installing'}${pct}).`);
+    }
+    if (st?.state === 'failed') {
+      return new PhoneDockError('Couldn’t set up iPhone control', 'not_supported', 501,
+        ['Retry setup in PhoneDock Settings › Advanced › Components, or run `phonedock components install ios-tools`.'],
+        `iOS ${osVersion} is controlled natively, but setup failed: ${st.error?.message ?? 'unknown error'}${st.error?.detail ? `\n${st.error.detail}` : ''}`);
+    }
+    return new PhoneDockError('PhoneDock can’t control this iPhone yet', 'not_supported', 501,
+      ['Run `phonedock components install ios-tools` or install iPhone Control in PhoneDock Settings › Advanced › Components.'],
+      `iOS ${osVersion} is controlled natively (taps, keys, typing and live video over USB or Wi-Fi), which needs PhoneDock’s iPhone Control component (Python 3.12 + pymobiledevice3). No restart is needed.`);
   }
   return new PhoneDockError('Could not control or inspect the iPhone', 'not_supported', 501, ['Set up WebDriverAgent on the iPhone.'], wdaDetail(udid));
 }
@@ -342,7 +363,14 @@ async function wda(udid: string): Promise<{ base: string; session: () => Promise
   const base = wdaUrl(udid);
   if (!base) {
     let dc: string | undefined; try { dc = dcId(udid); } catch { /* not connected: no OS to go by */ }
-    throw noControlError(udid, (dc && osByUdid.get(dc)) || osByUdid.get(udid), { pymd3: !!pymd3Python(), hid: !!hidScript() });
+    const osv = (dc && osByUdid.get(dc)) || osByUdid.get(udid);
+    let comp: ComponentStatus | undefined;
+    try {
+      const mgr = getComponentManager();
+      if (iosMajor(osv) >= 27) mgr.triggerAuto('ios-tools');
+      comp = mgr.status('ios-tools');
+    } catch { /* ignore */ }
+    throw noControlError(udid, osv, { pymd3: !!pymd3Python(), hid: !!hidScript(), component: comp });
   }
   return {
     base,
@@ -768,8 +796,20 @@ export const backend: Backend & {
     if (!developerDir()) return { ok: false, reason: 'Xcode not found (devicectl ships with Xcode 15+)' };
     const r = await run('xcrun', ['devicectl', '--version'], { env: toolEnv(), allowFail: true, timeoutMs: 30_000 }).catch(() => undefined);
     if (!r || r.code !== 0) return { ok: false, reason: 'xcrun devicectl not available', hints: ['Install Xcode 15 or newer'] };
-    const hints: string[] = ['iPhones on iOS 27 or later work over USB or Wi-Fi with nothing installed on the phone (touch, keyboard, UI tree, screenshots, apps). Older iOS: screenshots, recording, crash logs, app data, location and install/launch via devicectl; input and the UI tree need WebDriverAgent (set PHONEDOCK_WDA_URL; see docs/IPHONE-WIFI.md)'];
-    return { ok: true, version: `devicectl ${r.stdout.trim()}`, hints };
+    let comp: ComponentStatus | undefined;
+    try { comp = getComponentManager().status('ios-tools'); } catch { /* ignore */ }
+    let version = `devicectl ${r.stdout.trim()}`;
+    const hints: string[] = [];
+    if (comp?.state === 'installing') {
+      const pct = comp.progress?.percent !== undefined ? ` (${comp.progress.percent}%)` : '';
+      version += ` · PhoneDock is setting up iPhone control${pct}`;
+      hints.push(`PhoneDock is setting up iPhone control${pct}`);
+    } else if (comp?.state === 'failed') {
+      version += ' · iPhone control setup failed';
+      hints.push(`Couldn’t set up iPhone control: ${comp.error?.message ?? 'install failed'}. Retry with: phonedock components install ios-tools`);
+    }
+    hints.push('iPhones on iOS 27 or later work over USB or Wi-Fi with nothing installed on the phone (touch, keyboard, UI tree, screenshots, apps). Older iOS: screenshots, recording, crash logs, app data, location and install/launch via devicectl; input and the UI tree need WebDriverAgent (set PHONEDOCK_WDA_URL; see docs/IPHONE-WIFI.md)');
+    return { ok: true, version, hints };
   },
 
   async listDevices(): Promise<Device[]> {
@@ -786,7 +826,12 @@ export const backend: Backend & {
       const ws = url ? await wdaStatus(url) : undefined;
       const readiness = cachedReadiness(d);
       const osv = s.osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
-      if (osv) osByUdid.set(udid, String(osv));
+      if (osv) {
+        osByUdid.set(udid, String(osv));
+        if (iosMajor(String(osv)) >= 27) {
+          try { getComponentManager().triggerAuto('ios-tools'); } catch { /* ignore */ }
+        }
+      }
       out.push({
         id: `${ID}:${udid}`, backend: ID, nativeId: udid,
         name: cf?.name ?? ds.name ?? h.marketingName ?? udid,

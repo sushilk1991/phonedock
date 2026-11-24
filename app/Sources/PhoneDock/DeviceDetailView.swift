@@ -172,6 +172,60 @@ private struct AsleepHint: View {
     }
 }
 
+/// Bottom-of-screen capsule for an iOS 27+ iPhone whose native control component (`ios-tools`) isn't ready yet.
+/// Covers all three non-ready states: installing (with progress), failed (with Retry), and missing (with Install).
+private struct IosControlSetupCapsule: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.colorScheme) private var scheme
+    let status: ComponentStatus
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs) {
+            switch status.state {
+            case "installing":
+                ProgressView().controlSize(.mini).id(scheme)
+                let pct = status.progress?.percent.map { " \($0)%" } ?? ""
+                Text("Setting up iPhone control…\(pct)")
+                    .font(Theme.Fonts.callout.monospacedDigit())
+                    .foregroundStyle(Theme.Ink.primary)
+            case "failed":
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Theme.Status.error)
+                    .accessibilityHidden(true)
+                Text("Couldn’t set up iPhone control")
+                    .font(Theme.Fonts.callout)
+                    .foregroundStyle(Theme.Ink.primary)
+                Text("·").foregroundStyle(Theme.Ink.secondary)
+                Button("Retry") { model.installComponent("ios-tools") }
+                    .buttonStyle(.pdLink)
+                    .font(Theme.Fonts.callout)
+                    .testAnchor("Retry iPhone control")
+            default:
+                Image(systemName: "arrow.down.circle")
+                    .foregroundStyle(Theme.Ink.secondary)
+                    .accessibilityHidden(true)
+                Text("Set up iPhone control")
+                    .font(Theme.Fonts.callout)
+                    .foregroundStyle(Theme.Ink.primary)
+                Text("·").foregroundStyle(Theme.Ink.secondary)
+                Button("Install") { model.installComponent("ios-tools") }
+                    .buttonStyle(.pdLink)
+                    .font(Theme.Fonts.callout)
+                    .testAnchor("Install iPhone control")
+            }
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+        .padding(.horizontal, Theme.Space.m)
+        .padding(.vertical, Theme.Space.xs + 1)
+        .background(Theme.Surface.card, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.Line.card, lineWidth: 1))
+        .padding(.horizontal, Theme.Space.s)
+        .accessibilityElement(children: .contain)
+        .testAnchor("ios-control-setup")
+    }
+}
+
 /// Where the device frame sits on the stage. Depends only on the stage size and the device's pixel aspect, never on
 /// what the top or bottom bars show.
 struct StageLayout {
@@ -277,10 +331,17 @@ private struct LiveScreen: View {
                 ReconnectingCapsule().padding(.top, Theme.Space.l)
             }
             if let r = highlight { highlightBox(r) }
-            if frames.asleep, frames.hasPicture {
-                AsleepHint(device: device)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                    .padding(.bottom, Theme.Space.xxl)
+            if showControlSetup || (frames.asleep && frames.hasPicture) {
+                VStack(spacing: Theme.Space.s) {
+                    if let iosTools = iosControlSetupStatus {
+                        IosControlSetupCapsule(status: iosTools)
+                    }
+                    if frames.asleep, frames.hasPicture {
+                        AsleepHint(device: device)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, Theme.Space.xxl)
             }
             if dropTargeted, device.can("install") { dropOverlay }
         }
@@ -298,6 +359,15 @@ private struct LiveScreen: View {
             }
         }
     }
+
+    private var iosControlSetupStatus: ComponentStatus? {
+        guard device.backend == "ios-device", !device.pdIsBeta, device.isRunning,
+              !device.can("video"), !device.can("tap"),
+              let st = model.component("ios-tools"), st.state != "ready" else { return nil }
+        return st
+    }
+
+    private var showControlSetup: Bool { iosControlSetupStatus != nil }
 
     /// UI-tree selection: magenta stroke with a white halo, so it reads on any app's colours.
     private func highlightBox(_ r: CGRect) -> some View {

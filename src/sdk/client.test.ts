@@ -231,3 +231,31 @@ test('input: explicit request ids and result lookup are encoded and validated', 
     assert.match(seen[1], /android-emulator%3Apdtest-mock\/requests\/pdtest-recover$/);
   });
 });
+
+test('components: lists status and installs component job', async () => {
+  const seen: string[] = [];
+  await serve((req, res) => {
+    req.resume(); req.on('end', () => {
+      seen.push(`${req.method} ${req.url}`);
+      res.writeHead(req.method === 'POST' ? 202 : 200, { 'content-type': 'application/json' });
+      if (req.url === '/v1/components') {
+        res.end(JSON.stringify([{ id: 'ios-tools', displayName: 'iPhone Control', description: '', state: 'missing', pinnedVersion: '11.63.1', source: 'none', updateAvailable: false, estimatedBytes: 277000000 }]));
+      } else if (req.url === '/v1/components/ios-tools/install') {
+        res.end(JSON.stringify({ job: { id: 'job-comp-1', kind: 'install-component', state: 'running', progress: [], startedAt: '2026-11-24T00:00:00Z' }, component: { id: 'ios-tools', state: 'installing' } }));
+      } else if (req.url === '/v1/jobs/job-comp-1') {
+        res.end(JSON.stringify({ id: 'job-comp-1', kind: 'install-component', state: 'done', progress: ['done'], startedAt: '2026-11-24T00:00:00Z', endedAt: '2026-11-24T00:00:01Z' }));
+      } else {
+        res.end('{}');
+      }
+    });
+  }, async (baseUrl) => {
+    const c = new PhoneDockClient({ baseUrl, autoStart: false });
+    const list = await c.components();
+    assert.equal(list.length, 1);
+    assert.equal(list[0].id, 'ios-tools');
+    const job = await c.installComponent('ios-tools', { wait: true });
+    assert.equal(job.id, 'job-comp-1');
+    assert.equal(job.state, 'done');
+    assert.deepEqual(seen, ['GET /v1/components', 'POST /v1/components/ios-tools/install', 'GET /v1/jobs/job-comp-1']);
+  });
+});

@@ -237,6 +237,28 @@ final class FrameLoop {
 
     /// Self-test only: freeze the loop and show a frame error as if the backend had failed.
     func injectFailure(_ e: APIError) { stop(); clearPicture(); error = e.localizedDescription; failure = ScreenFailure(e) }
+
+    /// Self-test only: freeze the loop with a clean gradient screen so stage overlays can be verified without a real phone.
+    func injectMockWallpaper(size: CGSize = CGSize(width: 1206, height: 2622)) {
+        stop()
+        let img = NSImage(size: NSSize(width: 402, height: 874), flipped: false) { rect in
+            let g = NSGradient(colors: [
+                NSColor(calibratedRed: 0.10, green: 0.13, blue: 0.22, alpha: 1),
+                NSColor(calibratedRed: 0.16, green: 0.21, blue: 0.34, alpha: 1),
+                NSColor(calibratedRed: 0.09, green: 0.12, blue: 0.19, alpha: 1),
+            ])
+            g?.draw(in: rect, angle: -65)
+            return true
+        }
+        error = nil
+        failure = nil
+        asleep = false
+        deviceSize = size
+        pictureSize = size
+        image = img
+        hasPicture = true
+        jpegSuccess = Date.distantFuture
+    }
 }
 
 /// Handles one video connection's messages on the renderer's queue; tells the FrameLoop (on the main thread) only

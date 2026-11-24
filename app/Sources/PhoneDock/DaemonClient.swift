@@ -130,6 +130,14 @@ struct DaemonClient: Sendable {
 
     func dev(_ id: String, _ suffix: String = "") -> String { "/v1/devices/\(Self.enc(id))\(suffix)" }
 
+    func components() async throws -> [ComponentStatus] {
+        try await get([ComponentStatus].self, "/v1/components", timeout: 15)
+    }
+
+    func installComponent(_ id: String) async throws -> Job {
+        try await sendJob("POST", "/v1/components/\(Self.enc(id))/install")
+    }
+
     func frame(_ id: String, maxSize: Int = 900, etag: String? = nil) async throws -> FrameResult {
         let fetchID = OSSignpostID(log: perfLog)
         let fetchStart = CFAbsoluteTimeGetCurrent()

@@ -207,10 +207,12 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   See [the performance loop](references/recipes.md#performance-loop).
 
 Errors come back as results with a code and hints (`no_match` lists what is on screen; `not_supported` means this
-device can't do that). Report them rather than retrying blindly. Native iOS 27+ appearance, pinch, exact-PID
-foreground detection, logs and transactional Unicode paste have fake/contract tests but no physical-iPhone
-validation in this change. Native sidecars require Python 3.11+; CI uses Python 3.12 with pinned
-`pymobiledevice3==11.49.2` and mandatory fake protocol tests. Missing/ambiguous foreground PID resolution returns
+device can't do that, or that a managed component like `ios-tools` or `axe` is still setting up — check
+`phonedock components` or retry with `phonedock components install`). Report them rather than retrying blindly. Native
+iOS 27+ appearance, pinch, exact-PID foreground detection, logs and transactional Unicode paste have fake/contract tests
+but no physical-iPhone validation in this change. Native sidecars require Python 3.11+ (managed automatically via
+`tools/components.json` and `tools/ios-tools.lock`; CI installs from the same hash lock and runs mandatory fake protocol
+tests). Missing/ambiguous foreground PID resolution returns
 `foreground_unknown`; null means confirmed SpringBoard. Wi-Fi iPhone pairing, automatic DDI mounting and a merged
 sidecar remain unexposed.
 

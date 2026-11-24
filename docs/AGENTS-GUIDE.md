@@ -468,6 +468,8 @@ phonedock audit pdtest-a                 # heuristic UI warnings
 phonedock webview pdtest-a com.example.app --network
 phonedock request-result pdtest-a <requestId>
 phonedock backends                       # which backends work on this Mac
+phonedock components                     # managed component status (ios-tools, axe)
+phonedock components install [id]        # install or update managed components
 phonedock devices                        # or: ls --json
 phonedock create --backend android-emulator --name pdtest-a --profile pixel_9 --boot
 phonedock ui pdtest-a                    # text outline with refs
@@ -569,8 +571,11 @@ The iPhone Duo simulator supports primary-display screenshots, UI reads, media i
 routing was observed to be ineffective: affected input returns `501 not_supported` / `not_sent` and its per-device
 capabilities are removed. Use a single-display model for interaction. Duo streaming and gestures are unvalidated.
 
-Native sidecars need Python 3.11+ in the pymobiledevice3 environment. CI uses Python 3.12 with pinned
-`pymobiledevice3==11.49.2` and mandatory fake sidecar protocol tests. Native foreground detection returns
+Native sidecars need Python 3.11+ in the pymobiledevice3 environment (managed automatically via `ios-tools` in
+`tools/components.json` and `tools/ios-tools.lock`, or manually via `PHONEDOCK_PYMD3_PYTHON` / PATH). CI installs from
+the same `tools/ios-tools.lock` hash lock and runs mandatory fake sidecar protocol tests. While `ios-tools` installs in
+the background, iOS 27+ control calls return `501 not_supported` ("PhoneDock is setting up iPhone control (n%)"); on
+failure they point to `phonedock components install ios-tools`. Native foreground detection returns
 `foreground_unknown` on missing/ambiguous PID resolution; null means confirmed SpringBoard.
 
 Native iOS 27+ appearance, pinch, exact-PID foreground detection, logs and transactional Unicode paste have new

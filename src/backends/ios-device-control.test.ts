@@ -2,17 +2,53 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { noControlError } from './ios-device.ts';
+import type { ComponentStatus } from '../core/types.ts';
 
 const all = { pymd3: true, hid: true };
 
-test('ios-device no-control error: iOS 27 without pymobiledevice3 says to install it, not to set up WebDriverAgent', () => {
-  const e = noControlError('UDID-1', '27.2.1', { pymd3: false, hid: true });
+const baseComp: ComponentStatus = {
+  id: 'ios-tools',
+  displayName: 'iPhone Control',
+  description: 'Python 3.12 + pymobiledevice3',
+  state: 'missing',
+  pinnedVersion: '11.63.1',
+  source: 'none',
+  updateAvailable: false,
+  estimatedBytes: 277_000_000,
+};
+
+test('ios-device no-control error: iOS 27 while ios-tools is installing reports setup progress, not uv or WDA', () => {
+  const e = noControlError('UDID-1', '27.2.1', {
+    pymd3: false,
+    hid: true,
+    component: { ...baseComp, state: 'installing', progress: { phase: 'downloading', percent: 42 } },
+  });
+  assert.equal(e.code, 'not_supported');
+  assert.equal(e.status, 501);
+  assert.equal(e.message, 'PhoneDock is setting up iPhone control (42%)');
+  assert.doesNotMatch(`${e.message} ${e.hints?.join(' ')} ${e.detail}`, /WebDriverAgent|uv tool install/);
+});
+
+test('ios-device no-control error: iOS 27 after ios-tools failure gives a retry hint, not uv or WDA', () => {
+  const e = noControlError('UDID-1', '27.2.1', {
+    pymd3: false,
+    hid: true,
+    component: { ...baseComp, state: 'failed', error: { code: 'download_failed', message: 'Network unreachable' } },
+  });
+  assert.equal(e.code, 'not_supported');
+  assert.equal(e.status, 501);
+  assert.match(e.message, /Couldn’t set up iPhone control/);
+  assert.match(e.hints?.join(' ') ?? '', /phonedock components install ios-tools/);
+  assert.doesNotMatch(`${e.message} ${e.hints?.join(' ')} ${e.detail}`, /WebDriverAgent|uv tool install/);
+});
+
+test('ios-device no-control error: iOS 27 when ios-tools is missing points to phonedock components install', () => {
+  const e = noControlError('UDID-1', '27.2.1', { pymd3: false, hid: true, component: baseComp });
   assert.equal(e.code, 'not_supported');
   assert.equal(e.status, 501);
   assert.match(e.message, /can’t control this iPhone yet/);
-  assert.deepEqual(e.hints, ['Install pymobiledevice3 on this Mac: uv tool install --python 3.12 pymobiledevice3']);
-  assert.doesNotMatch(`${e.message} ${e.hints?.join(' ')} ${e.detail}`, /WebDriverAgent/);
-  assert.match(String(e.detail), /Python 3\.11/);
+  assert.match(e.hints?.join(' ') ?? '', /phonedock components install ios-tools/);
+  assert.doesNotMatch(`${e.message} ${e.hints?.join(' ')} ${e.detail}`, /WebDriverAgent|uv tool install/);
 });
 
 test('ios-device no-control error: iOS 27 with pymobiledevice3 but no input helper says to reinstall PhoneDock', () => {

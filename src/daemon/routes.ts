@@ -63,6 +63,7 @@ r.get('/v1/devices/:id/requests/:requestId', async (c) => {
 r.get('/v1/health', () => ({ ok: true, version: VERSION, pid: process.pid, uptimeSec: Math.round((Date.now() - startedAt) / 1000) }));
 
 let availCache: { at: number; v: unknown[] } | undefined;
+export function invalidateBackendsCache() { availCache = undefined; }
 r.get('/v1/backends', async (c) => {
   if (!availCache || Date.now() - availCache.at > 15_000 || truthy(c.q('refresh'))) {
     const v = await Promise.all(backends.map(async (b) => {
