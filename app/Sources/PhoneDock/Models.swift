@@ -479,6 +479,39 @@ struct JobEnvelope: Decodable, Sendable {
     var job: Job
 }
 
+struct ComponentProgress: Codable, Hashable, Sendable {
+    var phase: String
+    var percent: Int?
+    var bytesDone: Int64?
+    var bytesTotal: Int64?
+    var detail: String?
+}
+
+struct ComponentErrorInfo: Codable, Hashable, Sendable {
+    var code: String
+    var message: String
+    var detail: String?
+}
+
+struct ComponentStatus: Codable, Hashable, Identifiable, Sendable {
+    var id: String
+    var displayName: String
+    var description: String
+    var state: String
+    var pinnedVersion: String
+    var installedVersion: String?
+    var source: String
+    var updateAvailable: Bool
+    var sizeBytes: Int64?
+    var estimatedBytes: Int64
+    var downloadBytes: Int64?
+    var progress: ComponentProgress?
+    var jobId: String?
+    var error: ComponentErrorInfo?
+    var lastAttemptAt: String?
+    var nextRetryAt: String?
+}
+
 struct APIErrorBody: Decodable, Sendable {
     struct Inner: Decodable, Sendable { var code: String?; var message: String?; var hints: [String]?; var detail: String? }
     var error: Inner

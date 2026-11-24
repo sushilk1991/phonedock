@@ -347,6 +347,37 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(seen[4][1], "/v1/runs/2026-11-23T12-00-00-000Z-abcd/export?format=md")
         self.assertEqual((seen[5][0], seen[5][1]), ("POST", "/v1/runs"))
 
+    def test_components_and_install_component(self) -> None:
+        seen = []
+
+        def handle(handler, _body):
+            seen.append((handler.command, handler.path))
+            if handler.path == "/v1/components":
+                return json_reply(handler, [{"id": "axe", "state": "missing", "pinnedVersion": "1.8.0"}])
+            if handler.path == "/v1/components/axe/install":
+                return json_reply(handler, {"job": {"id": "job-axe", "kind": "install-component", "state": "running", "progress": []}, "component": {"id": "axe", "state": "installing"}}, status=202)
+            if handler.path == "/v1/jobs/job-axe":
+                return json_reply(handler, {"id": "job-axe", "kind": "install-component", "state": "done", "progress": []})
+            return json_reply(handler, {"error": {"code": "not_found", "message": "not found"}}, status=404)
+
+        with serve(handle) as url:
+            c = PhoneDock(base_url=url, token="tok", auto_start=False)
+            comps = c.components()
+            self.assertEqual(len(comps), 1)
+            self.assertEqual(comps[0]["id"], "axe")
+            job = c.install_component("axe", wait=True)
+            self.assertEqual(job["id"], "job-axe")
+            self.assertEqual(job["state"], "done")
+            job_no_wait = c.install_component("axe", wait=False)
+            self.assertEqual(job_no_wait["id"], "job-axe")
+
+        self.assertEqual(seen, [
+            ("GET", "/v1/components"),
+            ("POST", "/v1/components/axe/install"),
+            ("GET", "/v1/jobs/job-axe"),
+            ("POST", "/v1/components/axe/install"),
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

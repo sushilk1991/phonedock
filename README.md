@@ -212,14 +212,17 @@ Ask your agent to test a flow once, save it, and run it on every PR.
 ## Requirements
 
 - A Mac with Apple silicon (M1 or later) on macOS 15 or later.
-- **iOS simulators:** Xcode, plus [AXe](https://github.com/cameroncooke/AXe) for input and the UI tree
-  (`brew install cameroncooke/axe/axe`).
+- **iOS simulators:** Xcode. PhoneDock automatically downloads and verifies [AXe](https://github.com/cameroncooke/AXe)
+  (~17 MB on disk) on first simulator use (no Homebrew required; a local `axe` on `PATH` or `PHONEDOCK_AXE` also works).
 - **Android:** the Android SDK command-line tools and emulator (`brew install --cask android-commandlinetools`).
   `scrcpy` and `ffmpeg` are optional (separate windows, recording, live streaming).
-- **iPhones:** Xcode and `pymobiledevice3` (`uv tool install --python 3.12 pymobiledevice3`).
+- **iPhones:** Xcode. On iOS 27+, PhoneDock automatically downloads and verifies its iPhone control component
+  (Python 3.12 + `pymobiledevice3`, ~277 MB on disk) the first time a paired iPhone appears; manual installation
+  (`uv tool install --python 3.12 pymobiledevice3` or `PHONEDOCK_PYMD3_PYTHON`) remains supported as a fallback.
 - **Node.js:** PhoneDock.app includes its own runtime. Running from source needs Node.js 24 or later.
 
-`phonedock backends` shows what's available on your Mac and what's missing.
+`phonedock backends` and `phonedock components` show what's ready on your Mac. Set `PHONEDOCK_COMPONENTS_AUTO=0` to
+disable automatic component downloads (for CI or offline environments).
 
 ## Privacy and security
 

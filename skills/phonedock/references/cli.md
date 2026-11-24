@@ -42,7 +42,10 @@ phonedock release pd-test
 
 `phonedock profiles ios-simulator` and `phonedock profiles android-emulator` list models (Android: `--profile pixel_9`);
 `phonedock images` lists installed OS images (pass one with `--image <id>` if `create` reports `no_image`);
-`phonedock backends` says what works on this Mac. `find <id> <text>` and `scroll-to` exit 1 when nothing matches.
+`phonedock backends` says what works on this Mac; `phonedock components` and `phonedock components install [id]` check
+or install managed runtimes (`ios-tools`, `axe`). If an iOS 27+ iPhone or simulator returns `not_supported` with
+"setting up …", wait for `phonedock components --json` to reach `ready` (or retry with `phonedock components install`).
+`find <id> <text>` and `scroll-to` exit 1 when nothing matches.
 
 ## Save turns: chain steps in one shell call
 

@@ -336,6 +336,14 @@ class PhoneDock:
     def backends(self) -> List[Dict[str, Any]]:
         return self._request("GET", "/v1/backends")
 
+    def components(self) -> List[Dict[str, Any]]:
+        return self._request("GET", "/v1/components")
+
+    def install_component(self, component_id: str, wait: bool = True, timeout: float = 900.0) -> Dict[str, Any]:
+        res = self._request("POST", f"/v1/components/{_q(component_id)}/install")
+        job = res.get("job", res) if isinstance(res, dict) else res
+        return self.wait_job(job["id"], timeout=timeout) if wait else job
+
     def images(self, backend: str) -> List[Dict[str, Any]]:
         return self._request("GET", f"/v1/backends/{_q(backend)}/images")
 

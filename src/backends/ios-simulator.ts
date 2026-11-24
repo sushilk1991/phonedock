@@ -14,9 +14,10 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { run, runBuffer, sleep, waitFor, type RunOptions } from '../core/exec.ts';
 import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
+import { getComponentManager, resolveAxeBinary } from '../core/components.ts';
 import {
   PhoneDockError,
-  type AppInfo, type Availability, type Backend, type BootOptions, type Capability, type CrashReport, type Device, type DeviceSpec,
+  type AppInfo, type Availability, type Backend, type BootOptions, type Capability, type ComponentStatus, type CrashReport, type Device, type DeviceSpec,
   type DeviceState, type ExecResult, type FrameStream, type HardwareProfile, type KeyName, type LaunchOptions, type OsImage,
   type Orientation, type ScreenInfo, type Snapshot, type UiElement, type UiTree,
 } from '../core/types.ts';
@@ -103,9 +104,26 @@ function runtimeUsable(rt: SimRuntime): Promise<boolean> {
 }
 
 function axePath(): string {
-  const p = process.env.PHONEDOCK_AXE ?? which('axe');
-  if (!p) throw new PhoneDockError('Simulator controls are not installed', 'not_supported', 501,
-    ['Install the simulator controls first.'], 'Install AXe: brew install cameroncooke/axe/axe');
+  try { getComponentManager().triggerAuto('axe'); } catch { /* ignore */ }
+  const p = resolveAxeBinary();
+  if (!p) {
+    let st: ComponentStatus | undefined;
+    try { st = getComponentManager().status('axe'); } catch { /* ignore */ }
+    if (st?.state === 'installing') {
+      const pct = st.progress?.percent !== undefined ? ` (${st.progress.percent}%)` : '';
+      throw new PhoneDockError(`PhoneDock is setting up simulator controls${pct}`, 'not_supported', 501,
+        ['Wait a moment for setup to finish, then try again.'],
+        `AXe is currently installing (${st.progress?.phase ?? 'installing'}${pct}).`);
+    }
+    if (st?.state === 'failed') {
+      throw new PhoneDockError('Couldn’t set up simulator controls', 'not_supported', 501,
+        ['Retry setup in PhoneDock Settings › Advanced › Components, or run `phonedock components install axe`.'],
+        `AXe install failed: ${st.error?.message ?? 'unknown error'}${st.error?.detail ? `\n${st.error.detail}` : ''}`);
+    }
+    throw new PhoneDockError('Simulator controls are not installed', 'not_supported', 501,
+      ['Run `phonedock components install axe` or install Simulator Control in PhoneDock Settings › Advanced › Components.'],
+      'Simulator input, UI tree and streaming need AXe (run `phonedock components install axe`, or set PHONEDOCK_AXE).');
+  }
   return p;
 }
 
@@ -1020,7 +1038,10 @@ export const backend: Backend = {
   capabilities: CAPS,
 
   async available() {
-    if (availCache && Date.now() - availCache.at < 30_000) return availCache.v;
+    let axeSt: ComponentStatus | undefined;
+    try { axeSt = getComponentManager().status('axe'); } catch { /* ignore */ }
+    const transient = axeSt?.state === 'installing' || axeSt?.state === 'failed';
+    if (!transient && availCache && Date.now() - availCache.at < 30_000) return availCache.v;
     let v: Availability;
     if (process.platform !== 'darwin') v = { ok: false, reason: 'iOS simulators require macOS' };
     else if (!developerDir()) v = { ok: false, reason: 'Xcode not found', hints: ['Install Xcode from the App Store, then run it once to install the iOS platform'] };
@@ -1029,13 +1050,24 @@ export const backend: Backend = {
       if (!r || r.code !== 0) v = { ok: false, reason: 'xcrun simctl is not usable', hints: ['sudo xcodebuild -runFirstLaunch'] };
       else {
         const x = await run('xcodebuild', ['-version'], { env: toolEnv(), allowFail: true }).catch(() => undefined);
-        const version = x?.stdout.split('\n')[0]?.trim();
+        let version = x?.stdout.split('\n')[0]?.trim() ?? '';
         const hints: string[] = [];
-        if (!(process.env.PHONEDOCK_AXE ?? which('axe'))) hints.push('Install AXe for input, UI tree and streaming: brew install cameroncooke/axe/axe');
-        v = { ok: true, version, hints: hints.length ? hints : undefined, ...(hints.length ? { reason: 'AXe missing: input/uiTree/stream unavailable' } : {}) };
+        let reason: string | undefined;
+        if (axeSt?.state === 'installing') {
+          const pct = axeSt.progress?.percent !== undefined ? ` (${axeSt.progress.percent}%)` : '';
+          version = [version, `PhoneDock is setting up simulator controls${pct}`].filter(Boolean).join(' · ');
+          hints.push(`PhoneDock is setting up simulator controls${pct}`);
+        } else if (axeSt?.state === 'failed') {
+          version = [version, 'Simulator controls setup failed'].filter(Boolean).join(' · ');
+          hints.push(`Couldn’t set up simulator controls: ${axeSt.error?.message ?? 'install failed'}. Retry with: phonedock components install axe`);
+        } else if (!resolveAxeBinary()) {
+          hints.push('Install simulator controls: phonedock components install axe');
+          reason = 'AXe missing: input/uiTree/stream unavailable';
+        }
+        v = { ok: true, version: version || undefined, hints: hints.length ? hints : undefined, ...(reason ? { reason } : {}) };
       }
     }
-    availCache = { at: Date.now(), v };
+    if (!transient) availCache = { at: Date.now(), v };
     return v;
   },
 
@@ -1044,9 +1076,14 @@ export const backend: Backend = {
     const [devs, rts, types] = await Promise.all([rawDevices(), runtimes(), deviceTypes()]);
     const managed = state.read().devices ?? {};
     const out: Device[] = [];
+    let hasRunning = false;
     for (const { runtime, dev } of devs) {
       if (!isIosRuntime(runtime) || dev.isAvailable === false) continue;
+      if (dev.state === 'Booted') hasRunning = true;
       out.push(await toDevice(runtime, dev, rts, types, managed));
+    }
+    if (hasRunning) {
+      try { getComponentManager().triggerAuto('axe'); } catch { /* ignore */ }
     }
     // forget managed entries whose simulator was deleted outside PhoneDock
     const live = new Set(devs.map((d) => d.dev.udid));
@@ -1133,6 +1170,7 @@ export const backend: Backend = {
   },
 
   async boot(udid, opts) {
+    try { getComponentManager().triggerAuto('axe'); } catch { /* ignore */ }
     await findSim(udid);
     await bootAndWait(udid, opts);
   },

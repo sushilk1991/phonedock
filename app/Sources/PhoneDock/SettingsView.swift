@@ -450,6 +450,7 @@ private struct AdvancedSettings: View {
     @State private var showBackends = false
     /// The last refresh of `/v1/backends` since the tab opened failed (a cached list may still be showing).
     @State private var backendsFailed = false
+    @State private var componentsFailed = false
 
     struct NetworkCheck: Equatable {
         var ok: Bool
@@ -504,6 +505,7 @@ private struct AdvancedSettings: View {
                     }
                 }
             }
+            ComponentsSettingsSection(failed: componentsFailed, onReload: loadComponents)
             SettingsSection("Wi-Fi phones") {
                 LocalNetworkWarning()
                 SettingsCard { networkCheck }
@@ -513,7 +515,10 @@ private struct AdvancedSettings: View {
             }
             .environment(\.pdProblemFullWidth, true)
         }
-        .task { await loadBackends() }
+        .task {
+            await loadBackends()
+            await loadComponents()
+        }
         .task(id: diagnosticsCopied) {
             guard diagnosticsCopied else { return }
             try? await Task.sleep(for: .seconds(1.5))
@@ -548,6 +553,11 @@ private struct AdvancedSettings: View {
     private func loadBackends() async {
         backendsFailed = false
         backendsFailed = !(await model.loadBackends())
+    }
+
+    private func loadComponents() async {
+        componentsFailed = false
+        componentsFailed = !(await model.loadComponents())
     }
 
     /// The service is up but didn't list its backends: say so, rather than show a list that may be out of date.
@@ -623,6 +633,9 @@ private struct AdvancedSettings: View {
         lines.append("macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)")
         for b in model.backends {
             lines.append("Backend \(b.id): " + (b.isAvailable ? "ready \(b.availability?.version ?? "")" : "unavailable \(b.availability?.reason ?? "")"))
+        }
+        for c in model.components {
+            lines.append("Component \(c.id): \(c.state) v\(c.installedVersion ?? c.pinnedVersion) (\(c.source))")
         }
         return lines.joined(separator: "\n")
     }

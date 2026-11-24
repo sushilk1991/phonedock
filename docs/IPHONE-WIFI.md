@@ -5,7 +5,7 @@ and older is **Beta**.
 
 | iOS | How | You need |
 |---|---|---|
-| **27 and later** | Directly, with no app on the phone | Developer Mode, one pairing, UI Automation turned on, and `pymobiledevice3` on the Mac |
+| **27 and later** | Directly, with no app on the phone | Developer Mode, one pairing, UI Automation turned on (PhoneDock downloads iPhone control automatically on first use) |
 | 26 and older | Through WebDriverAgent, a test runner you install on the phone | Developer Mode, a USB cable once, an Apple ID for signing, a rebuild every 7 days |
 
 ## iOS 27 and later
@@ -24,11 +24,15 @@ team is needed. It works over USB, or over Wi-Fi when the phone and the Mac are 
      the code it shows.
 3. **Allow control.** On the iPhone, open Settings › **Developer** › **Enable UI Automation**. This is needed
    for taps and typing. Without it, PhoneDock can still show the screen and the UI tree.
-4. **Install pymobiledevice3 on this Mac:** `uv tool install --python 3.12 pymobiledevice3`, or
-   `pipx install --python python3.12 pymobiledevice3`. PhoneDock needs it in Python 3.11 or later; pinning 3.12 keeps
-   uv or pipx from picking an older or a too-new Python. PhoneDock talks to the phone's services through it. Without it,
-   PhoneDock can take screenshots and install and launch apps, but can't tap, type, press keys (Wake, Home) or show
-   live video. PhoneDock picks it up within seconds; no restart is needed.
+4. **iPhone control installs automatically.** The first time PhoneDock sees a paired iOS 27+ iPhone, it downloads a
+   pinned Python 3.12 runtime and `pymobiledevice3` (~277 MB on disk) in the background and verifies every file by
+   SHA-256. That needs an internet connection the first time (and whenever a PhoneDock update bumps the pin). While it
+   sets up, screenshots and app management already work, and the screen switches to live video automatically once setup
+   finishes — no restart needed. You can also trigger or retry it in **Settings › Advanced › Components** or with
+   `phonedock components install ios-tools`.
+   - **Manual fallback:** If you prefer your own install or work offline, `uv tool install --python 3.12 pymobiledevice3`
+     (or `pipx install --python python3.12 pymobiledevice3`, or setting `PHONEDOCK_PYMD3_PYTHON`) still works. Set
+     `PHONEDOCK_COMPONENTS_AUTO=0` to disable automatic downloads.
 
 The first time you connect, PhoneDock mounts Apple's developer disk image on the phone if it's missing. That needs
 an internet connection. Phones already used with Xcode usually have it.
@@ -107,7 +111,8 @@ If something here fails on your phone, please open an issue on GitHub.
 | `developer_mode_off` | Settings › Privacy & Security › Developer Mode › On, then restart the phone |
 | `ui_automation_off` | Settings › Developer › Enable UI Automation |
 | `ios_too_old` | iOS 26 or older: use WebDriverAgent, below |
-| `not_supported` "can’t control this iPhone yet" | Install pymobiledevice3 on this Mac (step 4 above) |
+| `not_supported` "PhoneDock is setting up iPhone control (n%)" | Wait for the automatic setup to finish (check `phonedock components` or Settings › Advanced › Components) |
+| `not_supported` "Couldn’t set up iPhone control" / "can’t control this iPhone yet" | Check your internet connection and retry with `phonedock components install ios-tools` (or Settings › Advanced › Components), or use the manual fallback in step 4 above |
 | `ddi_missing` | The developer disk image couldn't be mounted (it needs internet). Open the phone in Xcode once |
 | `stream_busy` | Another app is showing the phone's screen, or a call, the camera, the microphone or Siri is active |
 | `device_locked` | The phone is locked, so taps, swipes and typing weren't sent (they'd land on the Lock Screen). Unlock it; an agent should ask with `request_human`. Keys such as Home still work |

@@ -500,7 +500,7 @@ export async function pollDevices(fresh = true) {
         logAction(d.id, 'daemon', { action: virtual ? 'device.crashed' : 'device.disconnected', summary: virtual ? `${d.name} stopped unexpectedly` : `${d.name} disconnected` });
         dropLeaseOnStop(d.id);
       }
-      const key = JSON.stringify([d.state, d.name, d.lease, d.error, d.managed, d.handoff?.id ?? null, d.screen?.width ?? null, d.screen?.height ?? null]);
+      const key = JSON.stringify([d.state, d.name, d.lease, d.error, d.managed, d.handoff?.id ?? null, d.screen?.width ?? null, d.screen?.height ?? null, d.capabilities]);
       seen.set(d.id, key);
       if (lastSeen.get(d.id) !== key) emit('device', d);
     }

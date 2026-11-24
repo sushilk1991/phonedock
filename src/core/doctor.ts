@@ -2,6 +2,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { androidSdkRoot, developerDir, javaHome, which } from './paths.ts';
+import { resolveAxeBinary } from './components.ts';
 import { nativeAvailability } from '../backends/ios-native.ts';
 import type { Device } from './types.ts';
 
@@ -41,7 +42,7 @@ export async function buildDoctorReport(deps: DoctorDeps = defaults): Promise<Do
   const sdkOk = pathCheck('android-sdk', sdk, 'Android SDK directory', 'Install the Android SDK or set ANDROID_HOME.');
   const javaOk = pathCheck('java', java, 'Java environment', 'Install a compatible Java runtime for Android SDK tooling.');
   const tool = (id: string, path: string | undefined, hint: string) => pathCheck(id, path, id, hint);
-  const axe = tool('axe', deps.which('axe'), 'Install AXe for iOS simulator input and accessibility.');
+  const axe = tool('axe', deps === defaults ? resolveAxeBinary() : deps.which('axe'), 'Install AXe for iOS simulator input and accessibility (phonedock components install axe).');
   const adb = tool('adb', sdk ? join(sdk, 'platform-tools', 'adb') : deps.which('adb'), 'Install Android SDK platform-tools.');
   const emulator = tool('emulator', sdk ? join(sdk, 'emulator', 'emulator') : undefined, 'Install the Android SDK emulator and a compatible system image.');
   tool('ffmpeg', deps.which('ffmpeg'), 'Install ffmpeg for image comparisons and fallback video processing.');

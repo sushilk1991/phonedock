@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 20
     env:
       PHONEDOCK_NO_AUTOSTART: '1'
+      PHONEDOCK_COMPONENTS_AUTO: '0'
       PHONEDOCK_PORT: '47591'
       PYTHONDONTWRITEBYTECODE: '1'
       PHONEDOCK_REQUIRE_SIDECAR_TESTS: '1'
@@ -33,7 +34,7 @@ jobs:
           python-version: '3.12'
       - run: npm ci
       - name: Sidecar protocol test dependency (no device access)
-        run: python3 -m pip install pymobiledevice3==11.49.2
+        run: python3 -m pip install --isolated --index-url https://pypi.org/simple --require-hashes --only-binary=:all: --no-deps --no-input --disable-pip-version-check -r tools/ios-tools.lock
       - name: Image comparison dependencies
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - run: npx tsc --noEmit -p .

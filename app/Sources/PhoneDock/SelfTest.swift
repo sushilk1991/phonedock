@@ -316,6 +316,30 @@ enum SelfTest {
                              hints: s["hints"] as? [String] ?? [])
             f.injectFailure(e)
             log("#\(i) fakeScreenError")
+        case "fakeComponents":   // {"op":"fakeComponents","components":[...]} (empty/missing clears)
+            guard let m = model else { fail("#\(i) fakeComponents FAIL no model"); return }
+            if let arr = s["components"] as? [[String: Any]],
+               let data = try? JSONSerialization.data(withJSONObject: arr),
+               let decoded = try? JSONDecoder().decode([ComponentStatus].self, from: data) {
+                m.setSelfTestComponents(decoded)
+                log("#\(i) fakeComponents count=\(decoded.count)")
+            } else {
+                m.setSelfTestComponents(nil)
+                log("#\(i) fakeComponents cleared")
+            }
+        case "fakeDevice":       // {"op":"fakeDevice","device":{...}} (missing clears)
+            guard let m = model else { fail("#\(i) fakeDevice FAIL no model"); return }
+            if let obj = s["device"] as? [String: Any],
+               let data = try? JSONSerialization.data(withJSONObject: obj),
+               let decoded = try? JSONDecoder().decode(Device.self, from: data) {
+                m.setSelfTestDevice(decoded)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                if s["mockScreen"] as? Bool == true { frameLoop?.injectMockWallpaper() }
+                log("#\(i) fakeDevice \(decoded.name)")
+            } else {
+                m.setSelfTestDevice(nil)
+                log("#\(i) fakeDevice cleared")
+            }
         case "appearance": // {"op":"appearance","mode":"light"|"dark"|"system"}
             let mode = s["mode"] as? String ?? "system"
             NSApp.appearance = mode == "light" ? NSAppearance(named: .aqua) : mode == "dark" ? NSAppearance(named: .darkAqua) : nil
@@ -565,9 +589,15 @@ enum SelfTest {
             let win = otherWindow("Settings", main: w)
             if background { win?.orderBack(nil) }
             log("#\(i) settings tab=\(s["tab"] as? String ?? "-") window=\(win.map { "\($0.windowNumber) \"\($0.title)\"" } ?? "none")")
-        case "screenshotWindow":   // {"op":"screenshotWindow","path":"…","title":"Settings"}
+        case "screenshotWindow":   // {"op":"screenshotWindow","path":"…","title":"Settings","render":true}
             let path = s["path"] as? String ?? "/tmp/phonedock-window.png"
             guard let win = otherWindow(s["title"] as? String ?? "", main: w) else { fail("#\(i) screenshotWindow FAIL no window"); return }
+            if s["render"] as? Bool == true {
+                win.displayIfNeeded()
+                if render(win, to: path) { log("#\(i) screenshotWindow \(path) window=\(win.windowNumber) (drawn in-process)") }
+                else { fail("#\(i) screenshotWindow FAIL render") }
+                return
+            }
             func capture() -> Int32 {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")

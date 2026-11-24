@@ -14,12 +14,14 @@ import './routes-trace.ts'; // performance traces (same)
 import './routes-notes.ts'; // app notes (same)
 import './routes-environment.ts';
 import './routes-diagnostics.ts';
+import { initComponents, stopComponents } from './routes-components.ts';
 import { refreshAgentSkills } from './skills.ts';
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
 
 const port = DEFAULT_PORT;
 
 loadState();
+initComponents();
 await initBackends();
 for (const t of reapOrphanTraces()) console.log(`[phonedockd] stopped a trace recorder left by an earlier daemon: ${t}`);
 const token = writeDaemonInfo(port, VERSION);
@@ -100,7 +102,7 @@ const shutdown = (sig: string) => {
   if (exiting) return; exiting = true;
   console.log(`[phonedockd] ${sig} – exiting (devices keep running)`); server.close();
   const stopTraces = traces.size ? Promise.race([abortAllTraces(`daemon exiting (${sig})`), new Promise((r) => setTimeout(r, 25_000))]) : Promise.resolve();
-  void stopTraces.finally(() => { closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
+  void stopTraces.finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
 };
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

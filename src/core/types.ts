@@ -659,6 +659,46 @@ export interface Backend {
   abortTrace?(nativeId: string): Promise<void>;
 }
 
+// ── Managed components (GET /v1/components, POST /v1/components/:id/install) ──
+
+export type ComponentId = 'ios-tools' | 'axe';
+export type ComponentState = 'missing' | 'installing' | 'ready' | 'failed';
+export type ComponentPhase = 'queued' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'checking';
+export type ComponentSource = 'managed' | 'override' | 'external' | 'none';
+
+export interface ComponentProgress {
+  phase: ComponentPhase;
+  percent?: number;
+  bytesDone?: number;
+  bytesTotal?: number;
+  detail?: string;
+}
+
+export interface ComponentErrorInfo {
+  code: string;
+  message: string;
+  detail?: string;
+}
+
+export interface ComponentStatus {
+  id: ComponentId;
+  displayName: string;
+  description: string;
+  state: ComponentState;
+  pinnedVersion: string;
+  installedVersion?: string;
+  source: ComponentSource;
+  updateAvailable: boolean;
+  sizeBytes?: number;
+  estimatedBytes: number;
+  downloadBytes?: number;
+  progress?: ComponentProgress;
+  jobId?: string;
+  error?: ComponentErrorInfo;
+  lastAttemptAt?: string;
+  nextRetryAt?: string;
+}
+
 /** How far an input got. 'sent': it reached the device; 'not_sent': nothing reached it (sending it again is safe);
  *  'unknown': it may have reached it (the reply was lost): look at the screen before sending it again. */
 export type Delivery = 'sent' | 'not_sent' | 'unknown';
