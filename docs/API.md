@@ -749,7 +749,7 @@ clone-and-`xcodebuild test`. The causes below are the `error.cause` of a `wda_se
    anything**: PhoneDock's own relaunches use the existing build, and a build that needs signing again (a personal
    team's after 7 days, a new Xcode, `signing_expired`, `signature_invalid`) waits for Set Up (`wda_rebuild_needed`).
 4. *Launch* with `xcodebuild test-without-building -xctestrun <file> -destination id=<hardware udid>`. First the
-   runners on the phone are listed (devicectl, while the build is checked): PhoneDock's own earlier runner (its pid on
+   runners on the phone are listed (devicectl, before any build, so a refusal costs no build): PhoneDock's own earlier runner (its pid on
    the phone, recorded after each launch) is ended; **a runner PhoneDock didn't start is left alone** and the launch
    refused (`wda_foreign_runner`, not retried: Stop Control ends it, then set up again).
    Build/launch failures: `xcode_account_missing`, `bundle_id_unavailable`, `signing_limit`, `device_not_registered`,

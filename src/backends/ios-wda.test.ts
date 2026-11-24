@@ -625,7 +625,7 @@ test('round 4: daemon start leaves a runner it has no record of alone (somebody 
   w.onPhone.add(888);                                    // not PhoneDock's: another Mac's, another tool's
   w.sup.start();
   await w.settle();
-  assert.deepEqual(w.events, ['build'], 'listed, not ended, nothing started');
+  assert.deepEqual(w.events, [], 'listed, not ended; nothing built or started');
   assert.ok(w.onPhone.has(888));
   assert.match(w.sup.info(UDID)?.message ?? '', /already running on this iPhone from somewhere else/);
 });

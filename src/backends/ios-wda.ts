@@ -1394,19 +1394,24 @@ export class WdaSupervisor {
    *  the phone that PhoneDock didn't start is left alone and the launch refused (Stop Control ends it). */
   private async launchNow(udid: string, e: Entry, mayBuild: boolean, onProgress: (l: string) => void): Promise<void> {
     let spawned = false;
+    const foreign = (onPhone: number[]) => {
+      const rec = this.deps.ledger?.record(udid);
+      const ours = new Set([...(rec?.phonePids ?? []), ...(e.own ?? [])]);
+      return !this.stopOwed(rec) && onPhone.some((p) => !ours.has(p));
+    };
+    // A runner from somewhere else refuses the launch before anything is built (as long as listing takes anyway).
+    let onPhone = await this.listRunners(udid);
+    if (foreign(onPhone)) throw foreignRunnerError();
     const t0 = this.deps.now();
-    // What runs on the phone is listed while the build is checked and the address looked up.
-    let listing = this.listRunners(udid);
     let r: Omit<Launched, 'built'>;
     try {
       r = await this.deps.launch(udid, onProgress, {
         signal: e.abort.signal, mayBuild,
         beforeStart: async () => {
-          if (this.deps.now() - t0 > 10_000) listing = this.listRunners(udid);   // a build ran meanwhile: look again
-          const onPhone = await listing;
-          const rec = this.deps.ledger?.record(udid);
-          const ours = new Set([...(rec?.phonePids ?? []), ...(e.own ?? [])]);
-          if (!this.stopOwed(rec) && onPhone.some((p) => !ours.has(p))) throw foreignRunnerError();
+          if (this.deps.now() - t0 > 10_000) {                // a build ran meanwhile: look again
+            onPhone = await this.listRunners(udid);
+            if (foreign(onPhone)) throw foreignRunnerError();
+          }
           if (e.runner || onPhone.length || this.owed(udid)) {
             const left = await this.teardown(udid, e, {});
             if (left !== 0) {
