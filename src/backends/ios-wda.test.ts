@@ -653,3 +653,17 @@ test('preflight and signing failures keep wda_setup_failed with the cause; a fai
     }
   } finally { w.done(); }
 });
+
+test('Stop Control before the launch (an already-aborted setup): cancelled, nothing launched or ended', async () => {
+  const w = world();
+  try {
+    const ac = new AbortController(); ac.abort();
+    const e = await setupPhone(w.d, UDID, {}, () => undefined, { signal: ac.signal }).then(() => undefined, (x) => x as PhoneDockError);
+    assert.equal(e?.cause, 'cancelled');
+    assert.deepEqual([w.builds.length, w.launches.length, w.ended.length], [0, 0, 0]);
+    await ensureBuild(w.d, UDID, cfgA, () => undefined);                                  // with a build: still no launch
+    const e2 = await setupPhone(w.d, UDID, {}, () => undefined, { signal: ac.signal }).then(() => undefined, (x) => x as PhoneDockError);
+    assert.equal(e2?.cause, 'cancelled');
+    assert.equal(w.launches.length, 0);
+  } finally { w.done(); }
+});

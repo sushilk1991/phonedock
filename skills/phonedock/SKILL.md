@@ -168,7 +168,7 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   code `wda_setup_failed` and names what to fix in `cause`: for `team_required` ask which team (`action="teams"`) and
   pass `team`; `xcode_account_missing`, `developer_mode_off`, `not_paired`, `device_locked` and
   `wda_untrusted` are the person's to fix (`request_human` with the hint, then set up again); `wda_running` means
-  WebDriverAgent from somewhere else (another Mac, Xcode) runs on the phone and was left alone: tell the user, and end
+  a WebDriverAgent already runs on the phone (another Mac's, Xcode's, or an earlier one) and was left alone: tell the user, and end
   it with `action="stop"` (Stop Control) only if they ask. Control doesn't come back by
   itself: after the phone or PhoneDock restarts, input says `wda_not_ready`; set up again (about 8 s). Never pass
   `share` (anyone on the Wi-Fi could control the phone) unless the user asks for another Mac to drive it.

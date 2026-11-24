@@ -53,6 +53,7 @@ test('input to a phone set up here goes to the tunnel address devicectl reports 
     assert.equal(e?.code, 'wda_not_ready');
     assert.match(e!.hints![0], /Set Up Control|wda-setup/);
     assert.equal(hits.filter((h) => h.startsWith('POST')).length, sent, 'no input at the old address');
+    assert.equal((await errOf(backend.foregroundApp!(UDID)))?.code, 'wda_not_ready', 'control off: says how to set it up');
 
     // devicectl doesn't list the phone: no input at all.
     fake.scenario.phones = []; fake.save();

@@ -944,10 +944,9 @@ async function controlSetup(id: string, opts: ControlSetupOptions, onProgress: (
 }
 
 /** Stop Control: cancel a setup in flight, end the xcodebuild this service started for the phone, then every
- *  WebDriverAgent runner left on the phone, whoever started it; confirmed when the phone lists none. In that order:
- *  xcodebuild ending first closes its test session on the phone. Round 4 ended both at once, and the next launch's
- *  xcodebuild then took 29–33 s to start WebDriverAgent instead of the 6.5 s measured in round 3, which ended them in
- *  this order. */
+ *  WebDriverAgent runner left on the phone, whoever started it; confirmed when the phone lists none. In that order,
+ *  as round 3 did (its next launch took 6.5 s on a phone): xcodebuild ending first closes its test session. Round 4
+ *  ended both at once and its next launch took 29–33 s; that the order caused it is a guess the hardware run checks. */
 async function controlStop(id: string): Promise<{ udid: string; stopped: boolean; confirmed: boolean }> {
   if (!/^[A-Za-z0-9-]+$/.test(id) || id.startsWith('wda-')) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400);
   const udid = await hardwareUdid(id);
