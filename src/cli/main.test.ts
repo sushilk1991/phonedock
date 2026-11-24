@@ -144,4 +144,3 @@ test('#1: wda-setup says "only from this Mac" only when the result says shared: 
   assert.doesNotMatch(older, /only from this Mac/);
   assert.match(older, /didn’t say whether other Macs/);
 });
-

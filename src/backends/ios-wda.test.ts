@@ -783,4 +783,3 @@ test('#4: Stop signals every xcodebuild started for the phone at once, whatever 
   assert.equal(await stopMacSide(c3, 50, 50), true);
   assert.equal(c3.runners.size, 0);
 });
-

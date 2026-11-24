@@ -1366,4 +1366,3 @@ test('#10: main’s manifest (no "wda") still loads; WebDriverAgent is reported 
     assert.throws(() => mgr.status('wda'), (e: { code?: string }) => e.code === 'component_unavailable');
   } finally { rm(dir, { recursive: true, force: true }); }
 });
-
