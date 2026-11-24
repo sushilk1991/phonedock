@@ -24,8 +24,9 @@ team is needed. It works over USB, or over Wi-Fi when the phone and the Mac are 
      the code it shows.
 3. **Allow control.** On the iPhone, open Settings › **Developer** › **Enable UI Automation**. This is needed
    for taps and typing. Without it, PhoneDock can still show the screen and the UI tree.
-4. **Install pymobiledevice3 on this Mac:** `uv tool install pymobiledevice3` (it needs Python 3.11 or later;
-   `pipx install pymobiledevice3` works too). PhoneDock talks to the phone's services through it. Without it,
+4. **Install pymobiledevice3 on this Mac:** `uv tool install --python 3.12 pymobiledevice3`, or
+   `pipx install --python python3.12 pymobiledevice3`. PhoneDock needs it in Python 3.11 or later; pinning 3.12 keeps
+   uv or pipx from picking an older or a too-new Python. PhoneDock talks to the phone's services through it. Without it,
    PhoneDock can take screenshots and install and launch apps, but can't tap, type, press keys (Wake, Home) or show
    live video. PhoneDock picks it up within seconds; no restart is needed.
 

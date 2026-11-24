@@ -296,7 +296,7 @@ export function noControlError(udid: string, osVersion: string | undefined, tool
       ? new PhoneDockError('PhoneDock can’t control this iPhone', 'not_supported', 501, ['Reinstall PhoneDock: its iPhone input helper is missing.'],
         `iOS ${osVersion} is controlled natively, but tools/pd-ios-hid.py wasn't found next to PhoneDock.`)
       : new PhoneDockError('PhoneDock can’t control this iPhone yet', 'not_supported', 501,
-        ['Install pymobiledevice3 on this Mac: uv tool install pymobiledevice3'],
+        ['Install pymobiledevice3 on this Mac: uv tool install --python 3.12 pymobiledevice3'],
         `iOS ${osVersion} is controlled natively (taps, keys, typing and live video over USB or Wi-Fi), which needs pymobiledevice3 ` +
         'in a Python 3.11 or later environment. PhoneDock looks for the pymobiledevice3 command on PATH and for uv or pipx installs, ' +
         'or set PHONEDOCK_PYMD3_PYTHON to its Python. No restart is needed.');

@@ -10,7 +10,7 @@ test('ios-device no-control error: iOS 27 without pymobiledevice3 says to instal
   assert.equal(e.code, 'not_supported');
   assert.equal(e.status, 501);
   assert.match(e.message, /can’t control this iPhone yet/);
-  assert.deepEqual(e.hints, ['Install pymobiledevice3 on this Mac: uv tool install pymobiledevice3']);
+  assert.deepEqual(e.hints, ['Install pymobiledevice3 on this Mac: uv tool install --python 3.12 pymobiledevice3']);
   assert.doesNotMatch(`${e.message} ${e.hints?.join(' ')} ${e.detail}`, /WebDriverAgent/);
   assert.match(String(e.detail), /Python 3\.11/);
 });

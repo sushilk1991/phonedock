@@ -134,6 +134,9 @@ struct DeviceDetailView: View {
         }
         .onChange(of: device.isRunning) { _, r in if !r { model.asleep.remove(device.id) } }
         .onChange(of: model.connection) { frames.stop(); frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
+        // Video can arrive while the phone is on screen (pymobiledevice3 installed for an iPhone): switch from polled
+        // screenshots to the stream. `run` keeps a running loop as it is, so stop it first.
+        .onChange(of: device.can("video")) { frames.stop(); frames.run(client: model.client, deviceId: device.id, active: device.isRunning, video: device.can("video")) }
         .onDisappear { frames.stop(); model.asleep.remove(device.id) }
     }
 }

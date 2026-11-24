@@ -72,7 +72,7 @@ class HidChannel {
     const py = pymd3Python(); const script = hidScript();
     if (!py || !script) {
       throw new PhoneDockError('iPhone input is unavailable', 'ios_native_unavailable', 501, undefined,
-        'Native iPhone input needs pymobiledevice3 ≥ 11.49 and tools/pd-ios-hid.py. Install: uv tool install pymobiledevice3. Or set PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_IOS_HID_SRC.');
+        'Native iPhone input needs pymobiledevice3 ≥ 11.49 and tools/pd-ios-hid.py. Install: uv tool install --python 3.12 pymobiledevice3. Or set PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_IOS_HID_SRC.');
     }
     // fd 3: the binary video channel (HEVC access units); stdout stays JSON lines
     this.proc = spawn(py, ['-I', '-u', script, '--udid', udid, '--video-fd', '3', ...(opts.noSteal ? ['--no-steal'] : [])],

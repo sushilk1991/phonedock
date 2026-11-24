@@ -119,7 +119,7 @@ class NativeSidecar {
     const py = nativePython();
     const script = nativeSidecarScript();
     if (!py || !script) {
-      return Promise.reject(new PhoneDockError("iPhone control is unavailable", 'sidecar_unavailable', 503, ["Install pymobiledevice3."], ['iOS native control needs pymobiledevice3 (≥ 11.49) and tools/pd-ios-native.py', ...['Install: uv tool install pymobiledevice3 (or pipx install pymobiledevice3)', 'Or set PHONEDOCK_PYMD3_PYTHON to its python']].filter(Boolean).join('\n')));
+      return Promise.reject(new PhoneDockError("iPhone control is unavailable", 'sidecar_unavailable', 503, ["Install pymobiledevice3."], ['iOS native control needs pymobiledevice3 (≥ 11.49) and tools/pd-ios-native.py', ...['Install: uv tool install --python 3.12 pymobiledevice3 (or pipx install --python python3.12 pymobiledevice3)', 'Or set PHONEDOCK_PYMD3_PYTHON to its python']].filter(Boolean).join('\n')));
     }
     this.stderrTail = [];
     const child = spawn(py, ['-I', '-u', script, ...this.argv], { stdio: ['pipe', 'pipe', 'pipe'] });
