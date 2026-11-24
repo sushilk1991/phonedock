@@ -16,6 +16,7 @@ const UDID = '00008020-0000FAKE0000FAKE';
 // devicectl answers from a fake: no unit test reaches a real phone.
 const fake = fakeDevicectl({ phones: [{ udid: UDID, coreDeviceId: '11111111-2222-3333-4444-555555555555', tunnelIp: 'fd00:0:0:1::1' }], runners: { [UDID]: [91] } });
 const { backend, publicConfig } = await import('./ios-device.ts');
+backend.setWdaOwner(true);                // the Mac's WebDriverAgent owner (round 4)
 after(() => { fake.restore(); rmSync(home, { recursive: true, force: true }); });
 
 const cfgFile = join(home, 'ios-device.json');

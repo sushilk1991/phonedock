@@ -19,6 +19,8 @@ import { refreshAgentSkills } from './skills.ts';
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
 
 const port = DEFAULT_PORT;
+/** The app's service listens here (paths.ts's default port). */
+const APP_PORT = 47420;
 
 loadState();
 initComponents();
@@ -78,15 +80,23 @@ server.on('error', (e) => { console.error(`[phonedockd] listen failed: ${(e as E
 server.listen(port, '127.0.0.1', () => {
   console.log(`[phonedockd] v${VERSION} listening on http://127.0.0.1:${port} (pid ${process.pid}); backends: ${backends.map((b) => b.id).join(', ')}`);
   void autoStart();
-  // Older iPhones: relaunch the WebDriverAgent PhoneDock manages (it ended with the previous daemon or a reboot).
-  // A filtered service (tests, CI) never touches physical phones.
-  if (!deviceFilter && process.platform === 'darwin') iosSupervision()?.startWdaSupervisor?.(() => invalidateDevices());
+  // Older iPhones: one service per Mac owns WebDriverAgent on phones: the app's, which just bound port 47420 (only
+  // one process can), or one started with PHONEDOCK_WDA_OWNER=1 for tests and proofs. It relaunches the runners it
+  // manages (they ended with the previous daemon or a reboot); any other service refuses to set up, stop or drive
+  // them. A filtered service (tests, CI) never touches physical phones.
+  const wdaOwner = !deviceFilter && process.platform === 'darwin' && (port === APP_PORT || process.env.PHONEDOCK_WDA_OWNER === '1');
+  if (wdaOwner) {
+    iosSupervision()?.setWdaOwner?.(true);
+    iosSupervision()?.startWdaSupervisor?.(() => invalidateDevices());
+    console.log(`[phonedockd] WebDriverAgent owner on this Mac${port === APP_PORT ? '' : ' (PHONEDOCK_WDA_OWNER=1)'}`);
+  }
   refreshAgentSkills(port).catch((e) => console.error(`[phonedockd] skill refresh failed: ${(e as Error).message}`));
 });
 
 /** The iPhone backend's WebDriverAgent supervisor hooks (through the loaded backend, so a broken module stays non-fatal). */
-function iosSupervision(): { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => Promise<void> } | undefined {
-  return backends.find((b) => b.id === 'ios-device') as { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => Promise<void> } | undefined;
+type IosSupervision = { setWdaOwner?: (owner: boolean) => void; startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => Promise<void> };
+function iosSupervision(): IosSupervision | undefined {
+  return backends.find((b) => b.id === 'ios-device') as IosSupervision | undefined;
 }
 
 async function autoStart() {

@@ -1015,7 +1015,7 @@ export class PhoneDockClient {
   }
   /** Stop Control for an older iPhone: stop WebDriverAgent and stop keeping it running. The phone stays paired and
    *  listed; wdaSetup starts it again with the same team and build. `stopped` is false when nothing was running. */
-  wdaStop(udid: string): Promise<{ ok: boolean; udid: string; stopped: boolean; confirmed: boolean; ownedElsewhere?: true }> {
+  wdaStop(udid: string): Promise<{ ok: boolean; udid: string; stopped: boolean; confirmed: boolean }> {
     return this.request('POST', '/v1/ios/wda-stop', { body: { udid } });
   }
   /** The signing teams Xcode is signed in to on the daemon's Mac (for wdaSetup's `team`). */

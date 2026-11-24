@@ -172,13 +172,31 @@ Management**, tap your Apple ID and tap **Trust**, then press **Retry** in Phone
   shared phone loses it too), and stops keeping it running. It doesn't unpair anything: the phone stays listed, and
   screenshots, apps and installs keep working. Set Up Control starts it again in seconds, with the same build. (Apple's
   **Unpair** in Finder or Xcode is something else: it removes the phone's trust in this Mac.) If the phone can't be
-  reached just then, PhoneDock says so and finishes the job when the phone is back.
+  reached just then, PhoneDock says so, remembers it, and finishes the job when the phone is back (within a day).
 - **Disconnect** (`phonedock disconnect ios-device:<UDID>`) forgets the phone's connection on this Mac. A phone
   PhoneDock manages here is stopped first; anything else (a phone connected by its address, a setup from an earlier
   PhoneDock) is only forgotten, and nothing on the phone is touched.
 - **WebDriverAgent from an earlier setup.** A paired phone that an earlier PhoneDock set up (or that you connected by
   its address) may still run WebDriverAgent on your Wi-Fi. Its Info tab, `phonedock devices` and the MCP device list say
   so: Stop Control ends it (and forgets that old address), Set Up Control makes it private.
+- **Never touches a WebDriverAgent it didn't start**, except when you press Stop Control (or Disconnect a phone it
+  manages). If the phone already runs one from somewhere else (another Mac, Xcode, another tool), Set Up Control
+  says so (`wda_foreign_runner`) and leaves it running; Stop Control ends it, then Set Up Control starts PhoneDock's.
+
+### Who runs it: one PhoneDock per Mac
+
+WebDriverAgent on a phone is set up, started, restarted and stopped by **one PhoneDock service per Mac: the app's**
+(the one on port 47420; only one can listen there, whichever macOS account runs it). Any other PhoneDock service on
+the Mac (a `phonedock daemon` on another port, a test service, a worker, another account's PhoneDock) can list the
+phone, take screenshots and install apps, but refuses to set up, stop, disconnect or drive a phone the app manages
+(`wda_not_owner`), and never starts anything on its own. For tests and proofs a service opts in with
+`PHONEDOCK_WDA_OWNER=1`; use that only for phones the app doesn't manage.
+
+Not supported: two PhoneDock services managing one phone, and one phone managed from two Macs. One Mac sets the phone
+up and shares it; the other connects (below).
+
+Simulators aren't managed: `phonedock ios wda-setup --udid <simulator> --destination 'platform=iOS Simulator,id=<simulator>'`
+starts WebDriverAgent on one as before (any service can), now reachable only from this Mac (127.0.0.1).
 
 ### No Apple ID in Xcode? Use an App Store Connect API key
 
@@ -210,7 +228,8 @@ In the app: ＋ Add Device › Physical Device › Older iPhone? › Set up on a
 (`curl http://<iphone-ip>:8100/status`) but PhoneDock can't (`wda_unreachable`), macOS is blocking PhoneDock from the
 network: allow it in System Settings › Privacy & Security › **Local Network**. If a different iPhone answers at that
 address later (the network gave it the old one's address), PhoneDock shows the connection offline instead of sending
-it your taps; connect again if that's intended.
+it your taps; connect again if that's intended. Before input it checks which iPhone answers at most every 3 s, and
+sends nothing when it can't tell (no answer, or WebDriverAgent says `unknown`).
 
 Agents use the MCP tools `discover_devices` and `connect_device`. The HTTP routes are in [API.md](API.md).
 
@@ -226,7 +245,9 @@ Agents use the MCP tools `discover_devices` and `connect_device`. The HTTP route
 | `wda_untrusted` | Settings › General › VPN & Device Management › your Apple ID › Trust, then Retry |
 | `signature_invalid` | The phone refused the signature: set up control again (PhoneDock rebuilds an older build by itself) |
 | `wda_exposed` | WebDriverAgent answered on the phone's Wi-Fi address while it shouldn't; PhoneDock stopped it. Set up again; report it if it repeats |
-| `busy` | Another setup for this phone, or another PhoneDock on this Mac, runs it. Wait, or stop it there |
+| `busy` | Another setup for this phone is running. Wait for it |
+| `wda_not_owner` | This PhoneDock service isn't the one that runs WebDriverAgent on this Mac: use the app (port 47420) |
+| `wda_foreign_runner` | WebDriverAgent from somewhere else runs on the phone; PhoneDock left it alone. Stop Control ends it, then Set Up Control |
 | `ios_unsupported` | The phone's iOS is older than this Xcode can test (iOS 17 for Xcode 27) |
 | `bundle_id_unavailable`, `signing_limit` | Apple refused the team (a free Apple ID's limits, say). PhoneDock doesn't retry on its own (24 h for a quota): try later or use another team |
 | `wda_unreachable` | Same Wi-Fi, and PhoneDock allowed under Privacy & Security › Local Network |

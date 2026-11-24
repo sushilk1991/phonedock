@@ -125,6 +125,8 @@ enum ControlRetry: Equatable {
     /// The same request again: the phone needed something done (unlock it, trust the developer), not another team.
     case same(team: String?, share: Bool?)
     case stop
+    /// The setup found WebDriverAgent from somewhere else on the phone and left it alone: Stop Control ends it.
+    case stopOther
 }
 
 extension AppModel {
@@ -221,7 +223,9 @@ extension AppModel {
                 if Self.carriesOnCodes.contains(code), live?.waitsOnPerson == true {
                     controlSetups[device.id] = nil
                 } else {
-                    let again: ControlRetry = share != nil || Self.phoneSideCodes.contains(code) ? .same(team: team, share: share) : .setUp
+                    // A runner from somewhere else: PhoneDock left it alone, and Stop Control is what ends it.
+                    let again: ControlRetry = code == "wda_foreign_runner" ? .stopOther
+                        : share != nil || Self.phoneSideCodes.contains(code) ? .same(team: team, share: share) : .setUp
                     controlSetups[device.id] = .failed(Self.controlProblem(end), retry: again)
                 }
             } catch is CancellationError {
@@ -252,14 +256,9 @@ extension AppModel {
                 await refresh()
                 // Stopped on this Mac either way; say so when the runner on the iPhone couldn't be confirmed gone.
                 let r = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-                if r?["ownedElsewhere"] as? Bool == true {
-                    controlSetups[device.id] = .failed(FriendlyError(title: "Another PhoneDock runs control for this iPhone",
-                        message: "Stop it in that PhoneDock; this one left it running."), retry: .stop)
-                    return
-                }
                 if r?["confirmed"] as? Bool == false {
                     controlSetups[device.id] = .failed(FriendlyError(title: "Control stopped on this Mac",
-                        message: "PhoneDock couldn’t confirm it also stopped on the iPhone. Keep the iPhone connected and press Try Again."), retry: .stop)
+                        message: "PhoneDock couldn’t confirm it also stopped on the iPhone. Keep the iPhone connected and press Stop Control again."), retry: .stop)
                     return
                 }
                 controlSetups[device.id] = .stopped
@@ -276,7 +275,7 @@ extension AppModel {
         switch retry {
         case .setUp: beginControlSetup(device)
         case .same(let team, let share): startControlSetup(device, team: team, share: share)
-        case .stop: stopControl(device)
+        case .stop, .stopOther: stopControl(device)
         }
     }
 
@@ -320,6 +319,12 @@ extension AppModel {
         case "no_device":
             p.title = "Can’t reach the iPhone"
             p.message = "Plug it in by USB, or wake it on the same Wi-Fi as this Mac, then press Try Again."
+        case "wda_foreign_runner":
+            p.title = "WebDriverAgent from somewhere else is running"
+            p.message = "PhoneDock left it alone: another Mac, Xcode or another tool may be using it. Stop Control ends it; then set up control again."
+        case "wda_not_owner":
+            p.title = "Another PhoneDock service runs control"
+            p.message = "Set up control in the PhoneDock app on this Mac."
         default:
             break
         }
@@ -354,7 +359,7 @@ struct ControlSetupPanel: View {
             case .stopped:
                 ConnectStatusView(status: .ok("Control stopped")).testAnchor("control-stopped")
             case .failed(let p, let again):
-                ProblemView(problem: p, retry: { model.retryControl(device, again) },
+                ProblemView(problem: p, retryTitle: again == .stop || again == .stopOther ? "Stop Control" : "Try Again", retry: { model.retryControl(device, again) },
                             otherTitle: "Dismiss", other: { model.dismissControlSetup(device) })
                     .testAnchor("control-setup-problem")
             case nil:

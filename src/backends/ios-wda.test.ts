@@ -355,7 +355,6 @@ function buildFixture() {
     endpoint: async () => ({ host: TUNNEL_IP, lanName: 'Old-iPhone.local' }),
     getJson: async () => ({ value: { ready: true, ios: { ip: WIFI_IP } } }),
     probe: async (host, port) => probes.get(`${host}:${port}`) ?? 'refused',
-    lockPollMs: 5,
   };
   return {
     root, d, builds, launches, kids, launchEnvs, probes,
@@ -537,9 +536,8 @@ function world(opts: { managed?: string[] } = {}) {
   let nextLaunch: (() => Promise<{ runner: FakeRunner; url: string }>) | undefined;
   let buildGate: Promise<void> | undefined;
   const events: string[] = [];
-  const claimsHeld = new Map<string, number>();
   const records = new Map<string, 'clean' | 'pending'>();
-  let otherOwner: number | undefined;
+  const phonePids = new Map<string, number[]>();
   const deps: SupervisorDeps = {
     now: () => now,
     managed: () => [...managed],
@@ -554,17 +552,19 @@ function world(opts: { managed?: string[] } = {}) {
       await ctl.beforeStart();
       events.push('start');
       const r = new FakeRunner(5000 + runners.length, now); runners.push(r);
-      ctl.onSpawn(r.pid, '/x/WebDriverAgentRunner_iphoneos27.2-arm64.xctestrun');
+      ctl.onSpawn(r.pid, { phase: 'launch', destination: `id=${UDID}`, exited: r.exited });
       onPhone.add(r.pid);
       const url = `http://[${TUNNEL_IP}]:8100`;
       void r.exited.then(() => answering.delete(url));    // a dead runner's address stops answering
       return { runner: r, url };
     },
-    stopOnPhone: async () => { events.push('stopOnPhone'); onPhone.clear(); return 0; },
+    runners: async () => [...onPhone],
+    // Round 4: PhoneDock's own runner by its pid; every one only on a person's Stop.
+    stopOnPhone: async (_u, x) => { events.push('stopOnPhone'); for (const p of [...onPhone]) if (!x?.pids || x.pids.includes(p)) onPhone.delete(p); return 0; },
     ledger: {
-      lock: (u: string) => { if (otherOwner !== undefined) return false; claimsHeld.set(u, 1); return true; },
-      release: (u: string) => { claimsHeld.delete(u); },
-      mark: (u: string) => { records.set(u, 'pending'); }, clean: (u: string) => { records.set(u, 'clean'); },
+      mark: (u: string, r?: { phonePids?: number[] }) => { records.set(u, 'pending'); if (r?.phonePids) phonePids.set(u, r.phonePids); },
+      clean: (u: string) => { records.set(u, 'clean'); phonePids.delete(u); },
+      record: (u: string) => (records.has(u) ? { udid: u, state: records.get(u)!, ...(phonePids.has(u) ? { phonePids: phonePids.get(u) } : {}) } : undefined),
       state: (u: string) => records.get(u),
       pending: () => [...records].filter(([, v]) => v === 'pending').map(([udid]) => ({ udid, state: 'pending' as const })),
     },
@@ -574,14 +574,13 @@ function world(opts: { managed?: string[] } = {}) {
     personBackoffMs: [30_000, 60_000], maxPersonAttempts: 3, minUptimeMs: 60_000, stopWaitMs: 200, autoTick: false });
   const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
   return {
-    sup, deps, managed, answering, phones, runners, launches, signals, events, settle, onPhone, claimsHeld,
+    sup, deps, managed, answering, phones, runners, launches, signals, events, settle, onPhone, records, phonePids,
     advance(ms: number) { now += ms; },
     get now() { return now; },
     failNext(err: PhoneDockError) { nextLaunch = async () => { nextLaunch = undefined; throw err; }; },
     failAlways(err: PhoneDockError) { nextLaunch = async () => { throw err; }; },
     launchWith(f: () => Promise<{ runner: FakeRunner; url: string }>) { nextLaunch = f; },
     succeed() { nextLaunch = undefined; },
-    ownedElsewhere(pid: number | undefined) { otherOwner = pid; },
     gate() { let open!: () => void; buildGate = new Promise((r) => { open = r; }); return () => { buildGate = undefined; open(); }; },
     async tickAfter(ms: number) { now += ms; await sup.tick(); await this.settle(); },
   };
@@ -603,22 +602,32 @@ test('nothing launches before start(): a filtered or stopped service only report
   assert.equal(w.sup.isStarted, false);
 });
 
-test('daemon start ends any runner left on the phone, then starts its own (nothing is adopted); stop() ends both', async () => {
+test('daemon start ends its own runner left on the phone (by its recorded pid), then starts a new one; stop() ends that', async () => {
   const w = world();
-  w.onPhone.add(999);                                    // an orphan from an earlier service, maybe exposed
+  w.onPhone.add(999);                                    // the previous daemon's runner (it died), maybe exposed
+  w.records.set(UDID, 'pending'); w.phonePids.set(UDID, [999]);
   w.answering.add(`http://[${TUNNEL_IP}]:8100`);
   w.sup.start();
   await w.settle();
-  assert.deepEqual(w.events, ['stopOnPhone', 'build', 'start'], 'the orphan is ended first; the phone, then known clean, isn’t listed again');
+  assert.deepEqual(w.events, ['stopOnPhone', 'build', 'start'], 'its own leftover is ended first');
   assert.ok(!w.onPhone.has(999));
   assert.equal(w.sup.boundUrl(UDID)?.url, URL_A);
   assert.equal(w.sup.info(UDID)?.state, 'running');
   assert.equal(w.sup.info(UDID)?.shared, false);
   await w.sup.stop();
   assert.equal(w.runners[0].kills, 1, 'xcodebuild stopped');
-  assert.equal(w.events.at(-1), 'stopOnPhone', 'and the runner on the phone, after xcodebuild');
+  assert.equal(w.events.at(-1), 'stopOnPhone', 'and the runner on the phone, by its pid');
   assert.equal(w.onPhone.size, 0);
-  assert.equal(w.claimsHeld.size, 0, 'claim released');
+});
+
+test('round 4: daemon start leaves a runner it has no record of alone (somebody else’s) and says so', async () => {
+  const w = world();
+  w.onPhone.add(888);                                    // not PhoneDock's: another Mac's, another tool's
+  w.sup.start();
+  await w.settle();
+  assert.deepEqual(w.events, ['build'], 'listed, not ended, nothing started');
+  assert.ok(w.onPhone.has(888));
+  assert.match(w.sup.info(UDID)?.message ?? '', /already running on this iPhone from somewhere else/);
 });
 
 test('one launcher per phone: concurrent triggers share one launch; setup waits, then restarts once', async () => {
@@ -649,7 +658,7 @@ test('setup builds before it stops the running WebDriverAgent; a failed build le
   assert.ok(first.alive(), 'still serving during the build');
   open(); await s;
   assert.equal(first.kills, 1);
-  assert.deepEqual(w.events, ['stopOnPhone', 'build', 'start', 'build', 'stopOnPhone', 'start']);
+  assert.deepEqual(w.events, ['build', 'start', 'build', 'stopOnPhone', 'start'], 'nothing to end at the start (round 4: no record, nothing of ours)');
 
   const second = w.runners[1];
   // A build failure throws before beforeStart: nothing on the phone or the Mac is touched.
@@ -668,7 +677,7 @@ test('a runner that exits is relaunched; a crash loop gives up, even when each r
   await w.settle();
   assert.equal(w.sup.info(UDID)?.state, 'retrying');
   assert.equal(w.sup.info(UDID)?.attempts, 1);
-  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 2, 'the exit is followed by a cleanup on the phone');
+  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 1, 'the exit is followed by a cleanup on the phone (its runner, by pid)');
   await w.tickAfter(4_000);
   assert.equal(w.launches.length, 1, 'not before the pause');
   await w.tickAfter(1_000);
@@ -732,7 +741,7 @@ test('launch failures retry with backoff, bounded', async () => {
   await w.tickAfter(1_000);
   assert.equal(w.launches.length, 3);
   assert.equal(w.sup.info(UDID)?.state, 'failed');
-  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 1, 'cleaned once; launches that never started xcodebuild leave nothing to end');
+  assert.equal(w.events.filter((x) => x === 'stopOnPhone').length, 0, 'launches that never started xcodebuild leave nothing to end (round 4: nothing recorded, nothing ended)');
 });
 
 test('/status going quiet relaunches; quiet while the phone is away only waits (uncounted)', async () => {

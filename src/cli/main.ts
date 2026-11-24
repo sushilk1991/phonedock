@@ -1001,8 +1001,7 @@ export async function run(argv: string[]): Promise<number> {
       if (p[1] === 'wda-stop') {
         const udid = str(a.flags, 'udid') ?? p[2]; if (!udid) usage('Missing --udid <id>');
         const r = await c.wdaStop(udid);
-        const onPhone = r.ownedElsewhere ? ' Another PhoneDock service on this Mac runs it, so the runner on the iPhone was left alone.'
-          : r.confirmed ? '' : ' PhoneDock couldn’t confirm the runner on the iPhone stopped (is it connected?); it ends it next time it can.';
+        const onPhone = r.confirmed ? '' : ' PhoneDock couldn’t confirm the runner on the iPhone stopped (is it connected?); it ends it next time it can.';
         out(r, () => (r.stopped
           ? `Stopped control on ${udid}. The iPhone stays paired and listed (screenshots, apps, installs). \`phonedock ios wda-setup --udid ${udid}\` starts it again with the same build.`
           : `PhoneDock wasn’t managing control on ${udid}.${r.confirmed ? ' No WebDriverAgent runner is left on the iPhone.' : ''}`) + onPhone);

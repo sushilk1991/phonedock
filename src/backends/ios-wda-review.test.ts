@@ -21,12 +21,12 @@ const COREDEVICE_ID = '11111111-2222-3333-4444-555555555555';
 const TEAM_A = 'AAAAA11111', TEAM_B = 'BBBBB22222';
 const TUNNEL = 'fd00:0:0:1::1', WIFI = '192.0.2.10';
 const cfgA: WdaConfig = { team: TEAM_A, free: false, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
-/** An in-memory WdaLedger (the phone's claim and its cleanup record). */
-function memLedger(o: { owned?: boolean } = {}) {
+/** An in-memory WdaLedger (the phone's cleanup record). */
+function memLedger() {
   const records = new Map<string, 'clean' | 'pending'>();
   return {
-    lock: () => !o.owned, release: () => undefined,
     mark: (u: string) => { records.set(u, 'pending'); }, clean: (u: string) => { records.set(u, 'clean'); },
+    record: (u: string) => (records.has(u) ? { udid: u, state: records.get(u)! } : undefined),
     state: (u: string) => records.get(u), pending: () => [...records].filter(([, v]) => v === 'pending').map(([udid]) => ({ udid, state: 'pending' as const })),
   };
 }
@@ -99,7 +99,6 @@ function fixture(o: { prints?: (env: NodeJS.ProcessEnv) => string } = {}) {
     endpoint: async () => ({ host: TUNNEL }),
     getJson: async () => ({ value: { ready: true, ios: { ip: WIFI } } }),
     probe: async (host, port) => probes.get(`${host}:${port}`) ?? 'refused',
-    lockPollMs: 5,
   };
   return {
     root, d, builds, envs, kids, probes,
@@ -162,28 +161,7 @@ test('#2: the address used is always this phone’s tunnel (from devicectl), nev
 
 // ── #3 ────────────────────────────────────────────────────────────────────
 
-test('#3: a build directory another process is building in is waited for (a kernel lock: nothing to go stale)', async () => {
-  const f = fixture();
-  try {
-    const key = buildKey({ wdaVersion: '16.15.3', artifact: '16.15.3-a232b9faaa47', platform: 'iphoneos', team: TEAM_A, xcodeBuild: '27B52', bundleId: UPSTREAM_RUNNER_BUNDLE_ID });
-    mkdirSync(f.d.buildsDir, { recursive: true });
-    const lock = join(f.d.buildsDir, `.${key}.lock`);
-    // Another PhoneDock process holds the build lock until it is told to stop.
-    const other = spawnChild(process.execPath, ['-e', `require('fs').openSync(${JSON.stringify(lock)}, ${constants.O_RDONLY | constants.O_CREAT | 0x20 | constants.O_NONBLOCK}); console.log('held'); setInterval(() => {}, 1000)`], { stdio: ['ignore', 'pipe', 'inherit'] });
-    await new Promise((r) => other.stdout!.once('data', r));
-    const progress: string[] = [];
-    const p = ensureBuild(f.d, UDID, cfgA, (l) => progress.push(l));
-    await new Promise((r) => setTimeout(r, 60));
-    assert.equal(f.builds.length, 0, 'waits while the other build runs');
-    assert.ok(progress.some((l) => /Waiting for another PhoneDock build/.test(l)));
-    other.kill('SIGKILL');                                 // it died: the kernel dropped its lock
-    const b = await p;
-    assert.equal(b.built, true);
-    assert.ok(existsSync(lock), 'the lock file stays (never unlinked)');
-  } finally { f.cleanup(); }
-});
-
-function supWorld(o: { owned?: boolean } = {}) {
+function supWorld() {
   let now = 1_000_000;
   const launches: string[] = [];
   const managed = new Set([UDID]);
@@ -193,23 +171,13 @@ function supWorld(o: { owned?: boolean } = {}) {
     phone: async (): Promise<PhoneFacts> => ({ found: true, paired: true, reachable: true, developerMode: true, locked: false }),
     launch: async () => { launches.push(UDID); throw new PhoneDockError('x', 'wda_setup_failed', 502); },
     stopOnPhone: async () => { onPhoneStops.push(now); return 0; },
-    ledger: memLedger({ owned: o.owned }),
+    ledger: memLedger(),
     log: () => undefined,
   };
   const sup = new WdaSupervisor(deps, { autoTick: false, maxAttempts: 3, backoffMs: [5_000], stopWaitMs: 200 });
   const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
   return { sup, deps, launches, managed, onPhoneStops, settle, advance(ms: number) { now += ms; }, async tickAfter(ms: number) { now += ms; await sup.tick(); await settle(); } };
 }
-
-test('#3: while another PhoneDock on this Mac owns the phone, this one launches nothing and setup says busy', async () => {
-  const w = supWorld({ owned: true });
-  w.sup.start(); await w.settle();
-  assert.equal(w.launches.length, 0);
-  assert.match(w.sup.info(UDID)!.message, /Another PhoneDock service/);
-  await w.tickAfter(60_000);
-  assert.equal(w.launches.length, 0);
-  await assert.rejects(w.sup.setup(UDID, () => undefined), (e: PhoneDockError) => e.code === 'busy');
-});
 
 // ── #4 ────────────────────────────────────────────────────────────────────
 
@@ -346,7 +314,7 @@ test('#13: only a failure the service took on says it carries on; a preflight re
 test('#3: setup by CoreDevice identifier manages the hardware UDID; a destination naming another device is refused', async () => {
   const w = setupWorld();
   const r = await setupPhone(w.d, COREDEVICE_ID, {}, () => undefined);
-  assert.equal(r.hardwareUdid, UDID);
+  assert.equal((r as { hardwareUdid?: string }).hardwareUdid, UDID);
   assert.ok(w.store.has(UDID) && !w.store.has(COREDEVICE_ID));
   await assert.rejects(setupPhone(w.d, UDID, { destination: 'id=00008020-0000CCCC0000DDDD' }, () => undefined), (e: PhoneDockError) => e.code === 'bad_request');
 });
@@ -396,12 +364,14 @@ test('#10: simulator and device builds never share a product; a re-pinned artifa
     assert.equal((await ensureBuild(f.d, UDID, cfgA, () => undefined)).built, true);
   } finally { f.cleanup(); }
 
+  // Round 4: a simulator's setup is main's again (not supervised); it asks for no signing team.
   const w = setupWorld();
   let asked = false;
   w.d.teams = async () => { asked = true; return []; };
+  w.d.simulator = async () => ({ url: 'http://127.0.0.1:8100' });
   const r = await setupPhone(w.d, UDID, { destination: `platform=iOS Simulator,id=${UDID}` }, () => undefined);
   assert.equal(asked, false, 'no signing team for a simulator');
-  assert.equal(r.team, 'unsigned');
+  assert.equal(r.managed, false);
 });
 
 // ── #11 ───────────────────────────────────────────────────────────────────
@@ -442,7 +412,7 @@ test('#14: xcodebuild that can’t be started at all keeps the exec_failed code'
 
 // ── on the phone: the runner outlives xcodebuild ───────────────────────────
 
-test('FIX-3: Stop ends xcodebuild first, then the runner on the phone, and confirms; a failed confirmation is logged', async () => {
+test('FIX-3: Stop ends xcodebuild and (at the same time, round 4) the runner on the phone, and confirms; a failed confirmation is logged', async () => {
   const order: string[] = [];
   const logs: string[] = [];
   let left = 0;
@@ -514,6 +484,8 @@ test('daemon start ends a leftover runner even while the phone waits for an unlo
     phone: async () => ({ found: true, paired: true, reachable: true, developerMode: true, locked: true }),
     launch: async () => { throw new Error('no launch while locked'); },
     stopOnPhone: async (u) => { stops.push(u); return 0; }, log: () => undefined,
+    // Round 4: the leftover is the previous daemon's own runner, recorded by its pid on the phone.
+    ledger: { ...memLedger(), record: (u: string) => ({ udid: u, state: 'pending' as const, phonePids: [77] }), state: () => 'pending' as const },
   };
   const sup = new WdaSupervisor(deps, { autoTick: false });
   sup.start();
@@ -522,16 +494,12 @@ test('daemon start ends a leftover runner even while the phone waits for an unlo
   assert.deepEqual(stops, [UDID], 'the leftover runner (maybe on the Wi-Fi) is ended without waiting for the unlock');
 });
 
-test('Stop leaves the phone alone when another PhoneDock on this Mac runs it, and says the stop wasn’t confirmed otherwise', async () => {
-  const stops: string[] = [];
+test('Stop says the stop wasn’t confirmed when devicectl can’t tell', async () => {
   const base: SupervisorDeps = {
     now: () => 1, managed: () => [], status: async () => false,
     phone: async () => ({ found: true }), launch: async () => { throw new Error('x'); },
-    stopOnPhone: async (u) => { stops.push(u); return 0; }, log: () => undefined,
+    stopOnPhone: async () => 0, log: () => undefined,
   };
-  const owned = new WdaSupervisor({ ...base, ledger: memLedger({ owned: true }) });
-  assert.equal(await owned.unmanage(UDID), -2);
-  assert.deepEqual(stops, [], 'another service’s runner is not killed');
   const unsure = new WdaSupervisor({ ...base, stopOnPhone: async () => { throw new Error('devicectl listed no processes'); } });
   assert.equal(await unsure.unmanage(UDID), -1, 'no answer is not "confirmed gone"');
 });

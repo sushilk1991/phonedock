@@ -811,7 +811,7 @@ type IosConnector = {
   discover: () => Promise<unknown[]>;
   wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string; share?: boolean }, p?: (l: string) => void) => Promise<unknown>;
   wdaTeams: () => Promise<unknown>;
-  wdaStop: (udid: string) => Promise<{ udid: string; stopped: boolean; confirmed: boolean; ownedElsewhere?: true }>;
+  wdaStop: (udid: string) => Promise<{ udid: string; stopped: boolean; confirmed: boolean }>;
 };
 function iosBackend(): Backend & IosConnector {
   const b = backends.find((x) => x.id === 'ios-device') as (Backend & Partial<IosConnector>) | undefined;

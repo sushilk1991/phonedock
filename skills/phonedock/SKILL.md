@@ -174,7 +174,9 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   anyone on the Wi-Fi control the phone) unless the user asks for another Mac to drive it. To stop control:
   `phonedock ios wda-stop --udid <nativeId>` (HTTP `POST /v1/ios/wda-stop`; the app's Stop Control). It ends every
   WebDriverAgent on the phone, also one another Mac uses, so only when the user asks, and keeps the phone paired and
-  listed; don't unpair the phone for this. `disconnect` only forgets the connection (and stops it when PhoneDock
+  listed; don't unpair the phone for this. Cause `wda_foreign_runner`: WebDriverAgent from somewhere else (another Mac,
+  Xcode) runs on the phone and PhoneDock left it alone; tell the user, and stop it only if they ask. `wda_not_owner`:
+  only the app's PhoneDock service (port 47420) sets up, stops or drives older iPhones; use that one. `disconnect` only forgets the connection (and stops it when PhoneDock
   manages it here). A device with `notice=` in `list_devices` may still run an earlier WebDriverAgent on the Wi-Fi: tell
   the user (Stop Control ends it, Set Up Control makes it private); don't act on it unasked.
 - **App Store screenshots.** Create the required model (`list_profiles backend="ios-simulator" filter="Pro Max"`),
