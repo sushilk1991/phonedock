@@ -73,6 +73,8 @@ enum Clipboard {
 ///   {"op":"mark","text":"ready-1"}                      logs "MARK ready-1" (sync point for an outside script)
 ///   {"op":"badge","expect":"1"}                         check the Dock badge ("" = none)
 ///   {"op":"fakeScreenError","message":"…","hints":["…"]}   stop the frame loop and show that error
+///   {"op":"fakeControlSetup","device":"ios-device:…","phase":"choose","teams":[…]}  an older iPhone's Set Up Control
+///                                                       state (checking | choose | running | done | failed | none)
 ///   {"op":"fakeBusy","device":"PhoneDock-Pixel","label":"Saving snapshot…"}  show a snapshot/clone in progress
 ///                                                       without running one ("" clears)
 ///   {"op":"activate"}                                   bring the app to the front (active selection styling); skipped
@@ -340,6 +342,23 @@ enum SelfTest {
                 m.setSelfTestDevice(nil)
                 log("#\(i) fakeDevice cleared")
             }
+        case "fakeControlSetup":   // an older iPhone's Set Up Control state without running it (fakes only):
+            // {"op":"fakeControlSetup","device":"ios-device:…","phase":"checking|choose|running|done|failed|none",
+            //  "teams":[{"id":"…","name":"…","free":false}],"line":"Building…","title":"…","message":"…"}
+            guard let m = model, let id = s["device"] as? String else { fail("#\(i) fakeControlSetup FAIL no model/device"); return }
+            switch s["phase"] as? String ?? "none" {
+            case "checking": m.controlSetups[id] = .checking
+            case "choose":
+                let arr = s["teams"] as? [[String: Any]] ?? []
+                let teams = (try? JSONDecoder().decode([WdaTeam].self, from: JSONSerialization.data(withJSONObject: arr))) ?? []
+                m.controlSetups[id] = .chooseTeam(teams)
+            case "running": m.controlSetups[id] = .running(s["line"] as? String ?? "Building WebDriverAgent…")
+            case "done": m.controlSetups[id] = .done
+            case "failed": m.controlSetups[id] = .failed(FriendlyError(title: s["title"] as? String ?? "Couldn’t set up control",
+                                                                      message: s["message"] as? String, details: s["details"] as? String))
+            default: m.controlSetups[id] = nil
+            }
+            log("#\(i) fakeControlSetup \(s["phase"] as? String ?? "none")")
         case "appearance": // {"op":"appearance","mode":"light"|"dark"|"system"}
             let mode = s["mode"] as? String ?? "system"
             NSApp.appearance = mode == "light" ? NSAppearance(named: .aqua) : mode == "dark" ? NSAppearance(named: .darkAqua) : nil

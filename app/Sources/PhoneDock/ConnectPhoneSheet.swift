@@ -89,8 +89,9 @@ struct ConnectPhoneSheet: View {
     @State private var discovering = false
     @State private var discoverProblem: FriendlyError?
 
-    // iPhone: older iOS via WebDriverAgent
+    // iPhone: older iOS via WebDriverAgent (Set Up Control; an address for one another Mac runs)
     @State private var showOlder = false
+    @State private var showAddress = false
     @State private var wdaHost = ""
     @State private var wdaName = ""
     @State private var wdaUdid: String?
@@ -169,6 +170,13 @@ struct ConnectPhoneSheet: View {
         .environment(\.pdProblemFullWidth, true)   // every card spans the column: one right edge
         .fixedSize(horizontal: false, vertical: true)   // height fits the content
         .task { if discovered == nil { discover() } }
+        // An older iPhone waiting for setup: open its section, that's what this sheet is for.
+        .onAppear { if olderPhones.contains(where: \.offersControlSetup) { showOlder = true } }
+    }
+
+    /// Paired iPhones on iOS 26 or older: PhoneDock can set up control for these from this Mac.
+    private var olderPhones: [Device] {
+        model.devices.filter(\.isOlderPairedIphone).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     // MARK: iPhone
@@ -268,41 +276,86 @@ struct ConnectPhoneSheet: View {
 
     private var olderIphone: some View {
         DisclosureRow(title: "Older iPhone?", detail: "iOS 26 or earlier", isExpanded: $showOlder, anchor: "Older iPhone") {
-            VStack(alignment: .leading, spacing: Theme.Space.s) {
-                wifiProblem
+            VStack(alignment: .leading, spacing: Theme.Space.m) {
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
-                    Text("Older iPhones need WebDriverAgent running on the phone. Set it up once over USB.")
+                    Text("Older iPhones need a one-time setup before they take taps and typing. Pair it as above, add your Apple ID in Xcode › Settings › Accounts, then set it up here. PhoneDock keeps it working after restarts.")
                         .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     BetaBadge()
                 }
-                HStack(spacing: Theme.Space.s) {
-                    TextField("IP address or WebDriverAgent URL", text: $wdaHost)
-                        .onSubmit(connectWda)
-                        .accessibilityLabel("iPhone address")
-                        .testAnchor("iPhone address")
-                    TextField("Name (optional)", text: $wdaName).frame(width: 130)
-                        .accessibilityLabel("iPhone name")
-                        .testAnchor("iPhone name")
-                    let fillable = nearbyPhones.filter { $0.host != nil }
-                    if !fillable.isEmpty {
-                        Menu {
-                            ForEach(fillable) { p in Button(p.name) { fill(p) } }
-                        } label: { Image(systemName: "iphone.radiowaves.left.and.right") }
-                            .menuStyle(.borderlessButton)
-                            .menuIndicator(.hidden)
-                            .fixedSize()
-                            .help("Fill in from a nearby iPhone")
-                            .accessibilityLabel("Fill In From Nearby iPhone")
-                    }
-                    Button("Connect", action: connectWda)
-                        .disabled(wdaHost.trimmingCharacters(in: .whitespaces).isEmpty || working)
-                        .accessibilityLabel("Connect iPhone")
-                        .testAnchor("Connect iPhone")
+                if olderPhones.isEmpty {
+                    Text("No older iPhone is paired with this Mac yet. Plug one in, unlock it and tap Trust.")
+                        .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .testAnchor("no-older-iphones")
+                } else {
+                    olderList
                 }
-                .textFieldStyle(.roundedBorder)
-                if let wdaStatus { ConnectStatusView(status: wdaStatus).testAnchor("ios-status") }
+                DisclosureRow(title: "Set up on another Mac?", detail: "Connect by address", isExpanded: $showAddress, anchor: "Connect by address") {
+                    addressForm
+                }
             }
+        }
+    }
+
+    private var olderList: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(olderPhones.enumerated()), id: \.element.id) { i, d in
+                if i > 0 { Divider().padding(.leading, 36) }
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Space.m) {
+                    Image(systemName: "iphone").font(.system(size: 15)).foregroundStyle(Theme.Ink.secondary).frame(width: 20)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
+                            Text(d.name).font(Theme.Fonts.body).foregroundStyle(Theme.Ink.primary).lineLimit(1)
+                            if let os = d.pdFriendlyOS { Text(os).font(Theme.Fonts.meta).foregroundStyle(Theme.Ink.secondary).lineLimit(1) }
+                        }
+                        ControlSetupPanel(device: d, compact: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, Theme.Space.m)
+                .padding(.vertical, Theme.Space.s + 2)
+                .testAnchor("older-\(i)")
+            }
+        }
+        .background(Theme.Surface.content, in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous).strokeBorder(Theme.Line.separator, lineWidth: 1))
+    }
+
+    /// WebDriverAgent that another Mac (the one the iPhone is plugged into) set up: reach it by its Wi-Fi address.
+    private var addressForm: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s) {
+            wifiProblem
+            Text("Set it up on the Mac the iPhone is plugged into, then enter the iPhone’s address here.")
+                .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Theme.Space.s) {
+                TextField("IP address or WebDriverAgent URL", text: $wdaHost)
+                    .onSubmit(connectWda)
+                    .accessibilityLabel("iPhone address")
+                    .testAnchor("iPhone address")
+                TextField("Name (optional)", text: $wdaName).frame(width: 130)
+                    .accessibilityLabel("iPhone name")
+                    .testAnchor("iPhone name")
+                let fillable = nearbyPhones.filter { $0.host != nil }
+                if !fillable.isEmpty {
+                    Menu {
+                        ForEach(fillable) { p in Button(p.name) { fill(p) } }
+                    } label: { Image(systemName: "iphone.radiowaves.left.and.right") }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("Fill in from a nearby iPhone")
+                        .accessibilityLabel("Fill In From Nearby iPhone")
+                }
+                Button("Connect", action: connectWda)
+                    .disabled(wdaHost.trimmingCharacters(in: .whitespaces).isEmpty || working)
+                    .accessibilityLabel("Connect iPhone")
+                    .testAnchor("Connect iPhone")
+            }
+            .textFieldStyle(.roundedBorder)
+            if let wdaStatus { ConnectStatusView(status: wdaStatus).testAnchor("ios-status") }
         }
     }
 
@@ -379,7 +432,7 @@ struct ConnectPhoneSheet: View {
         switch e.code {
         case "wda_unreachable":
             p.title = "Can’t reach WebDriverAgent on \(host)"
-            p.message = "Make sure it’s running on the iPhone and both are on the same Wi-Fi."
+            p.message = "Make sure it’s running on the iPhone and both are on the same Wi-Fi, and allow PhoneDock in System Settings › Privacy & Security › Local Network."
         case "local_network_denied":
             p.title = "Can’t reach \(host)"
             p.message = "Allow PhoneDock in System Settings › Privacy & Security › Local Network, and check the phone is on the same Wi-Fi."

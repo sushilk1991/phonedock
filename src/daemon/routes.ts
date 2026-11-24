@@ -869,7 +869,8 @@ r.post('/v1/ios/wda-setup', async (c) => {
   }, `ios-device:${udid}`);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
 });
-r.get('/v1/ios/wda-teams', async () => { assertPhysicalAllowed('wda-teams'); return iosBackend().wdaTeams(); });
+// Reads Xcode's signed-in teams only (no phone), so a filtered test service answers it too.
+r.get('/v1/ios/wda-teams', async () => iosBackend().wdaTeams());
 r.get('/v1/android/discover', async () => {
   assertPhysicalAllowed('discover');
   const b = androidDevice();

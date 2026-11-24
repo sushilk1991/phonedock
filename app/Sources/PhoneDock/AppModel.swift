@@ -69,6 +69,8 @@ final class AppModel {
     var asleep: Set<String> = []
     /// Ask the window to show this inspector tab (the crash toast's View). The root view clears it.
     var requestedInspectorTab: InspectorTab?
+    /// Set Up Control runs for older iPhones, by device id (OlderIphoneSetup.swift).
+    var controlSetups: [String: ControlSetup] = [:]
     /// Devices being created: they show in the sidebar with stage text until the service lists them.
     var creating: [PendingDevice] = []
     private var crashBaseline: [String: Set<String>] = [:]

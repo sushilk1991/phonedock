@@ -331,10 +331,13 @@ private struct LiveScreen: View {
                 ReconnectingCapsule().padding(.top, Theme.Space.l)
             }
             if let r = highlight { highlightBox(r) }
-            if showControlSetup || (frames.asleep && frames.hasPicture) {
+            if showControlSetup || showOlderControl || (frames.asleep && frames.hasPicture) {
                 VStack(spacing: Theme.Space.s) {
                     if let iosTools = iosControlSetupStatus {
                         IosControlSetupCapsule(status: iosTools)
+                    }
+                    if showOlderControl {
+                        OlderIphoneControlCapsule(device: device)
                     }
                     if frames.asleep, frames.hasPicture {
                         AsleepHint(device: device)
@@ -368,6 +371,9 @@ private struct LiveScreen: View {
     }
 
     private var showControlSetup: Bool { iosControlSetupStatus != nil }
+
+    /// iOS 26 and older: Set Up Control, or what the service is waiting for, until taps work.
+    private var showOlderControl: Bool { OlderIphoneControlCapsule.shows(device, flow: model.controlSetups[device.id]) }
 
     /// UI-tree selection: magenta stroke with a white halo, so it reads on any app's colours.
     private func highlightBox(_ r: CGRect) -> some View {

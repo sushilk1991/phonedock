@@ -979,8 +979,8 @@ export const backend: Backend & {
         osVersion: v.os?.version, model: v.device,
         connection: 'wifi',
         capabilities: cf.udid ? CAPS : WDA_ONLY_CAPS,
-        error: ws.ok ? undefined : `WebDriverAgent not reachable at ${cf.wdaUrl}: ${ws.error}`,
-        meta: { wdaUrl: cf.wdaUrl, wdaReady: ws.ok, address: cf.address, udid: cf.udid ?? null, manual: true, wdaIp: v.ios?.ip, experimental: false },
+        error: ws.ok ? undefined : wdaSup.info(nativeId)?.message ?? `WebDriverAgent not reachable at ${cf.wdaUrl}: ${ws.error}`,
+        meta: { wdaUrl: cf.wdaUrl, wdaReady: ws.ok, address: cf.address, udid: cf.udid ?? null, manual: true, wdaIp: v.ios?.ip, wdaControl: wdaSup.info(nativeId) ?? null, experimental: false },
       });
     }));
     return out;
