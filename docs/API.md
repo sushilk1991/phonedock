@@ -692,7 +692,7 @@ receipt expired, wakes the phone before its receipt is written.
 
 **Waking.** Requests on a sleeping phone share one wake and run once the phone has booted and a fresh device list says
 running; until then it stays asleep, so a wake that fails or isn't ready in 30 s (`not_ready`) leaves it for the next
-request. The response has `X-PhoneDock-Woke: <ms>; name=<URI-encoded name>` (`; fresh=1` when it started fresh): the
+request (for 2 minutes after a `not_ready` that request also gets how it came back; later the sweep finishes that wake). The response has `X-PhoneDock-Woke: <ms>; name=<URI-encoded name>` (`; fresh=1` when it started fresh): the
 SDK calls `onWake`, the CLI prints `Woke <name> (7.2 s)` on stderr, an MCP call ends with that as its own text item,
 each adding `, started fresh; its previous screen is gone` after a fresh start. Then an input aimed at the screen (tap,
 swipe, typing, back…, and a replay, before its job starts; not an app launch, the clipboard or environment) is
@@ -704,7 +704,7 @@ sleeping one. A phone the person stops stays off.
 **Sleeping** (`android-emulator`): check it is positively this AVD (`emu avd path`, asked now) and the disk has room
 for its exit save (RAM plus 1 GB; else, or if free space can't be read, `disk_full` in `Device.sleepFailure`); write
 the marker `devices/<id>/sleep.json` (with the AVD's path); ask the phone's own idle clock; remove the old `default_boot`'s
-`snapshot.pb` (see below); `sync` in the guest (a failure, or another emulator on its serial by then, and it keeps
+`snapshot.pb` and write a record no boot can match (see below; a sleep that goes no further removes the record); `sync` in the guest (a failure, or another emulator on its serial by then, and it keeps
 running). Then the last look, with nothing in between it and the stop: a request, a use elsewhere, a lease, the filter,
 the setting (Never wins). Then `emu kill` stops it the ordinary way, bound to the emulator process it verified. It is asleep only with proof that process exited, else `device.sleep_failed` (the marker stays while it
 reads stopped). The exit save is proven when a new `snapshot.pb` and RAM image were written; then the disk images'
