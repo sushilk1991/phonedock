@@ -37,7 +37,7 @@ async function stopAll() {
   for (const e of Object.values(sdk.state().emulators)) { try { process.kill(e.pid, 'SIGTERM'); } catch { /* gone */ } }
   await until(() => Object.values(sdk.state().emulators).every((e) => !live(e.pid)));
   sdk.set({ emulators: {}, avdPaths: {}, badSnapshots: [], ignoreKill: false, exitSave: true, instrument: false, shellFails: false, psFails: false, dumpsysFails: false, userActivityAgoMs: 3_600_000,
-    activeInstrumentation: false, instrFails: false, syncFails: false, syncKills: false, syncSwapsTo: undefined, bootCompleted: true });
+    activeInstrumentation: false, instrFails: false, syncFails: false, syncKills: false, syncSwapsTo: undefined, bootCompleted: true, pathKO: [] });
 }
 /** Asleep the way the daemon does it: prepare, then the ordinary stop. */
 async function putToSleep(): Promise<SleepState> {
@@ -220,13 +220,65 @@ test('who may be on this emulator: adb with -e, -t or no selector; scrcpy with -
   const m = await import('./android-emulator.ts') as unknown as { adbSessionOn: (a: string, s: string) => string | undefined; scrcpyOn: (a: string, s: string) => boolean };
   const S = 'emulator-5554';
   for (const [args, want] of [['adb -e logcat', 'logcat'], ['/x/adb logcat -v brief', 'logcat'], ['adb -t 3 shell', 'shell'], ['adb -s emulator-5554 shell', 'shell'],
-    ['adb -s emulator-5556 shell', undefined], ['adb -d shell', undefined], ['adb -L tcp:5037 fork-server server --reply-fd 4', undefined], ['adb devices', undefined]] as const) {
+    ['adb -s emulator-5556 shell', undefined], ['adb -d shell', undefined], ['adb -L tcp:5037 fork-server server --reply-fd 4', undefined], ['adb devices', undefined],
+    // a transfer, an install, or a command PhoneDock doesn't know: in use. Its inventory's read-only probes: not
+    ['adb -s emulator-5554 push big.bin /sdcard/', 'push'], ['adb -s emulator-5554 pull /sdcard/x.mp4 .', 'pull'], ['adb -s emulator-5554 sync', 'sync'],
+    ['adb -s emulator-5554 install app.apk', 'install'], ['adb -s emulator-5554 frobnicate', 'frobnicate'], ['adb -e push a /sdcard/', 'push'],
+    ['adb -s emulator-5554 emu avd name', undefined], ['adb -s emulator-5554 get-state', undefined], ['adb -s emulator-5556 push a b', undefined]] as const) {
     assert.equal(m.adbSessionOn(args, S), want, args);
   }
   for (const [args, want] of [['scrcpy --serial emulator-5554', true], ['scrcpy --serial=emulator-5554', true], ['/opt/homebrew/bin/scrcpy', true],
     ['scrcpy -s emulator-5556', false], ['scrcpy -d', false], ['scrcpy -e', false]] as const) {
     assert.equal(m.scrcpyOn(args, S), want, args);
   }
+});
+
+test('an adb push that starts during the guest’s checks or its sync is seen right before the stop: called off, nothing stopped', async () => {
+  await backend.boot!(NAME, { headless: true });
+  const serial = serialOf()!;
+  const state = await backend.prepareSleep!(NAME);
+  const d = mkdtempSync(join(tmpdir(), 'pd-adb-push-'));
+  writeFileSync(join(d, 'adb'), '#!/bin/sh\nsleep 30\n'); chmodSync(join(d, 'adb'), 0o755);
+  // someone's push in a terminal: not this process's child (started from a shell that exits)
+  const pid = Number(execFileSync('/bin/sh', ['-c', `"${join(d, 'adb')}" -s ${serial} push big.bin /sdcard/ >/dev/null 2>&1 & echo $!`]).toString().trim());
+  try {
+    await assert.rejects(backend.stopForSleep!(NAME, state), (e: PhoneDockError) => e.code === 'sleep_called_off' && /adb/.test(e.message));
+    assert.ok(live(Object.values(sdk.state().emulators)[0].pid), 'it keeps running');
+    assert.ok(!sdk.log().some((l) => / emu kill$/.test(l)), 'never stopped');
+    assert.ok(!existsSync(join(dir, 'phonedock-exit-save.json')), 'its placeholder taken back');
+  } finally { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } rmSync(d, { recursive: true, force: true }); }
+});
+
+test('a console command (snapshot delete, the stop) never goes to a same-named emulator whose path can’t be read while PhoneDock’s own sleeps', async () => {
+  await backend.boot!(NAME, { headless: true });
+  await putToSleep();
+  mkdirSync(join(dir, 'snapshots', 'baseline'), { recursive: true }); writeFileSync(join(dir, 'snapshots', 'baseline', 'snapshot.pb'), '{}');
+  sdk.set({ pathKO: ['emulator-5572'] });                    // the person's: its console doesn't say which AVD it runs
+  outsideEmulator(5572, '/opt/other-avds/pdtest-x.avd');
+  await until(() => !!sdk.state().emulators['emulator-5572']);
+  sdk.clearLog();
+  await assert.rejects(backend.deleteSnapshot!(NAME, 'baseline'), (e: PhoneDockError) => e.code === 'ambiguous_device');
+  await assert.rejects(backend.shutdown!(NAME), (e: PhoneDockError) => e.code === 'ambiguous_device');
+  assert.deepEqual(sdk.log().filter((l) => / -s emulator-5572 emu (avd snapshot|kill)/.test(l)), [], 'nothing was sent to the other emulator');
+  assert.ok(snaps().includes('baseline'), 'and nothing deleted');
+});
+
+test('only an AVD PhoneDock created in its own folder sleeps: an .ini there pointing at another AVD (Android Studio’s) never does', async () => {
+  const studio = mkdtempSync(join(tmpdir(), 'pd-studio-'));
+  const other = join(studio, 'pdtest-studio.avd'); mkdirSync(join(other, 'snapshots'), { recursive: true });
+  writeFileSync(join(other, 'config.ini'), 'hw.ramSize=2048\n');
+  writeFileSync(join(other, 'phonedock.json'), JSON.stringify({ vulkan: true }));   // PhoneDock booted it once: no spec
+  writeFileSync(join(AVD_HOME, 'pdtest-studio.ini'), `path=${other}\n`);
+  sdk.set({ avdPaths: { 'pdtest-studio': other } });
+  const c = spawn(join(sdk.root, 'emulator', 'emulator'), ['-avd', 'pdtest-studio', '-port', '5574', '-no-window'], { stdio: 'ignore', env: { ...process.env, ANDROID_AVD_HOME: AVD_HOME } });
+  others.push(c);
+  try {
+    await until(() => !!sdk.state().emulators['emulator-5574']);
+    await assert.rejects(backend.prepareSleep!('pdtest-studio'), (e: PhoneDockError) => e.code === 'not_found');
+    assert.match((await backend.keepAwake!('pdtest-studio')) ?? '', /didn’t create it/);
+    writeFileSync(join(other, 'phonedock.json'), JSON.stringify({ spec: { name: 'pdtest-studio' } }));   // a spec, but not its folder
+    await assert.rejects(backend.prepareSleep!('pdtest-studio'), (e: PhoneDockError) => e.code === 'not_found');
+  } finally { rmSync(studio, { recursive: true, force: true }); rmSync(join(AVD_HOME, 'pdtest-studio.ini'), { force: true }); }
 });
 
 test('the disk rule: started by hand while asleep (cold), written to and killed, the wake or an ordinary boot starts fresh and keeps the write', async () => {

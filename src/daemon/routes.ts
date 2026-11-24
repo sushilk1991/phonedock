@@ -200,10 +200,10 @@ r.post('/v1/devices/:id/boot', async (c) => {
     }
     return withLifecycle(id, async () => {
       await settleSleep(id);
-      forgetSleep(id);
       p(`booting ${id}${opts.coldBoot ? ' (cold)' : ''}`);
       try { await boot(nid, { ...opts, onProgress: p } as BootOptions); }
       catch (e) { logAction(id, c.owner, { action: 'device.start_failed', error: failText(e) }); throw e; }
+      forgetSleep(id);   // only now: a boot that fails leaves a sleeping phone asleep, for the sleeper's next wake
       p(`ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       logAction(id, c.owner, { action: 'device.start' });
       return await getDevice(id, true);
@@ -259,12 +259,12 @@ r.post('/v1/devices/:id/restart', async (c) => {
     try {
       await withLifecycle(id, async () => {
         await settleSleep(id);
-        forgetSleep(id);
         // Its state now that any wake or sleep has ended (one with a marker may have been started outside PhoneDock).
         const d = await getDevice(id, true);
         if (d.state !== 'stopped') { p(`shutting down ${id}`); await shutdownDevice(id, b, nid, owner, 'restarting'); }
         p(`booting ${id}`);
         await boot(nid, { ...opts, onProgress: p } as BootOptions);
+        forgetSleep(id);   // only once it has booted (see /boot)
       });
     } catch (e) { logAction(id, owner, { action: 'device.restart_failed', error: failText(e) }); throw e; }
     p(`restarted in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
@@ -292,7 +292,15 @@ r.post('/v1/devices/:id/clone', async (c) => {
   }, id);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
 });
-r.post('/v1/devices/:id/window', async (c) => { const { b, nid } = dev(c); await need(b, 'openWindow', 'native window')(nid); return { ok: true }; });
+r.post('/v1/devices/:id/window', async (c) => {
+  const { id, b, nid } = dev(c);
+  await assertSleepTarget(id);
+  const open = need(b, 'openWindow', 'native window');
+  // A sleeping phone wakes with its own window, as a stopped one boots with it (no scrcpy needed).
+  if (await ensureAwake(id, c.owner, undefined, { headless: false })) return { ok: true };
+  await open(nid);
+  return { ok: true };
+});
 /** Snapshots the emulator keeps for itself (quick boot) are not the person's: never listed. */
 const INTERNAL_SNAPSHOTS = new Set(['default_boot']);
 r.get('/v1/devices/:id/snapshots', async (c) => { const { id, b, nid } = dev(c); await assertSleepTarget(id); return (await need(b, 'listSnapshots', 'snapshots')(nid)).filter((s) => !INTERNAL_SNAPSHOTS.has(s.name)); });
@@ -947,6 +955,7 @@ r.post('/v1/pool/acquire', async (c) => {
   const list = all.filter(match);
   const free = (d: Device) => !d.lease || d.lease.owner === owner || !!d.lease.stale;   // stale: reclaimed by acquireLease
   const bootIt = async (d: Device) => {
+    await assertSleepTarget(d.id);   // a sleeping id boots only the device that went to sleep (on any service)
     const had = getLease(d.id)?.owner === owner;
     const lease = acquireLease(d.id, owner, ttl);
     const b = getBackend(d.backend);
@@ -973,8 +982,9 @@ r.post('/v1/pool/acquire', async (c) => {
   const running = list.find((d) => d.state === 'running' && !sleepInProgress(d.id) && free(d) && d.managed)
     ?? (body.includePhysical ? list.find((d) => d.state === 'running' && free(d) && d.kind === 'physical') : undefined);
   if (running) return { device: running, lease: acquireLease(running.id, owner, ttl) };
-  const stopped = list.find((d) => (d.state === 'stopped' || sleepInProgress(d.id)) && d.managed && free(d));
-  if (stopped) return bootIt(stopped);
+  for (const d of list.filter((x) => (x.state === 'stopped' || sleepInProgress(x.id)) && x.managed && free(x))) {
+    if (await assertSleepTarget(d.id).then(() => true, () => false)) return bootIt(d);   // never a sleeping id whose device is gone
+  }
   if (body.createIfNone) {
     const spec = body.createIfNone as DeviceSpec;
     const b = getBackend(spec.backend);

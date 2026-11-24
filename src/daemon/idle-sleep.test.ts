@@ -24,7 +24,8 @@ const states = new Map<string, DeviceState>();
 const managed = new Map<string, boolean>();
 let calls: string[] = [];
 const hooks: { save?: () => Promise<void>; sync?: () => Promise<void>; stop?: () => Promise<void>; wake?: () => Promise<void>; del?: () => Promise<void>; guest?: () => Promise<string | undefined>;
-  saveError?: PhoneDockError; stopError?: PhoneDockError; wakeReport?: WakeReport; wakeLeavesStopped?: boolean; window?: boolean; listDelayMs?: number; avdGone?: boolean } = {};
+  saveError?: PhoneDockError; stopError?: PhoneDockError; wakeReport?: WakeReport; wakeLeavesStopped?: boolean; window?: boolean; listDelayMs?: number; avdGone?: boolean;
+  listFails?: boolean; bootError?: PhoneDockError } = {};
 let wakeOpts: Record<string, unknown>[] = [];
 let videoListeners: ((p: VideoPacket) => void)[] = [];
 let framesAsleep = false;
@@ -33,12 +34,18 @@ const fake = {
   async available() { return { ok: true }; },
   async listDevices(): Promise<Device[]> {
     if (hooks.listDelayMs) await new Promise((r) => setTimeout(r, hooks.listDelayMs));   // adb takes a while
+    if (hooks.listFails) throw new Error('adb devices failed');
     return [...states].map(([nid, state]) => ({
       id: `fake-emu:${nid}`, backend: 'fake-emu', nativeId: nid, name: nid, platform: 'android', kind: 'virtual', state,
       managed: managed.get(nid) ?? true, connection: 'local', capabilities: ['boot', 'shutdown', 'video'],
     }));
   },
-  async boot(nid: string) { calls.push(`boot:${nid}`); states.set(nid, 'running'); },
+  async boot(nid: string) { calls.push(`boot:${nid}`); if (hooks.bootError) throw hooks.bootError; states.set(nid, 'running'); },
+  async openWindow(nid: string) {   // like the emulator's: a stopped one boots with its window; a running one needs scrcpy
+    calls.push(`window:${nid}`);
+    if (states.get(nid) === 'running') throw new PhoneDockError('The emulator window could not be opened', 'scrcpy_missing', 501);
+    states.set(nid, 'running');
+  },
   async shutdown(nid: string) { calls.push(`shutdown:${nid}`); states.set(nid, 'stopped'); },
   async screenshot() { return Buffer.alloc(0); },
   async tap() {}, async swipe() {}, async type() {}, async key() {},
@@ -749,4 +756,85 @@ test('a sleeping id whose AVD was deleted outside PhoneDock is forgotten by the 
   hooks.avdGone = false;
   assert.equal((await jobDone(await hit('POST', '/v1/devices/:id/boot', ID))).state, 'done');
   assert.deepEqual(calls, ['boot:pdtest-a'], 'an ordinary boot, no wake');
+});
+
+// ── round 5: the final review's fixes ──────────────────────────────────────
+test('a live view that opens while the phone’s own idle clock is read keeps it awake: streams end only once the stop is decided', async () => {
+  let s: ReturnType<typeof core.sharedStream> | undefined;
+  hooks.guest = async () => { s = core.sharedStream(ID, 720); s.viewers++; return undefined; };
+  try {
+    advance(61); await S.sweep();
+    assert.ok(!calls.includes('stop:pdtest-a'), 'not stopped while someone watches');
+    assert.equal(S.readMarker(ID), undefined);
+    assert.ok(core.watched(ID), 'the viewer still has its stream');
+  } finally { if (s) s.viewers--; core.stopStreamsFor(ID); }
+});
+
+test('a shell command that wakes a phone which starts fresh is handed back unsent: it may be written for the screen it had', async () => {
+  await putToSleep();
+  hooks.wakeReport = { resumed: false, via: 'cold', note: 'Its saved state didn’t load.' };
+  await assert.rejects(S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell'), (e: PhoneDockError) => e.code === 'woke_fresh' && e.delivery === 'not_sent');
+  assert.deepEqual(calls, ['wake:pdtest-a']);
+});
+
+test('a tap that met the sleep on arrival, but reaches its gate after another request woke the phone fresh, is still handed back', async () => {
+  await putToSleep();
+  hooks.wakeReport = { resumed: false, via: 'cold', note: 'Its disk or saved state changed while it slept.' };
+  const tap = ctx(ID);
+  const leave = await enterInput(tap.c);                  // arrived; its receipt is still reading the body
+  (await S.enterRequest(ctx(ID).c, 'GET', '/v1/devices/:id/screenshot'))?.();   // meanwhile a screenshot wakes it
+  assert.equal(S.readMarker(ID), undefined);
+  await assert.rejects(Promise.resolve(tap.c.beforeRun?.()).then(() => { throw new Error('the tap went through'); }), (e: PhoneDockError) => e.code === 'woke_fresh');
+  leave?.();
+  assert.match(tap.set['X-PhoneDock-Woke'] ?? '', /; fresh=1$/);
+  const later = ctx(ID);                                  // one that arrives after the wake goes ahead
+  const l2 = await enterInput(later.c); await later.c.beforeRun?.(); l2?.();
+  assert.deepEqual(calls, ['wake:pdtest-a'], 'one wake');
+});
+
+test('a wake is ready only on a current scan: a cached "running" row while every scan fails is no proof', async () => {
+  await putToSleep();
+  S.wakeTiming.readyMs = 400;
+  hooks.wake = async () => { states.set('pdtest-a', 'running'); core.invalidateDevices(); await core.listDevices(true); hooks.listFails = true; };
+  try {
+    await assert.rejects(S.enterRequest(ctx(ID).c, 'GET', '/v1/devices/:id/screenshot'), (e: PhoneDockError) => e.code === 'not_ready');
+    assert.ok(S.readMarker(ID), 'still asleep for the next request');
+  } finally { S.wakeTiming.readyMs = 30_000; hooks.listFails = false; }
+});
+
+test('a boot or restart that fails leaves a sleeping phone asleep (also on a service that doesn’t sleep phones); it is forgotten once booted', async () => {
+  await putToSleep();
+  S.setIdleSleepRoleForTests({ sleeper: false });
+  hooks.bootError = new PhoneDockError('No free console port', 'boot_failed', 500);
+  try {
+    assert.equal((await jobDone(await hit('POST', '/v1/devices/:id/boot', ID))).state, 'failed');
+    assert.ok(S.readMarker(ID), 'a failed boot: still asleep');
+    assert.equal((await jobDone(await hit('POST', '/v1/devices/:id/restart', ID))).state, 'failed');
+    assert.ok(S.readMarker(ID), 'a failed restart: still asleep');
+    delete hooks.bootError;
+    assert.equal((await jobDone(await hit('POST', '/v1/devices/:id/boot', ID))).state, 'done');
+    assert.equal(S.readMarker(ID), undefined, 'booted: not asleep any more');
+  } finally { S.setIdleSleepRoleForTests({ sleeper: true }); }
+});
+
+test('opening the window of a sleeping phone wakes it with its own window, as a stopped one boots with it: no scrcpy needed', async () => {
+  await putToSleep();
+  assert.equal(S.classifyRequest('POST', '/v1/devices/:id/window'), 'control');
+  const done = await S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/window');
+  assert.deepEqual(await hit('POST', '/v1/devices/:id/window', ID), { ok: true });
+  done?.();
+  assert.equal(wakeOpts.at(-1)?.headless, false);
+  assert.deepEqual(calls, ['wake:pdtest-a'], 'woken with its window; no separate one');
+});
+
+test('pool acquire of a sleeping id whose own AVD is gone is not_found and boots nothing, also on a service that doesn’t sleep phones', async () => {
+  await putToSleep(); hooks.avdGone = true;
+  S.setIdleSleepRoleForTests({ sleeper: false });
+  try {
+    await assert.rejects(hit('POST', '/v1/pool/acquire', ID, { deviceId: ID, owner: 'cli:pool' }), (e: PhoneDockError) => e.code === 'not_found');
+    assert.deepEqual(calls, [], 'nothing booted');
+    assert.equal(core.getLease(ID), null, 'no lease taken');
+    await assert.rejects(hit('POST', '/v1/pool/acquire', ID, { backend: 'fake-emu', owner: 'cli:pool' }), (e: PhoneDockError) => e.code === 'no_device', 'the implicit pick skips it');
+    assert.deepEqual(calls, []);
+  } finally { S.setIdleSleepRoleForTests({ sleeper: true }); }
 });

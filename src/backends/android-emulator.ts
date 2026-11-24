@@ -264,15 +264,35 @@ async function serialFor(name: string, mode: 'shared' | 'normal' = 'normal'): Pr
   if (!a) return running.find((e) => e.name === name)?.serial;
   return runningFor(running, a)?.serial;
 }
+/** PhoneDock's own AVD: created by it (`spec` in its phonedock.json, which only create and clone write) in its own folder
+ *  (`<home>/<name>.avd`; an .ini there may point at an AVD elsewhere, e.g. Android Studio's). Idle sleep acts on no other. */
+const ownAvd = (a: AvdEntry) => !!a.meta && typeof a.meta.spec === 'object' && a.meta.spec !== null
+  && canonical(a.avdDir) === canonical(join(managedHome(), `${a.name}.avd`));
 /** A managed AVD (PhoneDock's own) by name, never a same-named one of the person's: idle sleep acts only on these. */
 function requireManagedAvd(name: string): AvdEntry {
   const a = scanAvds(managedHome(), true).find((x) => x.name === name);
   if (!a) throw new PhoneDockError(`PhoneDock has no emulator named "${name}"`, 'not_found', 404, ['It may have been deleted outside PhoneDock.'], `No AVD "${name}" in ${managedHome()}`);
+  if (!ownAvd(a)) throw new PhoneDockError(`PhoneDock didn’t create "${name}" in its own folder`, 'not_found', 404, ['Idle sleep acts only on emulators PhoneDock created.'],
+    `${a.avdDir}: no spec in its phonedock.json, or not ${join(managedHome(), `${name}.avd`)}`);
   return a;
 }
 /** The serial of the emulator running this managed AVD, matched by its path, asked of the emulators now. */
 async function managedSerial(name: string): Promise<string | undefined> {
   return runningFor(await runningEmulators('fresh'), requireManagedAvd(name), true)?.serial;
+}
+/** The emulator positively running this AVD (its `emu avd path`), for a console command that changes it (snapshot save,
+ *  load or delete; the stop): never a same-named one whose path can't be read, which may be the person's own (and a
+ *  sleeping phone's id names no running emulator at all). undefined: none runs. */
+async function consoleSerial(name: string): Promise<string | undefined> {
+  const a = requireAvd(name);
+  const running = await runningEmulators('fresh');
+  const r = runningFor(running, a, true);
+  if (r) return r.serial;
+  if (runningFor(running, a)) {
+    throw new PhoneDockError(`PhoneDock can’t tell whether the running emulator named "${name}" is this phone`, 'ambiguous_device', 409,
+      ['Nothing was sent. Try again in a few seconds; if it lasts, quit the other emulator of that name.'], `An emulator named ${name} runs, and its console doesn't say which AVD it runs`, 'not_sent');
+  }
+  return undefined;
 }
 async function requireSerial(name: string): Promise<string> {
   const s = await serialFor(name);
@@ -599,7 +619,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   },
 
   async shutdown(name: string) {
-    const s = await serialFor(name);
+    const s = await consoleSerial(name);
     if (!s) return;
     await A.adb(s, ['emu', 'kill'], { allowFail: true, timeoutMs: 10_000 });
     const deadline = Date.now() + 30_000;
@@ -689,7 +709,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   },
   async deleteSnapshot(name: string, snap: string) {
     personsSnapshot(name, snap);
-    const s = await serialFor(name);
+    const s = await consoleSerial(name);
     if (s) { await emuSnapshot(name, 'del', snap); return; }
     const a = requireAvd(name);
     const d = join(a.avdDir, 'snapshots', sanitizeName(snap));
@@ -833,6 +853,11 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
       if (sync.code !== 0) throw abort('its writes couldn’t be flushed to its disk');
       // Still this emulator on that serial (its console port is free for another once it is gone), asked now.
       if ((await managedSerial(name)) !== s || !processAlive(proc.pid)) throw abort('its adb connection changed');
+      // Use on the Mac, asked again now (an adb push or a scrcpy started during the guest's checks or its sync).
+      processCache = undefined;
+      const ps = await processList();
+      const busy = ps.ok ? hostActivity(ps.list, proc, s) : 'PhoneDock can’t tell whether it is in use (couldn’t list processes)';
+      if (busy) throw new PhoneDockError(`It keeps running: ${busy}`, 'sleep_called_off', 409);
       const why = opts.confirm?.();   // the daemon's last look (use, leases, the setting), with no await before the stop
       if (why) throw new PhoneDockError(`It keeps running: ${why}`, 'sleep_called_off', 409);
     } catch (e) {
@@ -889,16 +914,16 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
     // Use PhoneDock can't see: its window, scrcpy, someone's adb session, and (guest) the phone's own idle clock and test
     // runs. Whatever can't be read counts as in use. The guest check asks the emulators now; the cheap one shares a sweep's.
     const cantTell = (why: string) => `PhoneDock can’t tell whether it is in use (${why})`;
+    const own = scanAvds(managedHome(), true).find((x) => x.name === name);
+    if (!own || !ownAvd(own)) return 'PhoneDock didn’t create it in its own folder, so it never sleeps';
     const s = await (opts.guest ? managedSerial(name) : serialFor(name, 'shared')).catch(() => undefined);
     if (!s) return cantTell('adb doesn’t list it');
     const ps = await processList();
     if (!ps.ok) return cantTell('couldn’t list processes');
     const proc = await emulatorProcessOf(name, s);
     if (!proc) return cantTell('its emulator process can’t be identified');   // e.g. started elsewhere without -port
-    if (!hasArg(proc.args, '-no-window')) return 'its emulator window is open';
-    if (ps.list.some((x) => scrcpyOn(x.args, s))) return 'it is open in a separate window';
-    const session = ps.list.find((x) => adbSessionOn(x.args, s) && !descendsFrom(x, process.pid, ps.list));
-    if (session) return `an adb session may be open on it (${adbSessionOn(session.args, s)})`;
+    const host = hostActivity(ps.list, proc, s);
+    if (host) return host;
     if (!opts.guest) return undefined;
     const r = await A.adb(s, ['shell', GUEST_ACTIVITY], { allowFail: true, timeoutMs: 10_000 }).catch(() => undefined);
     const g = parseGuestActivity(r?.code === 0 ? r.stdout : undefined);
@@ -1164,8 +1189,11 @@ function descendsFrom(p: Proc, root: number, all: Proc[]): boolean {
   for (let i = 0; i < 32 && cur && cur > 1; i++) { if (cur === root) return true; cur = parent.get(cur); }
   return false;
 }
-/** An `adb shell|logcat|…` client in someone's terminal or IDE that may be on this emulator: its subcommand, else undefined.
- *  PhoneDock's own (the live view's screenrecord and logcat watcher, also orphaned by a daemon that died) are not. */
+/** adb commands aimed at no device (the adb server among them), and the read-only probes PhoneDock's inventory makes. */
+const ADB_NOT_USE = /^(devices|start-server|kill-server|version|help|connect|disconnect|pair|mdns|keygen|track-devices|fork-server|server|nodaemon|get-state|get-serialno|get-devpath)$/;
+/** An adb command someone runs that may be on this emulator (a session, a push or pull, an install, or one PhoneDock
+ *  doesn't know: unknown means in use): its subcommand, else undefined. PhoneDock's own (the live view's screenrecord
+ *  and logcat watcher, also orphaned by a daemon that died; its inventory's `emu avd name|path`) are not. */
 export function adbSessionOn(args: string, serial: string): string | undefined {
   if (/ logcat -T 1 -v brief -s ScreenRecord:D PowerManagerService:I(\s|$)/.test(args) || / exec-out screenrecord --output-format=h264 /.test(args)) return undefined;
   const w = args.split(/\s+/);
@@ -1180,7 +1208,16 @@ export function adbSessionOn(args: string, serial: string): string | undefined {
     else if (['-t', '-H', '-P', '-L'].includes(w[j])) j++;
   }
   if (target !== undefined && target !== serial) return undefined;
-  return /^(shell|logcat|exec-out|install|install-multiple|bugreport|jdwp|am|instrument)$/.test(w[j] ?? '') ? w[j] : undefined;
+  const cmd = w[j];
+  if (!cmd || ADB_NOT_USE.test(cmd) || (cmd === 'emu' && w[j + 1] === 'avd' && /^(name|path)$/.test(w[j + 2] ?? ''))) return undefined;
+  return cmd;
+}
+/** Use on the Mac that PhoneDock's own requests don't show: the emulator's own window, scrcpy, someone's adb command. */
+function hostActivity(ps: Proc[], proc: Proc, s: string): string | undefined {
+  if (!hasArg(proc.args, '-no-window')) return 'its emulator window is open';
+  if (ps.some((x) => scrcpyOn(x.args, s))) return 'it is open in a separate window';
+  const session = ps.find((x) => adbSessionOn(x.args, s) && !descendsFrom(x, process.pid, ps));
+  return session ? `an adb session may be open on it (${adbSessionOn(session.args, s)})` : undefined;
 }
 /** Whether a scrcpy process may be showing this emulator: `-s`/`--serial` naming it, or no selector (`$ANDROID_SERIAL`,
  *  or the only device). `-d` and `-e` pick a USB or a TCP/IP device, never an emulator. */
@@ -1243,7 +1280,7 @@ export function snapshotFailure(op: 'save' | 'load' | 'del', output: string): Ph
   return new PhoneDockError(`Couldn’t ${verb} the snapshot`, 'snapshot_failed', 500, ['Wait a few seconds and try again; if it keeps failing, restart the phone.'], `snapshot ${op} failed: ${out}`);
 }
 async function emuSnapshot(name: string, op: 'save' | 'load' | 'del', snap: string) {
-  const s = await serialFor(name);
+  const s = await consoleSerial(name);
   if (!s) throw new PhoneDockError(`Emulator "${name}" is not running.`, 'not_running', 409, ['Start the emulator first.'], 'Stopped devices can only list or delete snapshots');
   const sn = sanitizeName(snap);
   const r = await A.adb(s, ['emu', 'avd', 'snapshot', op === 'del' ? 'delete' : op, sn], { allowFail: true, timeoutMs: 180_000 });

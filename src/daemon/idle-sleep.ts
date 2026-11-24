@@ -144,8 +144,11 @@ const ops = new Map<string, SleepOp>();
 const wakes = new Map<string, Promise<WakeResult | undefined>>();
 /** A wake whose phone booted but didn't read running in time (not_ready): the next request finishes it with this, or
  *  the sweep does once it is `KEEP_OUTCOME_SEC` old (by then a retry isn't coming). */
-const outcomes = new Map<string, WakeResult & { keptAt: number }>();
+const outcomes = new Map<string, WakeResult & { keptAt: number; since: string }>();
 const KEEP_OUTCOME_SEC = 120;
+/** How each phone's last sleep (by its marker's `since`) came back: a request that met that sleep on arrival but
+ *  reaches its gate later (a receipt read its body meanwhile) still learns that the phone started fresh. */
+const woken = new Map<string, { since: string; w: WakeResult }>();
 
 // Every use also touches a stamp, so use through another service (a test one on another port) counts here too.
 const stampPath = (id: string) => join(stateDir('devices'), safeId(id), 'last-use');
@@ -226,6 +229,7 @@ const OBSERVE = new Set([
 const CONTROL = new Set([
   'POST /v1/devices/:id/boot', 'POST /v1/devices/:id/shutdown', 'POST /v1/devices/:id/restart', 'DELETE /v1/devices/:id',
   'PATCH /v1/devices/:id', 'POST /v1/devices/:id/clone', 'DELETE /v1/devices/:id/lease', 'DELETE /v1/devices/:id/snapshots/:name',
+  'POST /v1/devices/:id/window',   // a sleeping phone wakes with its own window, as a stopped one boots with it
 ]);
 /** `X-PhoneDock-Observe: 1` on a GET (the app's background reads): never wakes, never counts. Other methods are use. */
 export const OBSERVE_HEADER = 'x-phonedock-observe';
@@ -249,8 +253,9 @@ const NOT_SCREEN_INPUT = new Set([
   'POST /v1/devices/:id/apps/:appId/launch', 'POST /v1/devices/:id/clipboard', 'PUT /v1/devices/:id/clipboard',
   'POST /v1/devices/:id/keyboard/hide', 'POST /v1/devices/:id/environment',
 ]);
-/** Jobs that send input aimed at a screen (no receipt): after a fresh start they are handed back before they start. */
-const SCREEN_JOBS = new Set(['POST /v1/devices/:id/replay']);
+/** Requests without a receipt that may act on a screen: a replay's job, and a shell command (`input tap …`, or anything
+ *  else written for the screen it had). After a fresh start they are handed back before they run. */
+const SCREEN_JOBS = new Set(['POST /v1/devices/:id/replay', 'POST /v1/devices/:id/shell']);
 
 /** Before every request handler (src/daemon/main.ts): a use waits for a sleep in progress and wakes the phone; the
  *  returned function ends it. `receipt`: an input route whose wake runs inside its receipt (Ctx.beforeRun), for a new
@@ -271,14 +276,16 @@ export async function enterRequest(c: Pick<Ctx, 'params' | 'req' | 'res'> & { ow
     if (n > 0) inflight.set(id, n); else inflight.delete(id);
     touchUse(id);
   };
-  const gate = () => wakeGate(c, id, (receipt && !NOT_SCREEN_INPUT.has(`${method} ${route}`)) || SCREEN_JOBS.has(`${method} ${route}`));
+  const met = readMarker(id)?.since;   // the sleep this request met on arrival: its gate may run later (a receipt's body first)
+  const gate = () => wakeGate(c, id, (receipt && !NOT_SCREEN_INPUT.has(`${method} ${route}`)) || SCREEN_JOBS.has(`${method} ${route}`), met);
   if (receipt) { c.beforeRun = gate; return leave; }
   try { await gate(); } catch (e) { leave(); throw e; }
   return leave;
 }
-async function wakeGate(c: Pick<Ctx, 'req' | 'res'>, id: string, screenInput: boolean): Promise<void> {
+async function wakeGate(c: Pick<Ctx, 'req' | 'res'>, id: string, screenInput: boolean, met?: string): Promise<void> {
   try {
-    const woke = await ensureAwake(id, 'daemon');
+    // This request's wake, or (another request woke it since this one arrived) how the sleep it met came back.
+    const woke = await ensureAwake(id, 'daemon') ?? (met && woken.get(id)?.since === met ? woken.get(id)!.w : undefined);
     if (woke && c.res && !c.res.headersSent) c.res.setHeader(WOKE_HEADER, wokeHeader(woke));
     // The caller may have given up during a wake: don't act on its behalf afterwards.
     if (c.res?.destroyed || (c.req as { aborted?: boolean } | undefined)?.aborted) {
@@ -342,7 +349,7 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
     try {
       report = prior?.report ?? await b.wakeFromSleep(nativeId, marker.state, { ...boot, onProgress });
       try { await untilRunning(id, backend); }
-      catch (e) { outcomes.set(id, prior ?? { ms: Date.now() - t0, name: marker.name, report, keptAt: now() }); throw e; }
+      catch (e) { outcomes.set(id, prior ?? { ms: Date.now() - t0, name: marker.name, report, keptAt: now(), since: marker.since }); throw e; }
     } catch (e) {
       const pe = e as PhoneDockError;
       logAction(id, by, { action: 'device.wake_failed', error: [pe.message ?? String(e), pe.hints?.[0]].filter(Boolean).join(' ').slice(0, 400) });
@@ -352,14 +359,15 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
         ['Nothing was sent. Try again; if it keeps failing, use Cold Boot (its apps and data are kept).', ...(pe.hints ?? [])],
         [pe.message, pe.detail].filter(Boolean).join('\n'), 'not_sent');
     }
-    return wakeDone(id, by, { ms: (prior?.ms ?? 0) + Date.now() - t0, name: marker.name, report });
+    return wakeDone(id, by, { ms: (prior?.ms ?? 0) + Date.now() - t0, name: marker.name, report }, marker.since);
   })().finally(() => { if (wakes.get(id) === p) wakes.delete(id); });
   wakes.set(id, p);
   return p;
 }
-function wakeDone(id: string, by: string, w: WakeResult): WakeResult {
+function wakeDone(id: string, by: string, w: WakeResult, since: string): WakeResult {
   const { ms, name, report } = w;
   clearMarker(id);
+  woken.set(id, { since, w: { ms, name, report } });
   touchUse(id);
   const secs = (ms / 1000).toFixed(1);
   logAction(id, by, {
@@ -377,7 +385,7 @@ async function untilRunning(id: string, backend: string, ms = wakeTiming.readyMs
     invalidateDevices();   // each look a new scan, never one from before the wake
     const left = deadline - Date.now();
     const d = await Promise.race([freshDevice(id, backend), sleep(left).then(() => undefined)]);
-    if (d?.state === 'running') return;
+    if (d?.state === 'running' && !d.meta?.stale) return;   // a stale row (that scan failed or is still running) is no proof
     await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
   }
   throw new PhoneDockError('The phone woke but isn’t ready yet', 'not_ready', 503, ['Nothing was sent. Try again in a few seconds.'],
@@ -411,12 +419,14 @@ export async function sleepDevice(d: Pick<Device, 'id' | 'name' | 'nativeId'>, b
       if (setting === null) return 'idle sleep was turned off';
       const awake = keepAwakeReasons(id);
       if (awake.length) return awake[0];
-      return idleDue({ now: now(), timeoutSec: setting, lastUseAt: lastUseOf(id), awake }).due ? undefined : 'it was used';
+      if (!idleDue({ now: now(), timeoutSec: setting, lastUseAt: lastUseOf(id), awake }).due) return 'it was used';
+      stopStreamsFor(id);   // committed: its live views end now, never before the look that counts their viewers
+      return undefined;
     };
     op.phase = 'stopping';
     const t1 = Date.now();
     let slept: SleepState;
-    try { slept = await withTransition(id, 'stopping', async () => { stopStreamsFor(id); return b.stopForSleep!(d.nativeId, state, { confirm }); }); }
+    try { slept = await withTransition(id, 'stopping', () => b.stopForSleep!(d.nativeId, state, { confirm })); }
     catch (e) {
       // Called off, or it failed before the stop: it keeps running, not asleep. No proof it stopped: the marker stays,
       // and a request wakes it once it reads stopped.
@@ -476,7 +486,7 @@ export async function sweep(): Promise<void> {
         if ((await getDevice(d.id, true).catch(() => undefined))?.state !== 'running' || ops.has(d.id) || wakes.has(d.id)) continue;
         const kept = outcomes.get(d.id);
         if (kept && now() - kept.keptAt < KEEP_OUTCOME_SEC * 1000) continue;
-        if (kept) wakeDone(d.id, 'daemon', kept); else clearMarker(d.id);
+        if (kept) wakeDone(d.id, 'daemon', kept, kept.since); else clearMarker(d.id);
         invalidateDevices();
         continue;
       }
@@ -554,5 +564,5 @@ export function setIdleSleepRoleForTests(o: { sleeper?: boolean; defaultSec?: nu
   if (o.defaultSec !== undefined) defaultSec = o.defaultSec;
 }
 export function resetIdleSleepForTests() {
-  daemonStartedAt = now(); lastUse.clear(); inflight.clear(); failures.clear(); ops.clear(); wakes.clear(); stamped.clear(); outcomes.clear();
+  daemonStartedAt = now(); lastUse.clear(); inflight.clear(); failures.clear(); ops.clear(); wakes.clear(); stamped.clear(); outcomes.clear(); woken.clear();
 }

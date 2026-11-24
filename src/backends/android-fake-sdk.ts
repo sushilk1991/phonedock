@@ -25,6 +25,8 @@ export interface FakeSdkState {
   activeInstrumentation: boolean; instrFails: boolean;
   /** The guest's `sync` fails / the emulator dies during it / meanwhile another AVD's emulator takes this serial. */
   syncFails: boolean; syncKills?: boolean; syncSwapsTo?: string;
+  /** Emulators (serials) whose console answers `emu avd path` with KO. */
+  pathKO?: string[];
   /** `sys.boot_completed` (false: still booting). */
   bootCompleted: boolean;
   wakefulness: 'Awake' | 'Asleep';
@@ -80,7 +82,7 @@ if (tool !== 'adb') {   // emulator (or a renamed copy of it)
   if (rest[0] === 'emu') {
     const c = rest.slice(1);
     if (c[0] === 'avd' && c[1] === 'name') { console.log(emu.name + '\nOK'); process.exit(0); }
-    if (c[0] === 'avd' && c[1] === 'path') { console.log(emu.path + '\nOK'); process.exit(0); }
+    if (c[0] === 'avd' && c[1] === 'path') { console.log((s.pathKO?.includes(serial) ? 'KO' : emu.path) + '\nOK'); process.exit(0); }
     if (c[0] === 'avd' && c[1] === 'snapshot') {
       const op = c[2], n = c[3];
       if (op === 'save') save(emu, n);
@@ -172,7 +174,7 @@ export function fakeManagedAvd(home: string, name: string, ramMB = 2048): string
   mkdirSync(join(dir, 'snapshots'), { recursive: true });
   writeFileSync(join(avdHome, `${name}.ini`), `avd.ini.encoding=UTF-8\npath=${dir}\ntarget=android-34\n`);
   writeFileSync(join(dir, 'config.ini'), `hw.ramSize=${ramMB}\nhw.lcd.width=1080\nhw.lcd.height=2340\nimage.sysdir.1=system-images/android-34/google_apis_playstore/arm64-v8a/\n`);
-  writeFileSync(join(dir, 'phonedock.json'), JSON.stringify({ vulkan: false }));
+  writeFileSync(join(dir, 'phonedock.json'), JSON.stringify({ vulkan: false, spec: { backend: 'android-emulator', name }, createdAt: new Date().toISOString() }));
   writeFileSync(join(dir, 'userdata-qemu.img.qcow2'), JSON.stringify({ files: {}, snaps: {} }));   // its disk
   return dir;
 }
