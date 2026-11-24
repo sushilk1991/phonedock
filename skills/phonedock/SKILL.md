@@ -161,6 +161,17 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
 - **Same flow on Android and iOS.** One device per platform (`acquire_device platform="android"` /
   `platform="ios"`, or create both), then run the same steps on each, passing `device` explicitly. Report results
   per platform; selectors may differ (`element_id` is a resource-id on Android, an accessibility id on iOS).
+- **Older iPhones (iOS 26 and earlier).** Taps, typing and the UI tree need WebDriverAgent. Set Up Control signs a
+  runner with the person's Apple ID (the first time it builds for a few minutes), so run it only for a phone the user
+  asked you to use: `iphone_control action="set_up"` (CLI `phonedock ios wda-setup --udid <nativeId>`; the app's Set
+  Up Control). A failed setup keeps the
+  code `wda_setup_failed` and names what to fix in `cause`: for `team_required` ask which team (`action="teams"`) and
+  pass `team`; `xcode_account_missing`, `developer_mode_off`, `not_paired`, `device_locked` and
+  `wda_untrusted` are the person's to fix (`request_human` with the hint, then set up again); `wda_running` means
+  a WebDriverAgent already runs on the phone (another Mac's, Xcode's, or an earlier one) and was left alone: tell the user, and end
+  it with `action="stop"` (Stop Control) only if they ask. Control doesn't come back by
+  itself: after the phone or PhoneDock restarts, input says `wda_not_ready`; set up again (about 8 s). Never pass
+  `share` (anyone on the Wi-Fi could control the phone) unless the user asks for another Mac to drive it.
 - **App Store screenshots.** Create the required model (`list_profiles backend="ios-simulator" filter="Pro Max"`),
   set the scene (`set_appearance`, sample data, `open_url` deep links), then `screenshot save_to=… format="png"`
   at full resolution (no `max_size`). On a simulator/emulator, `device_environment` can override the status bar;

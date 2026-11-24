@@ -1,11 +1,25 @@
 // Manifest and lock validation for managed components (tools/components.json + tools/ios-tools.lock).
+// Kinds: 'python-venv' (ios-tools), 'binary-archive' (axe), 'source-archive' (wda: a source tree PhoneDock builds).
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PhoneDockError, type ComponentId } from './types.ts';
 
-export const COMPONENT_IDS: readonly ComponentId[] = ['ios-tools', 'axe'];
+export const COMPONENT_IDS: readonly ComponentId[] = ['ios-tools', 'axe', 'wda'];
+/** Components a manifest may leave out (one from before they existed, via PHONEDOCK_TOOLS_DIR): reported unavailable
+ *  only when asked for. */
+export const OPTIONAL_COMPONENT_IDS: readonly ComponentId[] = ['wda'];
+
+/** The environment variable that points a component at a copy outside PhoneDock (an executable, or for 'wda' a
+ *  WebDriverAgent checkout). Set: auto-install stops and that copy is used. */
+export function envOverrideName(id: ComponentId): string {
+  if (id === 'ios-tools') return 'PHONEDOCK_PYMD3_PYTHON';
+  if (id === 'wda') return 'PHONEDOCK_WDA_SOURCE';
+  return 'PHONEDOCK_AXE';
+}
+
+export type ComponentKind = 'python-venv' | 'binary-archive' | 'source-archive';
 
 export interface ComponentArtifact {
   platforms: string[];
@@ -26,7 +40,7 @@ export interface ComponentSpec {
   id: ComponentId;
   displayName: string;
   description: string;
-  kind: 'python-venv' | 'binary-archive';
+  kind: ComponentKind;
   version: string;
   publishedAt: string;
   pythonVersion?: string;
@@ -38,6 +52,8 @@ export interface ComponentSpec {
   recentExceptions?: RecentException[];
   recentOverrideReason?: string;
   estimatedDiskBytes: number;
+  /** Upstream licence notice shipped in tools/ (relative path), for components PhoneDock builds from source. */
+  licenseFile?: string;
   artifacts: ComponentArtifact[];
   verify: {
     package?: string;
@@ -46,6 +62,10 @@ export interface ComponentSpec {
     binary?: string;
     versionArgs?: string[];
     expectedVersion?: string;
+    /** source-archive: the archive's top directory (e.g. "WebDriverAgent-16.15.3"), which becomes the component path. */
+    sourceDir?: string;
+    /** source-archive: files that must exist under sourceDir (the project file, the licence). */
+    requiredFiles?: string[];
   };
 }
 
@@ -63,7 +83,7 @@ export function sha256Hex(data: string | Buffer): string {
 }
 
 export function isComponentId(id: string): id is ComponentId {
-  return id === 'ios-tools' || id === 'axe';
+  return (COMPONENT_IDS as readonly string[]).includes(id);
 }
 
 export function currentPlatformKey(platform = process.platform, arch = process.arch): string {
@@ -186,14 +206,31 @@ export function validateManifest(
 
   for (const id of COMPONENT_IDS) {
     const c = comps[id] as ComponentSpec | undefined;
+    if (c === undefined && OPTIONAL_COMPONENT_IDS.includes(id)) continue;
     if (!c || typeof c !== 'object' || c.id !== id) {
       throw new PhoneDockError(`Missing component "${id}" in manifest`, 'invalid_manifest', 500);
     }
     if (typeof c.version !== 'string' || !c.version.trim()) {
       throw new PhoneDockError(`Invalid version for component "${id}"`, 'invalid_manifest', 500);
     }
-    if (c.kind !== 'python-venv' && c.kind !== 'binary-archive') {
+    if (c.kind !== 'python-venv' && c.kind !== 'binary-archive' && c.kind !== 'source-archive') {
       throw new PhoneDockError(`Invalid kind for component "${id}"`, 'invalid_manifest', 500);
+    }
+    if (c.kind === 'source-archive') {
+      const dir = c.verify?.sourceDir;
+      if (typeof dir !== 'string' || !/^[A-Za-z0-9._-]+$/.test(dir) || dir === '.' || dir === '..') {
+        throw new PhoneDockError(`Component "${id}" needs verify.sourceDir (one directory name)`, 'invalid_manifest', 500);
+      }
+      const files = c.verify.requiredFiles ?? [];
+      if (!Array.isArray(files) || files.some((f) => typeof f !== 'string' || f.startsWith('/') || f.split('/').includes('..'))) {
+        throw new PhoneDockError(`Component "${id}" has invalid verify.requiredFiles`, 'invalid_manifest', 500);
+      }
+    }
+    if (c.licenseFile !== undefined) {
+      if (typeof c.licenseFile !== 'string' || c.licenseFile.startsWith('/') || c.licenseFile.split('/').includes('..')
+        || !existsSync(join(toolsDir, c.licenseFile))) {
+        throw new PhoneDockError(`Licence notice missing for "${id}"`, 'invalid_manifest', 500, undefined, `Not found in tools/: ${String(c.licenseFile)}`);
+      }
     }
     if (!Array.isArray(c.artifacts) || c.artifacts.length === 0) {
       throw new PhoneDockError(`Component "${id}" has no artifacts`, 'invalid_manifest', 500);

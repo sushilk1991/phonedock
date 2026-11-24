@@ -55,6 +55,12 @@ test('component routes list status, return 404 on unknown id, and deduplicate co
           artifacts: [{ platforms: ['darwin-arm64', 'darwin-x64'], filename: 'axe.tar.gz', url: `http://127.0.0.1:${port}/axe.tar.gz`, sha256: sha256Hex(buf), size: buf.length }],
           verify: { binary: 'axe', versionArgs: ['--version'], expectedVersion: '1.8.0' },
         },
+        wda: {
+          id: 'wda', displayName: 'iPhone WebDriverAgent', description: 'wda', kind: 'source-archive',
+          version: '16.15.3', publishedAt: '2026-10-16T00:00:00Z', estimatedDiskBytes: 5_000_000,
+          artifacts: [{ platforms: ['darwin-arm64', 'darwin-x64'], filename: 'wda.tar.gz', url: `http://127.0.0.1:${port}/wda.tar.gz`, sha256: 'e'.repeat(64), size: 100 }],
+          verify: { sourceDir: 'WebDriverAgent-16.15.3', requiredFiles: ['WebDriverAgent.xcodeproj/project.pbxproj'] },
+        },
       },
     }));
 
@@ -70,8 +76,9 @@ test('component routes list status, return 404 on unknown id, and deduplicate co
     const listMatch = router.match('GET', '/v1/components');
     assert.ok(listMatch && listMatch !== 'method');
     const listed = await listMatch.h({ params: {}, q: () => undefined } as unknown as Ctx) as any[];
-    assert.equal(listed.length, 2);
+    assert.deepEqual(listed.map((x) => x.id), ['ios-tools', 'axe', 'wda']);
     assert.equal(listed.find((x) => x.id === 'axe')?.state, 'missing');
+    assert.equal(listed.find((x) => x.id === 'wda')?.state, 'missing', 'no checkout on disk ever counts as the wda component');
 
     const badMatch = router.match('POST', '/v1/components/nope/install');
     assert.ok(badMatch && badMatch !== 'method');

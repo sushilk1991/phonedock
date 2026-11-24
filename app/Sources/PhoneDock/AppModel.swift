@@ -69,6 +69,8 @@ final class AppModel {
     var asleep: Set<String> = []
     /// Ask the window to show this inspector tab (the crash toast's View). The root view clears it.
     var requestedInspectorTab: InspectorTab?
+    /// Set Up Control and Stop Control runs for older iPhones, by device id (OlderIphoneControl.swift).
+    var controlRuns: [String: ControlRun] = [:]
     /// Devices being created: they show in the sidebar with stage text until the service lists them.
     var creating: [PendingDevice] = []
     private var crashBaseline: [String: Set<String>] = [:]
@@ -377,7 +379,10 @@ final class AppModel {
         let sorted = list.sorted { ($0.kind, $0.name.lowercased()) < ($1.kind, $1.name.lowercased()) }
         let changed = sorted != devices
         SelfTest.devicesApplied(changed: changed, nonempty: !sorted.isEmpty)
-        if changed { devices = sorted }
+        if changed {
+            settleControlRuns(sorted)
+            devices = sorted
+        }
         // Restore the last selection (or PHONEDOCK_SELECT=<name|id>) once; never auto-pick a device, so the app
         // doesn't start streaming someone's phone just because it launched.
         if !restoredSelection, !devices.isEmpty {

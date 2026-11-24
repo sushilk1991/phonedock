@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "minAgeDays": 14,
+  "allowedHosts": [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "files.pythonhosted.org",
+    "pypi.org"
+  ],
+  "components": {
+    "ios-tools": {
+      "id": "ios-tools",
+      "displayName": "iPhone Control",
+      "description": "Python 3.12 runtime and pymobiledevice3 for iOS 27+ touch, keyboard, UI tree, and live video.",
+      "kind": "python-venv",
+      "version": "11.63.1",
+      "publishedAt": "2026-11-22T22:46:02.018002Z",
+      "pythonVersion": "3.12.16",
+      "pythonRelease": "20261026",
+      "pythonPublishedAt": "2026-10-26T15:54:13Z",
+      "lockFile": "ios-tools.lock",
+      "lockSha256": "603179df18d3cf4dd72970d322af209eea224fcbef59de04fd98b37554b0e714",
+      "excludeNewerCutoff": "2026-11-10T04:22:52Z",
+      "recentExceptions": [
+        {
+          "package": "pymobiledevice3",
+          "version": "11.63.1",
+          "publishedAt": "2026-11-22T22:46:02.018002Z",
+          "reason": "Only version verified on iOS 27.2.1 hardware (UI tree and live video over Wi-Fi)."
+        },
+        {
+          "package": "ansilogs",
+          "version": "1.2.0",
+          "publishedAt": "2026-11-12T17:44:10.482947Z",
+          "reason": "Required dependency of pymobiledevice3 11.63.1: Only version verified on iOS 27.2.1 hardware (UI tree and live video over Wi-Fi)."
+        },
+        {
+          "package": "apple-symbols",
+          "version": "0.0.2",
+          "publishedAt": "2026-11-22T06:38:29.236243Z",
+          "reason": "Required dependency of pymobiledevice3 11.63.1: Only version verified on iOS 27.2.1 hardware (UI tree and live video over Wi-Fi)."
+        },
+        {
+          "package": "ipsw-parser",
+          "version": "1.9.2",
+          "publishedAt": "2026-11-19T17:04:10.584192Z",
+          "reason": "Required dependency of pymobiledevice3 11.63.1: Only version verified on iOS 27.2.1 hardware (UI tree and live video over Wi-Fi)."
+        },
+        {
+          "package": "pycrashreport",
+          "version": "2.5.1",
+          "publishedAt": "2026-11-22T12:37:27.280164Z",
+          "reason": "Required dependency of pymobiledevice3 11.63.1: Only version verified on iOS 27.2.1 hardware (UI tree and live video over Wi-Fi)."
+        }
+      ],
+      "estimatedDiskBytes": 277000000,
+      "artifacts": [
+        {
+          "platforms": [
+            "darwin-arm64"
+          ],
+          "filename": "cpython-3.12.16+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
+          "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.12.16%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz",
+          "sha256": "353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e",
+          "size": 25035343
+        }
+      ],
+      "verify": {
+        "package": "pymobiledevice3",
+        "version": "11.63.1",
+        "sidecars": [
+          "pd-ios-hid.py",
+          "pd-ios-native.py"
+        ]
+      }
+    },
+    "axe": {
+      "id": "axe",
+      "displayName": "Simulator Control",
+      "description": "AXe CLI for iOS simulator input, accessibility tree, and video streaming.",
+      "kind": "binary-archive",
+      "version": "1.8.0",
+      "publishedAt": "2026-07-20T12:14:36Z",
+      "estimatedDiskBytes": 16864236,
+      "artifacts": [
+        {
+          "platforms": [
+            "darwin-arm64",
+            "darwin-x64"
+          ],
+          "filename": "AXe-macOS-v1.8.0-universal.tar.gz",
+          "url": "https://github.com/cameroncooke/AXe/releases/download/v1.8.0/AXe-macOS-v1.8.0-universal.tar.gz",
+          "sha256": "7b76340b72e90d0f211bc7c4636f15009076eff07acef2f2b632b175debd8834",
+          "size": 8432118
+        }
+      ],
+      "verify": {
+        "binary": "axe",
+        "versionArgs": [
+          "--version"
+        ],
+        "expectedVersion": "1.8.0"
+      }
+    }
+  }
+}
