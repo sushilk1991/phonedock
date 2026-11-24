@@ -79,7 +79,7 @@ CARDS = {
       <p class="sub" style="position:absolute;top:338px;left:0;right:0;text-align:center;font-size:40px">
         Claude Code, Codex, Cursor and Pi use your iPhone, your Android phone, simulators and virtual phones.<br>
         You watch every screen live, and take over any time.</p>
-      {shot("agent-in-control.jpg", (320, 500, 1760, 900))}
+      {shot("agent-in-control.jpg", (300, 500, 1800, 900), (0, 0, 2000, 1800))}
     """),
     # One window: a virtual Pixel 8 next to an iPhone simulator and an iPad in the sidebar.
     "window": card("dark", f"""
@@ -87,7 +87,7 @@ CARDS = {
       <div style="position:absolute;top:104px;right:96px">{BRAND}</div>
       <p class="sub" style="position:absolute;top:240px;left:100px;font-size:40px">
         Simulators, emulators, virtual phones and your own phones, side by side. Live, with every setting a tap away.</p>
-      {shot("virtual-pixel.jpg", (320, 370, 1760, 1100))}
+      {shot("virtual-pixel.jpg", (96, 330, 2208, 1100))}
     """),
     # Run records: the detail of a saved flow's run, with what it ran on.
     "runs": card("dark", f"""
