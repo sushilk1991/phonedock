@@ -1,4 +1,4 @@
-// Managed component installer, verifier, lookup and pruning (ios-tools, axe).
+// Managed component installer, verifier, lookup and pruning (ios-tools, axe, wda).
 // Keeps downloaded runtimes under <PHONEDOCK_HOME>/components/<id>/<key>.
 // Lock-free atomic activation: each install stages in stage-<random>, writes .ready.json inside staging,
 // and activates via a single atomic rename(payload, <key>). A losing concurrent racer deletes its staging and adopts the winner.
@@ -15,7 +15,7 @@ import {
   type ComponentId, type ComponentPhase, type ComponentProgress, type ComponentSource, type ComponentStatus,
 } from './types.ts';
 import {
-  assertAllowedUrl, COMPONENT_IDS, componentKey, currentPlatformKey, isComponentId, loadManifest, selectArtifact,
+  assertAllowedUrl, COMPONENT_IDS, componentKey, currentPlatformKey, envOverrideName, isComponentId, loadManifest, selectArtifact,
   type ComponentArtifact, type ComponentManifest, type ComponentSpec,
 } from './components-manifest.ts';
 
@@ -80,7 +80,7 @@ export interface ComponentManagerOptions {
   onBeforeGarbageRestore?: (id: ComponentId, key: string) => void | Promise<void>;
   /** Override external discovery for status reporting. */
   externalLookup?: (id: ComponentId) => string | undefined;
-  /** Override env override lookup (PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_AXE). */
+  /** Override env override lookup (PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_AXE / PHONEDOCK_WDA_SOURCE). */
   envOverride?: (id: ComponentId) => string | undefined;
   /** Override backoff schedule in ms (unit tests). */
   backoffMs?: readonly number[];
@@ -372,7 +372,7 @@ export class ComponentManager {
 
   private rawEnvOverride(id: ComponentId): string | undefined {
     if (this.opts.envOverride) return this.opts.envOverride(id);
-    const raw = id === 'ios-tools' ? process.env.PHONEDOCK_PYMD3_PYTHON : process.env.PHONEDOCK_AXE;
+    const raw = process.env[envOverrideName(id)];
     return raw !== undefined && raw !== '' ? raw : undefined;
   }
 
@@ -380,6 +380,16 @@ export class ComponentManager {
     if (this.opts.externalLookup) return this.opts.externalLookup(id);
     if (id === 'axe') return which('axe');
     return undefined;
+  }
+
+  /** Whether `path` can serve as this component: an executable, or for a source archive a directory holding the
+   *  files its manifest requires (the Xcode project, the licence). */
+  private usable(id: ComponentId, path: string): boolean {
+    let spec: ComponentSpec | undefined;
+    try { spec = this.spec(id); } catch { /* manifest unreadable: fall back to the executable check */ }
+    if (spec?.kind !== 'source-archive') return isExecutable(path);
+    try { if (!statSync(path).isDirectory()) return false; } catch { return false; }
+    return (spec.verify.requiredFiles ?? []).every((f) => existsSync(join(path, f)));
   }
 
   private readReady(id: ComponentId, key: string): { marker: ReadyMarker; binaryPath: string } | undefined {
@@ -391,7 +401,7 @@ export class ComponentManager {
       if (!marker || marker.key !== key || typeof marker.binaryRelPath !== 'string') return undefined;
       const binaryPath = resolve(dir, marker.binaryRelPath);
       if (!binaryPath.startsWith(resolve(dir) + sep)) return undefined;
-      if (!isExecutable(binaryPath)) return undefined;
+      if (!this.usable(id, binaryPath)) return undefined;
       return { marker, binaryPath };
     } catch {
       return undefined;
@@ -433,7 +443,7 @@ export class ComponentManager {
   resolveManaged(id: ComponentId): { path: string; source: 'override' | 'managed'; key?: string; version?: string; isPinned: boolean } | undefined {
     const rawOverride = this.rawEnvOverride(id);
     if (rawOverride !== undefined) {
-      return isExecutable(rawOverride) ? { path: rawOverride, source: 'override', isPinned: true } : undefined;
+      return this.usable(id, rawOverride) ? { path: rawOverride, source: 'override', isPinned: true } : undefined;
     }
     let pin: { key: string; artifact: ComponentArtifact } | undefined;
     try { pin = this.pinnedKey(id); } catch { return undefined; }
@@ -612,8 +622,8 @@ export class ComponentManager {
     const rawOverride = this.rawEnvOverride(id);
 
     // An explicitly set override that is missing or not executable stops auto-install and reports invalid override.
-    if (rawOverride !== undefined && !isExecutable(rawOverride)) {
-      const envName = id === 'ios-tools' ? 'PHONEDOCK_PYMD3_PYTHON' : 'PHONEDOCK_AXE';
+    if (rawOverride !== undefined && !this.usable(id, rawOverride)) {
+      const envName = envOverrideName(id);
       return {
         id,
         displayName: s.displayName,
@@ -624,7 +634,9 @@ export class ComponentManager {
         updateAvailable: false,
         estimatedBytes: s.estimatedDiskBytes,
         ...(pin ? { downloadBytes: pin.artifact.size } : {}),
-        detail: `${envName} is set to a missing or non-executable path.`,
+        detail: s.kind === 'source-archive'
+          ? `${envName} is set to a path that isn’t a ${s.displayName} source folder.`
+          : `${envName} is set to a missing or non-executable path.`,
         error: {
           code: 'invalid_override',
           message: `Configured ${envName} override is not executable`,
@@ -853,6 +865,10 @@ export class ComponentManager {
         });
         // Rewrite venv paths from staging to finalDir so the single atomic rename activates a working venv.
         relocateVenvForFinalDir(payloadDir, finalDir);
+      } else if (spec.kind === 'source-archive') {
+        binaryRelPath = this.verifySourceArchive(spec, payloadDir, (phase, pct, detail) => {
+          setProgress(phase, pct, artifact.size, artifact.size, detail, true);
+        });
       } else {
         binaryRelPath = await this.verifyBinaryArchive(spec, payloadDir, (phase, pct, detail) => {
           setProgress(phase, pct, artifact.size, artifact.size, detail, true);
@@ -1167,6 +1183,27 @@ export class ComponentManager {
     return join('venv', 'bin', 'python');
   }
 
+  /** A source archive is usable when its one top directory holds every required file; that directory becomes the
+   *  component path (what resolveManaged returns). Nothing in it is run. */
+  private verifySourceArchive(
+    spec: ComponentSpec,
+    payloadDir: string,
+    onStep: (phase: ComponentPhase, pct: number, detail: string) => void,
+  ): string {
+    onStep('checking', 90, `Verifying ${spec.displayName}…`);
+    const top = spec.verify.sourceDir!;
+    const entries = readdirSync(payloadDir).filter((n) => n !== '.DS_Store');
+    if (entries.length !== 1 || entries[0] !== top || !statSync(join(payloadDir, top)).isDirectory()) {
+      throw new PhoneDockError(`Extracted archive doesn’t hold ${spec.displayName}`, 'self_check_failed', 502, undefined,
+        `Expected one top directory "${top}", got: ${entries.slice(0, 5).join(', ') || '(nothing)'}`);
+    }
+    const missing = (spec.verify.requiredFiles ?? []).filter((f) => !existsSync(join(payloadDir, top, f)));
+    if (missing.length) {
+      throw new PhoneDockError(`Extracted ${spec.displayName} is incomplete`, 'self_check_failed', 502, undefined, `Missing: ${missing.join(', ')}`);
+    }
+    return top;
+  }
+
   private async verifyBinaryArchive(
     spec: ComponentSpec,
     payloadDir: string,
@@ -1221,6 +1258,13 @@ export function getComponentManager(): ComponentManager {
 
 export function setComponentManager(manager: ComponentManager | undefined): void {
   defaultManager = manager;
+}
+
+/** The WebDriverAgent source folder to build: PHONEDOCK_WDA_SOURCE, else the pinned managed copy, else the newest
+ *  other managed copy. Never a git clone of upstream HEAD. */
+export function resolveWdaSource(manager: ComponentManager = getComponentManager()): { path: string; version?: string; source: 'override' | 'managed' } | undefined {
+  const r = manager.resolveManaged('wda');
+  return r ? { path: r.path, version: r.version, source: r.source } : undefined;
 }
 
 /** Resolve AXe binary using the standard 4-step lookup order (override -> pinned -> newest managed -> PATH). */

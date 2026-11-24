@@ -661,7 +661,8 @@ export interface Backend {
 
 // ── Managed components (GET /v1/components, POST /v1/components/:id/install) ──
 
-export type ComponentId = 'ios-tools' | 'axe';
+/** 'wda': the pinned appium/WebDriverAgent source PhoneDock builds for iPhones on iOS 26 and older. */
+export type ComponentId = 'ios-tools' | 'axe' | 'wda';
 export type ComponentState = 'missing' | 'installing' | 'ready' | 'failed';
 export type ComponentPhase = 'queued' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'checking';
 export type ComponentSource = 'managed' | 'override' | 'external' | 'none';

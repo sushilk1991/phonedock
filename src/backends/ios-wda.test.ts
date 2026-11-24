@@ -1,0 +1,660 @@
+// WebDriverAgent setup and supervision with fakes only: no Xcode account, no phone, no xcodebuild, no network.
+// Team ids, udids and names below are made up.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, cpSync, utimesSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PhoneDockError, type ExecResult } from '../core/types.ts';
+import {
+  UPSTREAM_RUNNER_BUNDLE_ID, WdaSupervisor, buildArgv, buildKey, chooseTeam, classifyXcodebuild, ensureBuild, launchArgv,
+  launchWda, parseApiKey, parseXcodeTeams, preflight, pruneBuilds, readProfile, readXcodeInfo, readXcodeTeams, rebuildReason,
+  runnerBundleId, startRunner, type ChildLike, type Exec, type PhoneFacts, type Runner, type SupervisorDeps, type WdaBuildDeps,
+} from './ios-wda.ts';
+
+const TEAM_A = 'AAAAA11111', TEAM_B = 'BBBBB22222', TEAM_FREE = 'FFFFF33333';
+const UDID = '00008020-0000AAAA0000BBBB';
+
+// ── teams ──
+
+test('parseXcodeTeams reads the defaults shape, accepts true and 1 for free teams, and lists a team once', () => {
+  const raw = {
+    'ACCOUNT-1': [
+      { isFreeProvisioningTeam: false, teamID: TEAM_A, teamName: 'Example Co', teamType: 'Company' },
+      { isFreeProvisioningTeam: 1, teamID: TEAM_FREE, teamName: 'Pat Example (Personal Team)', teamType: 'Individual' },
+    ],
+    'ACCOUNT-2': [
+      { isFreeProvisioningTeam: 0, teamID: TEAM_A, teamName: 'Example Co', teamType: 'Company' },
+      { isFreeProvisioningTeam: true, teamID: TEAM_B, teamName: 'Beta Labs' },
+      { teamID: 'short', teamName: 'bad id' },
+      'junk',
+    ],
+  };
+  assert.deepEqual(parseXcodeTeams(raw), [
+    { id: TEAM_B, name: 'Beta Labs', free: true },
+    { id: TEAM_A, name: 'Example Co', type: 'Company', free: false },
+    { id: TEAM_FREE, name: 'Pat Example (Personal Team)', type: 'Individual', free: true },
+  ]);
+  assert.deepEqual(parseXcodeTeams(undefined), []);
+  assert.deepEqual(parseXcodeTeams([]), []);
+  assert.deepEqual(parseXcodeTeams({ x: 'nope' }), []);
+});
+
+test('readXcodeTeams exports the Xcode domain and extracts only the teams key; no domain or key means no teams', async () => {
+  const calls: string[][] = [];
+  const exec = (mode: 'ok' | 'nodomain' | 'nokey'): Exec => async (cmd, args) => {
+    calls.push([cmd, ...args]);
+    if (cmd === '/usr/bin/defaults') {
+      if (mode === 'nodomain') return { code: 1, stdout: '', stderr: 'Domain com.apple.dt.Xcode does not exist' };
+      writeFileSync(args[2], '<plist/>');
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (mode === 'nokey') return { code: 1, stdout: '', stderr: 'No value at that key path' };
+    return { code: 0, stdout: JSON.stringify({ acct: [{ teamID: TEAM_A, teamName: 'Example Co', isFreeProvisioningTeam: false }] }), stderr: '' };
+  };
+  assert.deepEqual(await readXcodeTeams(exec('ok')), [{ id: TEAM_A, name: 'Example Co', free: false }]);
+  assert.deepEqual(calls[0].slice(0, 3), ['/usr/bin/defaults', 'export', 'com.apple.dt.Xcode']);
+  assert.deepEqual(calls[1].slice(0, 4), ['/usr/bin/plutil', '-extract', 'IDEProvisioningTeamByIdentifier', 'json']);
+  assert.ok(!existsSync(calls[0][3]), 'the exported domain is deleted afterwards');
+  assert.deepEqual(await readXcodeTeams(exec('nodomain')), []);
+  assert.deepEqual(await readXcodeTeams(exec('nokey')), []);
+});
+
+test('chooseTeam: none → sign in (naming the API key), one → it, several → a choice, free teams flagged', () => {
+  const a = { id: TEAM_A, name: 'Example Co', type: 'Company', free: false };
+  const b = { id: TEAM_B, name: 'Beta Labs', free: false };
+  const f = { id: TEAM_FREE, name: 'Personal', free: true };
+  const none = (() => { try { chooseTeam([], {}); } catch (e) { return e as PhoneDockError; } })()!;
+  assert.equal(none.code, 'xcode_account_missing');
+  assert.match(none.message, /Sign in to Xcode/);
+  assert.match(none.hints!.join(' '), /Xcode › Settings › Accounts/);
+  assert.match(none.hints!.join(' '), /--api-key-path/);
+
+  assert.deepEqual(chooseTeam([a], {}), { id: TEAM_A, free: false, name: 'Example Co' });
+  assert.deepEqual(chooseTeam([f], {}), { id: TEAM_FREE, free: true, name: 'Personal' });
+
+  const several = (() => { try { chooseTeam([a, b], {}); } catch (e) { return e as PhoneDockError; } })()!;
+  assert.equal(several.code, 'team_required');
+  assert.equal(several.status, 409);
+  assert.match(several.detail!, new RegExp(`${TEAM_A}.*${TEAM_B}|${TEAM_B}.*${TEAM_A}`));
+  assert.deepEqual(chooseTeam([a, b], { team: TEAM_B }), { id: TEAM_B, free: false, name: 'Beta Labs' });
+
+  assert.throws(() => chooseTeam([a], { team: 'nope' }), (e: PhoneDockError) => e.code === 'bad_request');
+  assert.throws(() => chooseTeam([a], { team: TEAM_B }), (e: PhoneDockError) => e.code === 'team_unknown');
+  assert.throws(() => chooseTeam([], { team: TEAM_B }), (e: PhoneDockError) => e.code === 'xcode_account_missing');
+
+  // An App Store Connect key stands in for the Xcode account; it still needs a team.
+  const key = { path: '/k/AuthKey_KEYID12345.p8', keyId: 'KEYID12345', issuerId: '11111111-2222-3333-4444-555555555555' };
+  assert.deepEqual(chooseTeam([], { team: TEAM_B, apiKey: key }), { id: TEAM_B, free: false });
+  assert.throws(() => chooseTeam([], { apiKey: key }), (e: PhoneDockError) => e.code === 'team_required');
+});
+
+test('parseApiKey needs all three parts, an existing .p8 path and well-formed ids', () => {
+  const exists = (p: string) => p === '/keys/AuthKey_KEYID12345.p8';
+  assert.equal(parseApiKey({}, exists), undefined);
+  assert.deepEqual(parseApiKey({ path: '/keys/AuthKey_KEYID12345.p8', keyId: 'KEYID12345', issuerId: '11111111-2222-3333-4444-555555555555' }, exists),
+    { path: '/keys/AuthKey_KEYID12345.p8', keyId: 'KEYID12345', issuerId: '11111111-2222-3333-4444-555555555555' });
+  assert.throws(() => parseApiKey({ path: '/keys/AuthKey_KEYID12345.p8' }, exists), /file, key ID and issuer ID/);
+  assert.throws(() => parseApiKey({ path: '/keys/missing.p8', keyId: 'KEYID12345', issuerId: '11111111-2222-3333-4444-555555555555' }, exists), /Couldn’t find/);
+  assert.throws(() => parseApiKey({ path: 'relative.p8', keyId: 'KEYID12345', issuerId: '11111111-2222-3333-4444-555555555555' }, () => true), /Couldn’t find/);
+  assert.throws(() => parseApiKey({ path: '/keys/AuthKey_KEYID12345.p8', keyId: 'short', issuerId: '11111111-2222-3333-4444-555555555555' }, exists), /key ID/);
+  assert.throws(() => parseApiKey({ path: '/keys/AuthKey_KEYID12345.p8', keyId: 'KEYID12345', issuerId: 'nope' }, exists), /issuer ID/);
+});
+
+test('runner bundle id: upstream for paid teams, a team-specific one for personal teams', () => {
+  assert.equal(runnerBundleId(TEAM_A, false), UPSTREAM_RUNNER_BUNDLE_ID);
+  assert.equal(runnerBundleId(TEAM_FREE, true), 'dev.phonedock.wda.fffff33333');
+});
+
+// ── preflight ──
+
+test('preflight names the first thing to fix, before any build', () => {
+  const xcode = { build: '27B52', version: '27.2', minIos: '17.0' };
+  const ok: PhoneFacts = { found: true, paired: true, reachable: true, osVersion: '18.7', developerMode: true, locked: false };
+  const code = (x: typeof xcode | undefined, p: PhoneFacts | undefined) => preflight(x, p, UDID)?.code;
+  assert.equal(code(undefined, ok), 'xcode_missing');
+  assert.equal(code(xcode, undefined), 'not_found');
+  assert.equal(code(xcode, { found: false }), 'not_found');
+  assert.equal(code(xcode, { ...ok, paired: false }), 'not_paired');
+  assert.equal(code(xcode, { ...ok, reachable: false }), 'no_device');
+  assert.equal(code(xcode, { ...ok, osVersion: '16.7' }), 'ios_unsupported');
+  assert.match(preflight(xcode, { ...ok, osVersion: '16.7' }, UDID)!.hints![0], /iOS 17 or later/);
+  assert.equal(code({ build: 'X' }, { ...ok, osVersion: '14.8' }), 'ios_unsupported');     // the pinned WDA's own minimum
+  assert.equal(code({ build: 'X' }, { ...ok, osVersion: '16.7' }), undefined);
+  assert.equal(code(xcode, { ...ok, developerMode: false }), 'developer_mode_off');
+  assert.equal(code(xcode, { ...ok, locked: true }), 'device_locked');
+  assert.equal(code(xcode, { ...ok, locked: null, developerMode: null }), undefined);       // unknown: go ahead
+  assert.equal(code(xcode, ok), undefined);
+});
+
+test('readXcodeInfo reads the Xcode build and the minimum iOS of its XCTest', async () => {
+  const dev = mkdtempSync(join(tmpdir(), 'pd-wda-dev-'));
+  try {
+    const fw = join(dev, 'Platforms', 'iPhoneOS.platform', 'Developer', 'Library', 'Frameworks', 'XCTest.framework');
+    mkdirSync(fw, { recursive: true }); writeFileSync(join(fw, 'XCTest'), '');
+    const exec: Exec = async (_c, args) => args[0] === 'xcodebuild'
+      ? { code: 0, stdout: 'Xcode 27.2\nBuild version 27B52\n', stderr: '' }
+      : { code: 0, stdout: 'Load command 10\n      cmd LC_BUILD_VERSION\n platform IOS\n    minos 17.0\n      sdk 27.2\n', stderr: '' };
+    assert.deepEqual(await readXcodeInfo(exec, dev), { build: '27B52', version: '27.2', minIos: '17.0' });
+    assert.equal(await readXcodeInfo(async () => ({ code: 1, stdout: '', stderr: 'xcode-select: error' }), dev), undefined);
+  } finally { rmSync(dev, { recursive: true, force: true }); }
+});
+
+// ── xcodebuild argv ──
+
+test('build-for-testing registers the phone, signs automatically, and takes an API key; launch only runs the xctestrun', () => {
+  const base = { project: '/b/src/WebDriverAgent.xcodeproj', derivedData: '/b/DerivedData', destination: `id=${UDID}`, team: TEAM_A, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
+  const a = buildArgv(base);
+  assert.equal(a[0], 'build-for-testing');
+  assert.ok(!a.includes('test'), 'never `xcodebuild test` (it builds and runs in one go)');
+  const i = a.indexOf('-allowProvisioningDeviceRegistration');
+  assert.ok(i > 0 && a.includes('-allowProvisioningUpdates'), 'registration needs both provisioning flags');
+  assert.deepEqual(a.slice(a.indexOf('-destination'), a.indexOf('-destination') + 2), ['-destination', `id=${UDID}`]);
+  assert.deepEqual(a.slice(a.indexOf('-derivedDataPath'), a.indexOf('-derivedDataPath') + 2), ['-derivedDataPath', '/b/DerivedData']);
+  assert.ok(a.includes(`DEVELOPMENT_TEAM=${TEAM_A}`) && a.includes('CODE_SIGN_STYLE=Automatic'));
+  assert.ok(!a.some((x) => x.startsWith('PRODUCT_BUNDLE_IDENTIFIER=')), 'paid teams keep upstream’s id');
+  assert.ok(!a.includes('-authenticationKeyPath'));
+
+  const k = buildArgv({ ...base, team: TEAM_FREE, bundleId: runnerBundleId(TEAM_FREE, true),
+    apiKey: { path: '/keys/AuthKey_KEYID12345.p8', keyId: 'KEYID12345', issuerId: '11111111-2222-3333-4444-555555555555' } });
+  assert.deepEqual(k.slice(k.indexOf('-authenticationKeyPath'), k.indexOf('-authenticationKeyPath') + 6),
+    ['-authenticationKeyPath', '/keys/AuthKey_KEYID12345.p8', '-authenticationKeyID', 'KEYID12345', '-authenticationKeyIssuerID', '11111111-2222-3333-4444-555555555555']);
+  assert.ok(k.includes('PRODUCT_BUNDLE_IDENTIFIER=dev.phonedock.wda.fffff33333'));
+
+  assert.deepEqual(launchArgv('/b/DerivedData/Build/Products/WebDriverAgentRunner_iphoneos27.2-arm64.xctestrun', `id=${UDID}`),
+    ['test-without-building', '-xctestrun', '/b/DerivedData/Build/Products/WebDriverAgentRunner_iphoneos27.2-arm64.xctestrun', '-destination', `id=${UDID}`]);
+});
+
+test('build key changes with the WebDriverAgent version, team, Xcode build and bundle id', () => {
+  const k = { wdaVersion: '16.15.3', team: TEAM_A, xcodeBuild: '27B52', bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
+  const base = buildKey(k);
+  assert.match(base, /^16\.15\.3-AAAAA11111-27B52-[0-9a-f]{8}$/);
+  for (const change of [{ wdaVersion: '16.16.0' }, { team: TEAM_B }, { xcodeBuild: '27C10' }, { bundleId: 'dev.phonedock.wda.x' }]) {
+    assert.notEqual(buildKey({ ...k, ...change }), base, JSON.stringify(change));
+  }
+  assert.equal(buildKey({ ...k }), base);
+});
+
+test('rebuild triggers: no build, expired or expiring signing, a phone missing from the profile', () => {
+  const now = Date.parse('2026-11-24T12:00:00Z');
+  const xctestrun = '/b/x.xctestrun';
+  const good = { expiresAt: now + 5 * 86_400_000, devices: [UDID.toLowerCase()], allDevices: false };
+  assert.match(rebuildReason({ now, device: true, udid: UDID })!, /not built/);
+  assert.equal(rebuildReason({ xctestrun, profile: good, udid: UDID, now, device: true }), undefined);
+  assert.match(rebuildReason({ xctestrun, profile: { ...good, expiresAt: now - 1 }, udid: UDID, now, device: true })!, /expired/);
+  assert.match(rebuildReason({ xctestrun, profile: { ...good, expiresAt: now + 3_600_000 }, udid: UDID, now, device: true })!, /expires within a day/);
+  assert.match(rebuildReason({ xctestrun, profile: { ...good, devices: ['00008030-1111'] }, udid: UDID, now, device: true })!, /isn’t in its provisioning profile/);
+  assert.equal(rebuildReason({ xctestrun, profile: { ...good, devices: ['00008030-1111'], allDevices: true }, udid: UDID, now, device: true }), undefined);
+  assert.match(rebuildReason({ xctestrun, udid: UDID, now, device: true })!, /no provisioning profile/);
+  assert.equal(rebuildReason({ xctestrun, now, device: false }), undefined);   // simulator destination
+});
+
+test('readProfile decodes embedded.mobileprovision with security cms and reads expiry and devices', async () => {
+  const app = mkdtempSync(join(tmpdir(), 'pd-wda-app-'));
+  try {
+    assert.equal(await readProfile(app, async () => { throw new Error('not called'); }), undefined);
+    writeFileSync(join(app, 'embedded.mobileprovision'), 'cms');
+    const seen: string[][] = [];
+    const exec: Exec = async (cmd, args) => {
+      seen.push([cmd, ...args]);
+      if (cmd === '/usr/bin/security') { writeFileSync(args[args.indexOf('-o') + 1], '<plist/>'); return { code: 0, stdout: '', stderr: '' }; }
+      if (args[1] === 'ExpirationDate') return { code: 0, stdout: '2026-12-01T10:20:30Z\n', stderr: '' };
+      if (args[1] === 'ProvisionedDevices') return { code: 0, stdout: JSON.stringify([UDID]), stderr: '' };
+      return { code: 1, stdout: '', stderr: 'No value at that key path' };
+    };
+    assert.deepEqual(await readProfile(app, exec), { allDevices: false, expiresAt: Date.parse('2026-12-01T10:20:30Z'), devices: [UDID] });
+    assert.deepEqual(seen[0].slice(0, 4), ['/usr/bin/security', 'cms', '-D', '-i']);
+  } finally { rmSync(app, { recursive: true, force: true }); }
+});
+
+test('xcodebuild failures become plain errors; unknown ones keep the old wda_setup_failed code', () => {
+  const c = (t: string, phase: 'build' | 'launch' = 'build') => classifyXcodebuild(t, phase, { team: TEAM_A, udid: UDID }).code;
+  assert.equal(c('error: No Accounts: Add a new account in Accounts settings.'), 'xcode_account_missing');
+  assert.equal(c('error: Provisioning profile "iOS Team Provisioning Profile: *" doesn\'t include the currently selected device "Phone" (identifier X).'), 'device_not_registered');
+  assert.equal(c('error: Failed to register bundle identifier: The app identifier "com.facebook.WebDriverAgentRunner.xctrunner" cannot be registered to your development team'), 'bundle_id_unavailable');
+  assert.equal(c('error: Your maximum App ID limit has been reached. You may create up to 10 App IDs every 7 days.'), 'signing_limit');
+  assert.equal(c('The application could not be launched because the Developer App Certificate is not trusted. Verify the Developer App certificate for your account is trusted on your device.', 'launch'), 'wda_untrusted');
+  assert.equal(c('Unable to launch com.facebook.WebDriverAgentRunner.xctrunner because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user.', 'launch'), 'wda_untrusted');
+  assert.equal(c('error: The provisioning profile has expired.', 'launch'), 'signing_expired');
+  assert.equal(c('Unlock Phone to Continue: The device is passcode protected.', 'launch'), 'device_locked');
+  assert.equal(c('Developer Mode disabled. To use Phone for development, enable Developer Mode in Settings', 'launch'), 'developer_mode_off');
+  assert.equal(c('xcodebuild: error: Unable to find a destination matching the provided destination specifier', 'launch'), 'no_device');
+  const other = classifyXcodebuild('lots of output\n** TEST BUILD FAILED **', 'build');
+  assert.equal(other.code, 'wda_setup_failed');
+  assert.match(other.detail!, /TEST BUILD FAILED/);
+});
+
+// ── running xcodebuild (fake children) ──
+
+class FakeChild extends EventEmitter implements ChildLike {
+  pid = 4242;
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  killed: string[] = [];
+  closed = false;
+  kill(signal: NodeJS.Signals = 'SIGTERM'): boolean { this.killed.push(signal); this.exit(130); return true; }
+  say(text: string): void { this.stdout.write(text.endsWith('\n') ? text : text + '\n'); }
+  exit(code: number): void {
+    if (this.closed) return; this.closed = true;
+    this.stdout.end(); this.stderr.end();
+    setImmediate(() => this.emit('close', code));
+  }
+}
+
+test('startRunner resolves at ServerURLHere and keeps xcodebuild running; an early exit is classified', async () => {
+  const kids: FakeChild[] = [];
+  const argv: string[][] = [];
+  const spawn = (cmd: string, args: string[]) => { argv.push([cmd, ...args]); const k = new FakeChild(); kids.push(k); return k; };
+  const progress: string[] = [];
+  const p = startRunner(spawn, { xctestrun: '/b/x.xctestrun', destination: `id=${UDID}`, env: {}, now: () => 1000, udid: UDID, team: TEAM_A }, (l) => progress.push(l));
+  kids[0].say('Test Suite \'All tests\' started at 2026-11-24');
+  kids[0].say('    t =     0.00s Start Test at 2026-11-24 ServerURLHere->http://192.0.2.10:8100<-ServerURLHere');
+  const { runner, url } = await p;
+  assert.equal(url, 'http://192.0.2.10:8100');
+  assert.deepEqual(argv[0], ['xcodebuild', 'test-without-building', '-xctestrun', '/b/x.xctestrun', '-destination', `id=${UDID}`]);
+  assert.ok(runner.alive());
+  assert.ok(progress.some((l) => /Starting WebDriverAgent/.test(l)) && progress.some((l) => /running at http:\/\/192\.0\.2\.10:8100/.test(l)));
+  kids[0].exit(0);
+  await runner.exited;
+  assert.equal(runner.alive(), false);
+
+  const q = startRunner(spawn, { xctestrun: '/b/x.xctestrun', destination: `id=${UDID}`, env: {}, now: () => 1000 }, () => undefined);
+  kids[1].say('Unable to launch com.facebook.WebDriverAgentRunner.xctrunner because it has an invalid code signature, inadequate entitlements or its profile has not been explicitly trusted by the user.');
+  kids[1].exit(65);
+  await assert.rejects(q, (e: PhoneDockError) => e.code === 'wda_untrusted');
+
+  const r = startRunner(spawn, { xctestrun: '/b/x.xctestrun', destination: `id=${UDID}`, env: {}, now: () => 1000, timeoutMs: 30 }, () => undefined);
+  await assert.rejects(r, (e: PhoneDockError) => e.status === 504);
+  assert.deepEqual(kids[2].killed, ['SIGINT'], 'a runner that never printed its address is stopped');
+});
+
+function buildFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'pd-wda-builds-'));
+  const srcDir = join(root, 'component', 'WebDriverAgent-16.15.3');
+  mkdirSync(join(srcDir, 'WebDriverAgent.xcodeproj'), { recursive: true });
+  writeFileSync(join(srcDir, 'WebDriverAgent.xcodeproj', 'project.pbxproj'), '');
+  let now = Date.parse('2026-11-24T12:00:00Z');
+  const builds: string[][] = [];
+  const launches: string[][] = [];
+  const kids: FakeChild[] = [];
+  let expiry = now + 6 * 86_400_000;
+  let launchSays: string[] = ['ServerURLHere->http://192.0.2.10:8100<-ServerURLHere'];
+  let launchExit: number | undefined;
+  const spawn = (cmd: string, args: string[]) => {
+    const k = new FakeChild(); kids.push(k);
+    if (args[0] === 'build-for-testing') {
+      builds.push(args);
+      const dd = args[args.indexOf('-derivedDataPath') + 1];
+      setImmediate(() => {
+        const prod = join(dd, 'Build', 'Products');
+        mkdirSync(join(prod, 'Debug-iphoneos', 'WebDriverAgentRunner-Runner.app'), { recursive: true });
+        writeFileSync(join(prod, 'WebDriverAgentRunner_iphoneos27.2-arm64.xctestrun'), '<plist/>');
+        writeFileSync(join(prod, 'Debug-iphoneos', 'WebDriverAgentRunner-Runner.app', 'embedded.mobileprovision'), 'cms');
+        k.say('** TEST BUILD SUCCEEDED **'); k.exit(0);
+      });
+    } else {
+      launches.push(args);
+      setImmediate(() => { for (const l of launchSays) k.say(l); if (launchExit !== undefined) k.exit(launchExit); });
+    }
+    return k;
+  };
+  const exec: Exec = async (cmd, args): Promise<ExecResult> => {
+    if (cmd === '/usr/bin/security') { writeFileSync(args[args.indexOf('-o') + 1], '<plist/>'); return { code: 0, stdout: '', stderr: '' }; }
+    if (args[1] === 'ExpirationDate') return { code: 0, stdout: new Date(expiry).toISOString(), stderr: '' };
+    if (args[1] === 'ProvisionedDevices') return { code: 0, stdout: JSON.stringify([UDID]), stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  let installs = 0;
+  const d: WdaBuildDeps = {
+    exec, spawn, now: () => now, env: {}, buildsDir: join(root, 'wda-builds'),
+    source: async () => { installs++; return { path: srcDir, version: '16.15.3' }; },
+    xcode: async () => ({ build: '27B52', version: '27.2', minIos: '17.0' }),
+    copyTree: async (from, to) => { cpSync(from, to, { recursive: true }); },
+    writeFile: (p, t) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, t); },
+    mkdir: (p) => mkdirSync(p, { recursive: true }),
+    remove: (p) => rmSync(p, { recursive: true, force: true }),
+  };
+  return {
+    root, d, builds, launches, kids,
+    get installs() { return installs; },
+    advance(ms: number) { now += ms; },
+    setExpiry(t: number) { expiry = t; },
+    get now() { return now; },
+    launchWith(says: string[], exit?: number) { launchSays = says; launchExit = exit; },
+  };
+}
+
+test('build once, then launch without rebuilding; rebuild when signing nears expiry or a key changes', async () => {
+  const f = buildFixture();
+  try {
+    const cfg = { team: TEAM_A, free: false, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
+    const progress: string[] = [];
+    const b1 = await ensureBuild(f.d, UDID, cfg, (l) => progress.push(l));
+    assert.equal(b1.built, true);
+    assert.equal(f.builds.length, 1);
+    assert.ok(existsSync(join(b1.dir, 'src', 'WebDriverAgent.xcodeproj')), 'builds a private copy of the source');
+    assert.equal(JSON.parse(readFileSync(join(b1.dir, 'build.json'), 'utf8')).team, TEAM_A);
+    assert.ok(progress.some((l) => /Building WebDriverAgent 16\.15\.3 for team AAAAA11111/.test(l)));
+
+    const b2 = await ensureBuild(f.d, UDID, cfg, () => undefined);
+    assert.equal(b2.built, false, 'a valid build is reused');
+    assert.equal(f.builds.length, 1);
+
+    f.setExpiry(f.now + 3_600_000);                       // a free team's 7 days are nearly up
+    const b3 = await ensureBuild(f.d, UDID, cfg, () => undefined);
+    assert.equal(b3.built, true);
+    assert.match(b3.reason!, /expires within a day/);
+    f.setExpiry(f.now + 6 * 86_400_000);
+
+    const b4 = await ensureBuild(f.d, UDID, { ...cfg, team: TEAM_B }, () => undefined);
+    assert.equal(b4.built, true);
+    assert.notEqual(b4.dir, b1.dir);
+    assert.equal(f.builds.length, 3);
+    assert.ok(f.builds[2].includes(`DEVELOPMENT_TEAM=${TEAM_B}`));
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('launchWda launches the built runner; a launch refused for expired signing rebuilds once', async () => {
+  const f = buildFixture();
+  try {
+    const cfg = { team: TEAM_A, free: false, bundleId: UPSTREAM_RUNNER_BUNDLE_ID };
+    const a = await launchWda(f.d, UDID, cfg, () => undefined);
+    assert.equal(a.url, 'http://192.0.2.10:8100');
+    assert.equal(f.builds.length, 1);
+    assert.equal(f.launches.length, 1);
+    a.runner.kill();
+
+    const b = await launchWda(f.d, UDID, cfg, () => undefined);
+    assert.equal(b.built, false);
+    assert.equal(f.builds.length, 1, 'the second launch reuses the build');
+    b.runner.kill();
+
+    f.launchWith(['error: The provisioning profile has expired.'], 65);
+    let n = 0;
+    const origSpawn = f.d.spawn;
+    f.d.spawn = (cmd, args, o) => { if (args[0] === 'test-without-building' && ++n === 2) f.launchWith(['ServerURLHere->http://192.0.2.11:8100<-ServerURLHere']); return origSpawn(cmd, args, o); };
+    const c = await launchWda(f.d, UDID, cfg, () => undefined);
+    assert.equal(c.url, 'http://192.0.2.11:8100');
+    assert.equal(c.built, true);
+    assert.equal(f.builds.length, 2, 'rebuilt once for the expired signing');
+    c.runner.kill();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('pruneBuilds deletes builds unused for 30 days and leaves the current, recent and foreign ones', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pd-wda-prune-'));
+  try {
+    const now = Date.parse('2026-11-24T00:00:00Z');
+    const mk = (name: string, lastUsed?: string, ours = true) => {
+      mkdirSync(join(dir, name), { recursive: true });
+      if (ours) writeFileSync(join(dir, name, 'build.json'), '{}');
+      if (lastUsed) writeFileSync(join(dir, name, '.last-used'), lastUsed);
+    };
+    mk('current', '2026-01-01T00:00:00Z');
+    mk('old', '2026-10-01T00:00:00Z');
+    mk('recent', '2026-11-20T00:00:00Z');
+    mk('half-built', undefined, false);
+    mk('old-no-stamp');
+    const removed = pruneBuilds({ buildsDir: dir, now: () => now, remove: (p) => rmSync(p, { recursive: true, force: true }) }, 'current');
+    assert.deepEqual(removed.sort(), ['old', 'old-no-stamp']);
+    assert.ok(existsSync(join(dir, 'current')) && existsSync(join(dir, 'recent')) && existsSync(join(dir, 'half-built')));
+    void utimesSync;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── supervision ──
+
+class FakeRunner implements Runner {
+  pid: number; startedAt: number; private live = true;
+  private resolveExit!: (c: number | null) => void;
+  exited: Promise<number | null>;
+  kills = 0;
+  constructor(pid: number, startedAt: number) { this.pid = pid; this.startedAt = startedAt; this.exited = new Promise((r) => { this.resolveExit = r; }); }
+  alive() { return this.live; }
+  kill() { this.kills++; this.die(130); }
+  die(code = 0) { if (!this.live) return; this.live = false; this.resolveExit(code); }
+}
+
+function world(opts: { managed?: string[]; saved?: Record<string, string> } = {}) {
+  let now = 1_000_000;
+  const managed = new Set(opts.managed ?? [UDID]);
+  const saved = new Map(Object.entries(opts.saved ?? {}));
+  const answering = new Set<string>();
+  const phones = new Map<string, PhoneFacts>([[UDID, { found: true, paired: true, reachable: true, osVersion: '18.7', developerMode: true, locked: false }]]);
+  const runners: FakeRunner[] = [];
+  const launches: string[] = [];
+  let nextLaunch: (() => Promise<{ runner: FakeRunner; url: string }>) | undefined;
+  let launchGate: Promise<void> | undefined;
+  let ip = 10;
+  const deps: SupervisorDeps = {
+    now: () => now,
+    managed: () => [...managed],
+    savedUrl: (u) => saved.get(u),
+    saveUrl: (u, url) => { saved.set(u, url); },
+    status: async (url) => answering.has(url),
+    phone: async (u) => phones.get(u) ?? { found: false },
+    launch: async (u) => {
+      launches.push(u);
+      if (launchGate) await launchGate;
+      if (nextLaunch) return nextLaunch();
+      const r = new FakeRunner(5000 + runners.length, now); runners.push(r);
+      const url = `http://192.0.2.${ip++}:8100`;
+      return { runner: r, url };
+    },
+    log: () => undefined,
+  };
+  const sup = new WdaSupervisor(deps, { tickMs: 15_000, graceMs: 45_000, backoffMs: [5_000, 15_000, 60_000], maxAttempts: 3, personPollMs: 30_000, minUptimeMs: 60_000 });
+  const settle = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  return {
+    sup, deps, managed, saved, answering, phones, runners, launches, settle,
+    advance(ms: number) { now += ms; },
+    failNext(err: PhoneDockError) { nextLaunch = async () => { nextLaunch = undefined; throw err; }; },
+    failAlways(err: PhoneDockError) { nextLaunch = async () => { throw err; }; },
+    succeed() { nextLaunch = undefined; },
+    gate() { let open!: () => void; launchGate = new Promise((r) => { open = r; }); return () => { launchGate = undefined; open(); }; },
+  };
+}
+
+test('daemon start launches WebDriverAgent for a managed phone and saves its new address', async () => {
+  const w = world();
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  assert.deepEqual(w.launches, [UDID]);
+  assert.equal(w.saved.get(UDID), 'http://192.0.2.10:8100');
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+  assert.equal(w.sup.info(UDID)?.wdaUrl, 'http://192.0.2.10:8100');
+  assert.equal(w.sup.info('00008020-NOT-MANAGED'), undefined);
+});
+
+test('daemon start adopts a WebDriverAgent that already answers instead of starting a second one', async () => {
+  const w = world({ saved: { [UDID]: 'http://192.0.2.50:8100' } });
+  w.answering.add('http://192.0.2.50:8100');
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  assert.deepEqual(w.launches, []);
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+});
+
+test('one launcher per phone: concurrent triggers share one launch', async () => {
+  const w = world();
+  const open = w.gate();
+  w.sup.start(); w.sup.start(); w.sup.stop();     // e.g. two daemon-start hooks racing
+  w.sup.observe([{ udid: UDID, reachable: false }]);
+  w.sup.observe([{ udid: UDID, reachable: true }]);
+  const manual = w.sup.setup(UDID, () => undefined);
+  await w.settle();
+  assert.equal(w.launches.length, 1, 'setup waits for the launch in flight');
+  open();
+  const r = await manual;
+  assert.equal(w.launches.length, 2, 'then restarts once, so a new team or build applies');
+  assert.equal(w.runners[0].kills, 1, 'the first runner is stopped before the second starts');
+  assert.equal(r.url, w.saved.get(UDID));
+  assert.equal(w.runners.filter((x) => x.alive()).length, 1);
+});
+
+test('a runner that exits (iPhone reboot) is relaunched; one that keeps dying right away backs off and gives up', async () => {
+  const w = world();
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  w.advance(10 * 60_000);
+  w.runners[0].die(0);                       // the phone rebooted after a long run
+  await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'retrying');
+  assert.equal(w.sup.info(UDID)?.attempts, 0, 'a long-lived runner ending is not a failed launch');
+  w.advance(5_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 2);
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+
+  // Now every runner dies within a second: attempts climb, delays grow, then it stops trying.
+  for (let i = 0; i < 3; i++) {
+    w.advance(1_000);
+    w.runners.at(-1)!.die(1);
+    await w.settle();
+    const info = w.sup.info(UDID)!;
+    if (i < 2) {
+      assert.equal(info.state, 'retrying');
+      assert.equal(info.attempts, i + 1);
+      w.advance(4_000); await w.sup.tick(); await w.settle();
+      assert.equal(w.launches.length, 2 + i, 'not before the backoff delay');
+      w.advance(i === 0 ? 1_000 : 11_000); await w.sup.tick(); await w.settle();
+      assert.equal(w.launches.length, 3 + i);
+    } else {
+      assert.equal(info.state, 'failed');
+      assert.match(info.message, /keeps stopping/);
+    }
+  }
+  const before = w.launches.length;
+  w.advance(3_600_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, before, 'failed waits for a person (or a reconnect)');
+  w.sup.observe([{ udid: UDID, reachable: false }]);
+  w.sup.observe([{ udid: UDID, reachable: true }]);
+  await w.settle();
+  assert.equal(w.launches.length, before + 1, 'a reconnect starts over');
+  assert.equal(w.sup.info(UDID)?.attempts, 0);
+});
+
+test('launch failures retry with backoff, bounded', async () => {
+  const w = world();
+  w.failAlways(new PhoneDockError('Couldn’t start WebDriverAgent on the iPhone', 'wda_setup_failed', 502));
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'retrying');
+  assert.equal(w.sup.info(UDID)?.attempts, 1);
+  assert.ok(w.sup.info(UDID)?.nextRetryAt);
+  w.advance(5_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.sup.info(UDID)?.attempts, 2);
+  w.advance(14_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 2, 'second delay is longer');
+  w.advance(1_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 3);
+  assert.equal(w.sup.info(UDID)?.state, 'failed');
+});
+
+test('/status going quiet relaunches; a runner that never answered is a Local Network problem, not relaunched', async () => {
+  const w = world();
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  const url1 = w.saved.get(UDID)!;
+  w.answering.add(url1);
+  await w.sup.tick();
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+  w.answering.delete(url1);                 // it hangs
+  w.advance(30_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 1, 'within the grace period nothing happens');
+  w.advance(20_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 2);
+  assert.equal(w.runners[0].kills, 1, 'the stuck runner is replaced');
+
+  // The new runner printed its address but this Mac never reaches it.
+  w.advance(50_000); await w.sup.tick(); await w.settle();
+  const info = w.sup.info(UDID)!;
+  assert.equal(info.state, 'unreachable');
+  assert.match(info.hint!, /Local Network/);
+  assert.equal(w.launches.length, 2, 'a working runner is not killed over a network problem');
+  assert.equal(w.runners[1].kills, 0);
+  w.answering.add(w.saved.get(UDID)!);       // the person allowed Local Network
+  await w.sup.tick();
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+});
+
+test('a locked phone waits for unlock without spending retries, then starts', async () => {
+  const w = world();
+  w.phones.set(UDID, { ...w.phones.get(UDID)!, locked: true });
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  assert.deepEqual(w.launches, []);
+  const info = w.sup.info(UDID)!;
+  assert.equal(info.state, 'waiting_unlock');
+  assert.match(info.message, /Unlock the iPhone/);
+  for (let i = 0; i < 5; i++) { w.advance(15_000); await w.sup.tick(); await w.settle(); }
+  assert.deepEqual(w.launches, [], 'no launch while it stays locked');
+  assert.equal(w.sup.info(UDID)?.attempts, 0);
+  w.phones.set(UDID, { ...w.phones.get(UDID)!, locked: false });
+  w.advance(15_000); await w.sup.tick(); await w.settle();
+  assert.deepEqual(w.launches, [UDID]);
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+
+  // Locked only shows up in the launch output (lock state unknown): same wait, no retry spent.
+  const v = world();
+  v.phones.set(UDID, { ...v.phones.get(UDID)!, locked: null });
+  v.failNext(new PhoneDockError('Unlock the iPhone', 'device_locked', 409));
+  v.sup.start(); v.sup.stop();
+  await v.settle();
+  assert.equal(v.sup.info(UDID)?.state, 'waiting_unlock');
+  assert.equal(v.sup.info(UDID)?.attempts, 0);
+  v.advance(15_000); await v.sup.tick(); await v.settle();
+  assert.equal(v.launches.length, 1, 'unknown lock state is retried at the slower person pace');
+  v.advance(20_000); await v.sup.tick(); await v.settle();
+  assert.equal(v.launches.length, 2);
+  assert.equal(v.sup.info(UDID)?.state, 'running');
+});
+
+test('a disconnected phone waits for it to come back; the reconnect starts WebDriverAgent', async () => {
+  const w = world();
+  w.phones.delete(UDID);
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'waiting_phone');
+  w.sup.observe([]);
+  w.phones.set(UDID, { found: true, paired: true, reachable: true, osVersion: '18.7', developerMode: true, locked: false });
+  w.sup.observe([{ udid: UDID, reachable: true }]);
+  await w.settle();
+  assert.deepEqual(w.launches, [UDID]);
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+});
+
+test('an untrusted developer certificate waits for the person and checks again', async () => {
+  const w = world();
+  w.failNext(new PhoneDockError('Trust the developer on the iPhone', 'wda_untrusted', 409, ['On the iPhone open Settings › General › VPN & Device Management…']));
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  const info = w.sup.info(UDID)!;
+  assert.equal(info.state, 'waiting_trust');
+  assert.match(info.hint!, /VPN & Device Management/);
+  assert.equal(info.attempts, 0);
+  w.advance(30_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.sup.info(UDID)?.state, 'running');
+});
+
+test('unmanage (Disconnect) stops the runner PhoneDock started and forgets the phone', async () => {
+  const w = world();
+  w.sup.start(); w.sup.stop();
+  await w.settle();
+  w.managed.delete(UDID);
+  w.sup.unmanage(UDID);
+  assert.equal(w.runners[0].kills, 1);
+  assert.equal(w.sup.info(UDID), undefined);
+  w.advance(60_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 1);
+});
+
+test('a manual setup failure is reported to the caller and not retried on its own', async () => {
+  const w = world({ managed: [UDID] });
+  w.failNext(new PhoneDockError('Sign in to Xcode to set up this iPhone', 'xcode_account_missing', 409));
+  await assert.rejects(w.sup.setup(UDID, () => undefined), (e: PhoneDockError) => e.code === 'xcode_account_missing');
+  assert.equal(w.sup.info(UDID)?.state, 'failed');
+  w.advance(600_000); await w.sup.tick(); await w.settle();
+  assert.equal(w.launches.length, 1);
+});
