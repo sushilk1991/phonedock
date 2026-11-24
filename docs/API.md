@@ -706,6 +706,7 @@ Activity (`GET /v1/devices/:id/actions`) logs `device.sleep` (`idleSec`, `saveMs
 
 **Contract changes in 0.7.0 (all additive):** `Device.sleep`, `Device.sleepFailure`; types `DeviceSleep`, `SleepState`,
 `WakeReport`; optional `Backend` methods `saveSleep`, `stopAfterSleep`, `wakeFromSleep`, `discardSleep`, `keepAwake`;
+optional `FrameStream.asleep()` (the display is off: a polled live view of it doesn't keep the phone awake);
 `GET/POST /v1/idle-sleep`; the `X-PhoneDock-Observe` request header and `X-PhoneDock-Woke` response header; the
 `idle-sleep` SSE event; the `wake_failed` error code; `PHONEDOCK_IDLE_SLEEP` (`off` or a duration such as `90s`, `1m`:
 overrides the saved setting, for tests).
