@@ -845,6 +845,19 @@ struct SidebarView: View {
                     .disabled(!online || !d.can("record") || model.recordingUnsupported.contains(d.id))
             }
         }
+        if d.isOlderPairedIphone, d.offersControlSetup || d.wdaControl != nil {
+            // Older iPhones (WebDriverAgent). Progress and any problem show in the device's Info tab, so go there.
+            Divider()
+            let busy = model.controlBusy(d)
+            if d.offersControlSetup {
+                Button("Set Up Control") { model.selection = d.id; model.beginControlSetup(d); model.requestedInspectorTab = .info }
+                    .disabled(!online || !d.isRunning || busy)
+            }
+            if d.wdaControl != nil {
+                Button("Stop Control") { model.selection = d.id; model.stopControl(d); model.requestedInspectorTab = .info }
+                    .disabled(!online || busy)
+            }
+        }
         Divider()
         Button("Copy Device ID") { DeviceActions.copyID(d) }
         if DeviceActions.canDelete(d) {
@@ -1079,6 +1092,8 @@ struct CommandWell: View {
     var plain = false
     /// One line, truncated in the middle (the tooltip shows it all; Copy copies it all). Otherwise it wraps.
     var oneLine = false
+    /// What to show when it should break differently from what Copy copies (a host on its own line, say).
+    var display: String? = nil
     var onCopy: (() -> Void)? = nil
     @State private var copied = false
 
@@ -1086,10 +1101,10 @@ struct CommandWell: View {
         HStack(alignment: .top, spacing: Theme.Space.m) {
             Group {
                 if oneLine {
-                    Text(command).lineLimit(1).truncationMode(.middle)
+                    Text(display ?? command).lineLimit(1).truncationMode(.middle)
                 } else {
                     // Wraps between words only: a path never breaks in the middle (its spaces and slashes stay together).
-                    CommandBody(command: command)
+                    CommandBody(command: display ?? command)
                 }
             }
                 .font(Theme.Fonts.mono)

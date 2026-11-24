@@ -74,7 +74,9 @@ enum Clipboard {
 ///   {"op":"badge","expect":"1"}                         check the Dock badge ("" = none)
 ///   {"op":"fakeScreenError","message":"…","hints":["…"]}   stop the frame loop and show that error
 ///   {"op":"fakeControlSetup","device":"ios-device:…","phase":"choose","teams":[…]}  an older iPhone's Set Up Control
-///                                                       state (checking | choose | running | done | failed | none)
+///                                                       state (checking | choose | running | done | stopping | stopped |
+///                                                       failed | none); fake devices carry the service's side
+///                                                       (meta.wdaControl with shared/sharedUrl, meta.wdaStopped)
 ///   {"op":"fakeBusy","device":"PhoneDock-Pixel","label":"Saving snapshot…"}  show a snapshot/clone in progress
 ///                                                       without running one ("" clears)
 ///   {"op":"activate"}                                   bring the app to the front (active selection styling); skipped
@@ -343,8 +345,10 @@ enum SelfTest {
                 log("#\(i) fakeDevice cleared")
             }
         case "fakeControlSetup":   // an older iPhone's Set Up Control state without running it (fakes only):
-            // {"op":"fakeControlSetup","device":"ios-device:…","phase":"checking|choose|running|done|failed|handedOff|none",
-            //  "teams":[{"id":"…","name":"…","free":false}],"line":"Building…","title":"…","message":"…"}
+            // {"op":"fakeControlSetup","device":"ios-device:…",
+            //  "phase":"checking|choose|running|done|stopping|stopped|failed|none",
+            //  "teams":[{"id":"…","name":"…","free":false}],"line":"Building…","firstTime":true,"share":true,"title":"…",
+            //  "message":"…","retry":"setUp|same|stop"}   ("line" is also done's text, "Control is set up" by default)
             guard let m = model, let id = s["device"] as? String else { fail("#\(i) fakeControlSetup FAIL no model/device"); return }
             switch s["phase"] as? String ?? "none" {
             case "checking": m.controlSetups[id] = .checking
@@ -352,12 +356,20 @@ enum SelfTest {
                 let arr = s["teams"] as? [[String: Any]] ?? []
                 let teams = (try? JSONDecoder().decode([WdaTeam].self, from: JSONSerialization.data(withJSONObject: arr))) ?? []
                 m.controlSetups[id] = .chooseTeam(teams)
-            case "running": m.controlSetups[id] = .running(s["line"] as? String ?? "Building WebDriverAgent…")
-            case "done": m.controlSetups[id] = .done
-            case "failed", "handedOff":
+            case "running": m.controlSetups[id] = .running(s["line"] as? String ?? "Building WebDriverAgent…", firstTime: s["firstTime"] as? Bool ?? true,
+                                                           share: s["share"] as? Bool)
+            case "done": m.controlSetups[id] = .done(s["line"] as? String ?? "Control is set up")
+            case "stopping": m.controlSetups[id] = .stopping
+            case "stopped": m.controlSetups[id] = .stopped
+            case "failed":
                 let p = FriendlyError(title: s["title"] as? String ?? "Couldn’t set up control",
                                       message: s["message"] as? String, details: s["details"] as? String)
-                m.controlSetups[id] = s["phase"] as? String == "handedOff" ? .handedOff(p) : .failed(p)
+                let retry: ControlRetry = switch s["retry"] as? String {
+                case "stop": .stop
+                case "same": .same(team: nil, share: nil)
+                default: .setUp
+                }
+                m.controlSetups[id] = .failed(p, retry: retry)
             default: m.controlSetups[id] = nil
             }
             log("#\(i) fakeControlSetup \(s["phase"] as? String ?? "none")")
