@@ -22,7 +22,7 @@ iOS simulators and Android emulators. You watch every step live, and the agent a
 
 <br>
 
-<a href="https://sushilk1991.github.io/phonedock/#film"><img src="docs/media/launch/1-hero.png" alt="Your agent, on a real phone: the PhoneDock window while Claude Code tests the game Snackdoku on a real iPhone, with every step it takes in the Activity list"></a>
+<a href="https://sushilk1991.github.io/phonedock/#film"><img src="docs/media/readme/hero.png" alt="Your agent, on every phone: the PhoneDock window while Claude Code runs a saved test on an iPhone simulator, with Claude Code in control and Take Over one click away"></a>
 
 ## See it work
 
@@ -45,7 +45,7 @@ Real recordings at real speed, with the waits trimmed. Nobody touches the phones
 
 ## One window for every phone
 
-<img src="docs/media/launch/2-bento.png" alt="One window for every phone: a real iPhone live at 60 fps, the Activity list of every step the agent and you took, real phones and virtual ones, and the Take Over button">
+<img src="docs/media/readme/window.png" alt="One window for every phone: a Pixel 8 virtual phone running in PhoneDock, with an iPhone simulator and an iPad in the sidebar and the phone's settings in the inspector">
 
 - **Watch live** at up to 60 fps while an agent works, in the app or in a separate window.
 - **Real phones and virtual ones.** iPhones on iOS 27 or later connect over USB or Wi-Fi with nothing installed on
@@ -208,21 +208,33 @@ Ask your agent to test a flow once, save it, and run it on every PR.
    what was expected and what was on screen, and saves a screenshot, the UI tree and recent logs.
 3. Run the same command in CI on a macOS runner: [docs/CI.md](docs/CI.md). `phonedock flow export --maestro` writes a
    Maestro version of a flow. The format, the conversion rules and the runner are in [docs/API.md](docs/API.md#flows).
+4. Every run is saved with what it ran on: the app's version and build, the flow file's hash and the git commit. Open
+   it in the inspector's **Runs** tab, or with `phonedock runs` and `phonedock runs show <id>`. **Copy PR Summary** (or
+   `phonedock runs export <id> --format md`) gives you a summary to paste into a pull request, without local paths.
+
+<img src="docs/media/readme/runs.png" alt="Every run, on the record: the Runs tab's detail of a saved flow's run in PhoneDock, marked PASS, with the app's version and build, the flow's hash, the git commit, the device, the agent that ran it, and each step's time">
 
 ## Requirements
 
 - A Mac with Apple silicon (M1 or later) on macOS 15 or later.
-- **iOS simulators:** Xcode. PhoneDock automatically downloads and verifies [AXe](https://github.com/cameroncooke/AXe)
-  (~17 MB on disk) on first simulator use (no Homebrew required; a local `axe` on `PATH` or `PHONEDOCK_AXE` also works).
+- **iOS simulators and iPhones:** Xcode.
 - **Android:** the Android SDK command-line tools and emulator (`brew install --cask android-commandlinetools`).
   `scrcpy` and `ffmpeg` are optional (separate windows, recording, live streaming).
-- **iPhones:** Xcode. On iOS 27+, PhoneDock automatically downloads and verifies its iPhone control component
-  (Python 3.12 + `pymobiledevice3`, ~277 MB on disk) the first time a paired iPhone appears; manual installation
-  (`uv tool install --python 3.12 pymobiledevice3` or `PHONEDOCK_PYMD3_PYTHON`) remains supported as a fallback.
 - **Node.js:** PhoneDock.app includes its own runtime. Running from source needs Node.js 24 or later.
 
-`phonedock backends` and `phonedock components` show what's ready on your Mac. Set `PHONEDOCK_COMPONENTS_AUTO=0` to
-disable automatic component downloads (for CI or offline environments).
+<img src="docs/media/readme/setup.png" alt="It sets itself up: PhoneDock's Settings, Advanced, Components, with iPhone Control and Simulator Control both ready, above the output of phonedock components install ios-tools">
+
+PhoneDock installs the rest itself, the first time it's needed: [AXe](https://github.com/cameroncooke/AXe) for
+simulators (about 40 MB on disk), and for iPhones on iOS 27 or later, Python 3.12 with `pymobiledevice3` (about
+240 MB). Each comes from the tool's own release and is checked against a checksum built into PhoneDock, so there's no
+Homebrew or Python setup. When an update pins a newer version, PhoneDock installs it in the background and keeps the
+current one working until the new one passes its checks.
+
+- **Settings › Advanced › Components** and `phonedock components` show each tool's state; `phonedock backends` shows
+  what else is ready on your Mac.
+- A copy you installed yourself (`axe` on your PATH, or `uv tool install --python 3.12 pymobiledevice3`) still works
+  until PhoneDock has its own. `PHONEDOCK_AXE` and `PHONEDOCK_PYMD3_PYTHON` point PhoneDock at a copy of your choice.
+- `PHONEDOCK_COMPONENTS_AUTO=0` turns the automatic downloads off, for CI or offline Macs.
 
 ## Privacy and security
 
@@ -230,8 +242,10 @@ disable automatic component downloads (for CI or offline environments).
   account's PhoneDock data folder (`~/Library/Application Support/PhoneDock`).
 - macOS may ask for **Local Network** access when PhoneDock connects to a phone over Wi-Fi; that's what lets it
   reach phones on your network. Simulators, emulators and USB phones don't need it.
-- There's no telemetry. PhoneDock goes online only for things you ask for: downloading system images or
-  WebDriverAgent, mounting an iPhone's developer disk image, or a cloud backend you configure.
+- There's no telemetry. PhoneDock goes online for things you ask for (downloading system images or WebDriverAgent,
+  mounting an iPhone's developer disk image, or a cloud backend you configure), and to download the simulator and
+  iPhone tools in [Requirements](#requirements) from their own GitHub and PyPI releases the first time they're
+  needed. `PHONEDOCK_COMPONENTS_AUTO=0` turns that off.
 - Your agent's model provider sees the screenshots the agent sends it, the same as anything else in its context.
 - Leases keep agents from colliding: while one agent or you hold a device, input from anyone else is refused. An
   agent's lease ends when its session ends, when its process exits, or after 10 minutes unused; yours lasts until
