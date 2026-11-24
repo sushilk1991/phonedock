@@ -14,6 +14,8 @@ const { router } = await import('./routes.ts');
 await import('./routes-extra.ts');
 await import('./routes-idle.ts');
 const S = await import('./idle-sleep.ts');
+// These tests are of the sleeper (the app's service); CI and test runs set PHONEDOCK_PORT to a spare port.
+S.setIdleSleepRoleForTests({ sleeper: true });
 
 // ── a fake sleep-capable backend ────────────────────────────────────────────
 interface Deferred { promise: Promise<void>; resolve: () => void }
@@ -89,6 +91,8 @@ const ctx = (id: string, headers: Record<string, string> = {}) => {
 };
 const device = async (id = ID) => (await core.listDevices(true)).find((d) => d.id === id)!;
 const tick = () => new Promise((r) => setImmediate(r));
+/** Until `f` holds, or fail after 10 s (a regression fails here instead of hanging the run). */
+const until = async (f: () => boolean, what: string) => { const t0 = Date.now(); while (!f()) { if (Date.now() - t0 > 10_000) throw new Error(`timed out waiting for ${what}`); await tick(); } };
 
 beforeEach(async () => {
   states.clear(); managed.clear(); calls = []; videoListeners = []; wakeOpts = [];
@@ -309,7 +313,7 @@ test('a request (or a lease) that comes while the sleep is being decided calls i
     const save = deferred(); hooks.save = () => save.promise;
     advance(61);
     const sweeping = S.sweep();
-    while (!calls.includes('prepare:pdtest-a')) await tick();
+    await until(() => calls.includes('prepare:pdtest-a'), 'prepare:pdtest-a');
     let entered = false;
     const req = by === 'lease' ? (core.acquireLease(ID, 'cli:agent'), Promise.resolve(() => {}))
       : S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input').then((l) => { entered = true; return l; });
@@ -327,7 +331,7 @@ test('a request that arrives while it stops waits for the stop, then wakes it', 
   const stop = deferred(); hooks.stop = () => stop.promise;
   advance(61);
   const sweeping = S.sweep();
-  while (!calls.includes('stop:pdtest-a')) await tick();
+  await until(() => calls.includes('stop:pdtest-a'), 'stop:pdtest-a');
   const { c, set } = ctx(ID);
   const req = S.enterRequest(c, 'POST', '/v1/devices/:id/input');
   await tick();
@@ -653,7 +657,7 @@ test('the last look comes after the guest’s sync, just before the stop: a requ
 test('pool acquire waits for a sleep under way (also when it picks the phone itself), then wakes it', async () => {
   const stop = deferred(); hooks.stop = () => stop.promise;
   advance(61); const sweeping = S.sweep();
-  while (!calls.includes('stop:pdtest-a')) await tick();
+  await until(() => calls.includes('stop:pdtest-a'), 'stop:pdtest-a');
   const acq = hit('POST', '/v1/pool/acquire', ID, { owner: 'cli:agent', platform: 'android' });
   await tick(); stop.resolve(); await sweeping;
   const r = await acq as { device: Device };
