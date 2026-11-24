@@ -178,7 +178,7 @@ Management**, tap your Apple ID and tap **Trust**, then press **Retry** in Phone
   PhoneDock) is only forgotten, and nothing on the phone is touched.
 - **WebDriverAgent from an earlier setup.** A paired phone that an earlier PhoneDock set up (or that you connected by
   its address) may still run WebDriverAgent on your Wi-Fi. Its Info tab, `phonedock devices` and the MCP device list say
-  so: Stop Control ends it, Set Up Control makes it private.
+  so: Stop Control ends it (and forgets that old address), Set Up Control makes it private.
 
 ### No Apple ID in Xcode? Use an App Store Connect API key
 

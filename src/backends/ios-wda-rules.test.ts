@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawn as spawnChild } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -279,6 +279,30 @@ test('rule 3: a phone’s claim is a kernel lock: exclusive across processes, fr
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('rule 3: a machine-wide claims directory is created sticky and writable by every user, and nothing above it changes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pd-ledger-shared-'));
+  try {
+    const before = statSync(root).mode & 0o7777;
+    const dir = join(root, 'PhoneDock', 'wda');
+    const l = new (W as any).WdaLedger(dir, { shared: true });
+    assert.equal(l.lock(UDID), true);
+    assert.equal(statSync(join(root, 'PhoneDock')).mode & 0o7777, 0o1777);
+    assert.equal(statSync(dir).mode & 0o7777, 0o1777);
+    assert.equal(statSync(root).mode & 0o7777, before, 'the existing parent is untouched');
+    l.release(UDID);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('rule 5: daemon exit ends what this process runs, and doesn’t wait on an older cleanup for an absent phone', async () => {
+  const w = supWorld();
+  w.records.set(UDID, { state: 'pending' });          // owed from before; the phone is away
+  w.sup.start();                                      // (the first attempt would look; this test is about exit)
+  w.events.length = 0;
+  await w.sup.stop();
+  assert.deepEqual(w.events.filter((e) => e === 'stopOnPhone'), [], 'exit didn’t ask the phone');
+  assert.equal(w.records.get(UDID)?.state, 'pending', 'still owed: the next start finishes it');
+});
+
 test('review-2 #6: the xcodebuild is recorded for cleanup when it is spawned, before WebDriverAgent is ready', async () => {
   const w = supWorld();
   let release!: () => void;
@@ -493,8 +517,42 @@ test('rule 5 (t1ct): Stop ends any runner on the phone, managed or not; Disconne
 test('t1ct: a paired phone with WebDriverAgent from an earlier setup carries a plain notice', async () => {
   fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: TUNNEL }]; fake.scenario.runners = {}; fake.save();
   writeCfg({ [UDID]: { udid: UDID, wdaUrl: `http://${WIFI}:8100` } });
-  const d = (await backend.listDevices()).find((x) => x.nativeId === UDID);
-  assert.match(String(d?.meta?.wdaNotice ?? ''), /earlier setup may still be running.*Stop Control ends it/s);
+  const raw = (await backend.listDevices()).find((x) => x.nativeId === UDID)!;
+  assert.match(String(backend.liveDevice(raw)?.meta?.wdaNotice ?? ''), /earlier setup may still be running.*Stop Control ends it/s);
+  // A confirmed Stop ends that runner, so its address and the notice go too.
+  fake.scenario.runners = { [UDID]: [79] }; fake.save();
+  assert.equal((await backend.wdaStop(UDID)).confirmed, true);
+  assert.equal(readCfg()[UDID].wdaUrl, undefined);
+  assert.equal(backend.liveDevice(raw)?.meta?.wdaNotice, null);
+});
+
+test('rule 6: a scan made in one control state, read in another, shows the new one (applied once per read)', async () => {
+  fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: TUNNEL }]; fake.scenario.runners = {}; fake.save();
+  writeCfg({ [UDID]: { udid: UDID, wdaUrl: `http://${WIFI}:8100` } });
+  const raw = (await backend.listDevices()).find((x) => x.nativeId === UDID)!;
+  assert.equal(raw.meta?.wdaNotice, undefined, 'the scan itself carries no control state');
+  writeCfg({ [UDID]: { udid: UDID, wda: { ...cfg, since: 'x' } } });     // set up meanwhile
+  const now = backend.liveDevice(raw)!;
+  assert.equal(now.meta?.wdaNotice, null);
+  assert.equal((now.meta?.readiness as { hints: string[] }).hints.length, (raw.meta?.readiness as { hints: string[] }).hints.length + (now.meta?.wdaControl ? 1 : 0));
+});
+
+test('rule 1 / review-2 #1 (by alias): turning sharing off by CoreDevice identifier is durable at once too', async () => {
+  fake.scenario.phones = [{ udid: UDID, coreDeviceId: CORE_ID, tunnelIp: TUNNEL }]; fake.scenario.runners = {}; fake.save();
+  writeCfg({ [UDID]: { udid: UDID, wda: { ...cfg, share: true, since: 'x' } } });
+  await assert.rejects(backend.wdaSetup(CORE_ID, { share: false }));       // no Xcode here: preflight fails after the opt-out
+  assert.equal(readCfg()[UDID].wda?.share ?? false, false, 'sharing is off although the rest of setup failed');
+});
+
+test('review-2 #6: an orphaned xcodebuild is killed only when its command line still matches its record', async () => {
+  const { killOrphanXcodebuild } = await import('./ios-device.ts');
+  const xctestrun = join(home, 'WebDriverAgentRunner_iphoneos27.2-arm64.xctestrun');
+  const child = spawnChild(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'test-without-building', '-xctestrun', xctestrun], { stdio: 'ignore' });
+  try {
+    assert.equal(killOrphanXcodebuild({ xcodebuild: child.pid, xctestrun: '/another.xctestrun' }), false, 'a reused pid is left alone');
+    assert.equal(killOrphanXcodebuild({ xcodebuild: child.pid, xctestrun }), true);
+    await new Promise((r) => child.once('exit', r));
+  } finally { child.kill('SIGKILL'); }
 });
 
 test('rule 6: a device read right after Stop shows control stopped, without waiting for a scan', async () => {

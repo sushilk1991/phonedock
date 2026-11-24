@@ -1065,7 +1065,7 @@ export class WdaSupervisor {
     this.entries.clear();
     for (const [, e] of all) { e.gone = true; e.abort.abort(); }
     await Promise.all([
-      ...all.map(([udid, e]) => this.lane(udid, () => this.teardown(udid, e, { release: true }))),
+      ...all.map(([udid, e]) => this.lane(udid, () => this.teardown(udid, e, { release: true, ownOnly: true }))),
       ...[...this.lanes.values()].map((l) => l.tail.catch(() => undefined)),
     ]);
   }
@@ -1345,13 +1345,15 @@ export class WdaSupervisor {
 
   /** End the runner: xcodebuild (always waited for: SIGINT, then SIGKILL), then the runner app on the phone, which can
    *  outlive it (bounded). `always`: look on the phone even if this process started nothing (a person's Stop). */
-  private async teardown(udid: string, e: Entry | undefined, o: { claim?: boolean; release?: boolean; always?: boolean }): Promise<number> {
+  private async teardown(udid: string, e: Entry | undefined, o: { claim?: boolean; release?: boolean; always?: boolean; ownOnly?: boolean }): Promise<number> {
     if (o.claim && !this.claim(udid)) { this.deps.log(`wda ${udid}: left WebDriverAgent alone: another PhoneDock on this Mac runs it`); return -2; }
     const r = e?.runner;
     if (e) e.runner = undefined;
     const macGone = r ? await stopRunner(r) : true;
     let left = 0;
-    if (o.always || r || this.deps.ledger?.state(udid) !== 'clean') left = await this.clearPhone(udid);
+    // `ownOnly` (daemon exit): only what this process runs; an older cleanup waits for the next start, so an absent
+    // phone doesn't hold up the exit.
+    if (o.always || r || (!o.ownOnly && this.deps.ledger?.state(udid) !== 'clean')) left = await this.clearPhone(udid);
     if (!macGone) { left = left === 0 ? -1 : left; this.deps.ledger?.mark(udid, { ...(r?.pid ? { xcodebuild: r.pid } : {}) }); }
     if (o.release) this.deps.ledger?.release(udid);
     return left;

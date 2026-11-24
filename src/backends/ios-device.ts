@@ -175,13 +175,13 @@ const cfgState = new JsonState<Record<string, DevCfg>>('ios-device.json');
 
 /** The ios-device.json key holding a phone's entry (keyed by udid, or a manual entry carrying it). */
 function cfgKey(all: Record<string, DevCfg>, udid: string): string {
-  return all[udid] ? udid : Object.keys(all).find((k) => all[k].udid === udid) ?? udid;
+  return all[udid] ? udid : Object.keys(all).find((k) => all[k].udid === udid || all[k].coreDeviceId === udid) ?? udid;
 }
 
 /** Config entry for a nativeId: keyed directly, or an entry whose udid matches. */
 function cfgFor(nativeId: string): DevCfg | undefined {
   const all = cfgState.read();
-  return all[nativeId] ?? Object.values(all).find((c) => c.udid === nativeId);
+  return all[nativeId] ?? Object.values(all).find((c) => c.udid === nativeId || c.coreDeviceId === nativeId);
 }
 
 /** nativeId for a WDA URL when the udid is unknown: wda-<host>-<port>. */
@@ -816,9 +816,10 @@ async function discover(): Promise<Discovered[]> {
 
 /** devicectl's view of a phone, for the preflight and the supervisor (found, trusted, reachable, unlocked). */
 async function phoneFacts(udid: string, fresh = false): Promise<PhoneFacts> {
-  // Each devicectl call takes seconds over Wi-Fi: ask for the lock state while the list is read (ignored when the
-  // list says the phone can't be asked).
-  const lock = probeLock(udid).catch(() => null);
+  // Each devicectl call takes seconds over Wi-Fi: when the last list showed the phone reachable, ask for the lock state
+  // while the list is read (a phone that is away isn't asked at all).
+  const seen = listCache?.list.find((x) => hw(x).udid === udid || x.identifier === udid);
+  const early = seen && mapState(seen) === 'running' ? probeLock(udid).catch(() => null) : undefined;
   const list = await physicalDevices(fresh);
   const d = list.find((x) => hw(x).udid === udid || x.identifier === udid);
   if (!d) return { found: false };
@@ -827,7 +828,7 @@ async function phoneFacts(udid: string, fresh = false): Promise<PhoneFacts> {
   const tunnel = legacy.tunnelState ?? c.tunnelState ?? c.state;
   const reachable = tunnel !== 'unavailable';
   const osVersion = sw(d).osVersionNumber?.stringValue ?? d.deviceProperties?.osVersionNumber;
-  const locked = reachable && (!pairing || pairing === 'paired') ? await lock : null;
+  const locked = reachable && (!pairing || pairing === 'paired') ? await (early ?? probeLock(hw(d).udid ?? udid).catch(() => null)) : null;
   return {
     found: true, name: st(d).name, paired: !pairing || pairing === 'paired', reachable,
     ...(osVersion ? { osVersion: String(osVersion) } : {}), developerMode: devModeOf(d) ?? null, locked,
@@ -953,6 +954,17 @@ async function stopRunnersOnPhone(udid: string): Promise<number> {
   return pids.length;
 }
 
+/** End the xcodebuild a PhoneDock that died left behind: only the one its cleanup record names, and only if its
+ *  command line still matches (the pid could have been reused). True when it was killed. */
+export function killOrphanXcodebuild(rec: { xcodebuild?: number; xctestrun?: string }): boolean {
+  if (!rec.xcodebuild || !rec.xctestrun) return false;
+  let args = '';
+  try { args = execFileSync('/bin/ps', ['-p', String(rec.xcodebuild), '-o', 'args='], { encoding: 'utf8' }); } catch { return false; }
+  if (!args.includes('test-without-building') || !args.includes(rec.xctestrun)) return false;
+  process.kill(rec.xcodebuild, 'SIGKILL');
+  return true;
+}
+
 /** Which PhoneDock owns each phone on this Mac, and the cleanups owed (WdaLedger), shared by every PhoneDock process
  *  and user on this Mac. Tests and test services pass their own directory. */
 const claimsDir = process.env.PHONEDOCK_WDA_CLAIMS_DIR;
@@ -965,12 +977,7 @@ const wdaSup = new WdaSupervisor({
   shared: (udid) => !!cfgFor(udid)?.wda?.share,
   stopOnPhone: (udid) => stopRunnersOnPhone(udid),
   ledger: wdaLedger,
-  // Only the xcodebuild the record names: its pid could have been reused, so the command line must match too.
-  killOrphan(rec) {
-    if (!rec.xcodebuild || !rec.xctestrun) return;
-    const args = execFileSync('/bin/ps', ['-p', String(rec.xcodebuild), '-o', 'args='], { encoding: 'utf8' });
-    if (args.includes('test-without-building') && args.includes(rec.xctestrun)) process.kill(rec.xcodebuild, 'SIGKILL');
-  },
+  killOrphan: killOrphanXcodebuild,
   async status(url) {
     const s = await wdaStatus(url, 3000, true);
     if (!s.ok) return false;
@@ -1045,7 +1052,11 @@ async function wdaSetup(id: string, opts: WdaSetupOptions, onProgress: (l: strin
   if (!/^[A-Za-z0-9-]+$/.test(id) || id.startsWith('wda-')) throw new PhoneDockError('The device identifier is invalid', 'bad_request', 400, ['Pass the iPhone’s UDID (phonedock devices --backend ios-device).']);
   const t0 = Date.now();
   const udid = await canonicalUdid(id);
-  if (setupsRunning.has(udid)) throw new PhoneDockError('This iPhone is already being set up', 'wda_setup_failed', 409, ['Wait for that setup to finish.']);
+  if (setupsRunning.has(udid)) {
+    const e = new PhoneDockError('This iPhone is already being set up', 'wda_setup_failed', 409, ['Wait for that setup to finish.']);
+    e.cause = 'busy';
+    throw e;
+  }
   const apiKey = parseApiKey({ path: opts.apiKeyPath, keyId: opts.apiKeyId, issuerId: opts.apiKeyIssuerId });
   setupsRunning.add(udid);
   runTimes.set(udid, { t0, steps: [['identifying the iPhone', Date.now() - t0]] });
@@ -1081,7 +1092,8 @@ function setupDeps(udid: string): SetupDeps {
     exists: existsSync,
     marks: { now: () => markClock, since: (id, t) => (lastMark.get(id) ?? 0) > t },
     store: {
-      get: (u) => { const all = cfgState.read(); return all[cfgKey(all, u)] as SetupEntry | undefined; },
+      // By any name: the caller's (a CoreDevice identifier) finds the entry the canonical UDID keys.
+      get: (u) => { const all = cfgState.read(); return (all[cfgKey(all, u)] ?? (u !== udid ? all[cfgKey(all, udid)] : undefined)) as SetupEntry | undefined; },
       set(u, entry) {
         // The CoreDevice identifier too, so Stop and Disconnect by either name find the phone.
         const core = listCache?.list.find((x) => hw(x).udid === u)?.identifier;
@@ -1115,6 +1127,17 @@ async function wdaStop(id: string): Promise<{ udid: string; stopped: boolean; co
     stopped = true;
   });
   const left = await wdaSup.unmanage(udid);
+  // An earlier setup's or a manual record (no `wda`): its runner is gone now, so is its address (and the notice).
+  if (left === 0) {
+    cfgState.update((all) => {
+      const k = cfgKey(all, udid);
+      const e = all[k];
+      if (!e || e.wda || !e.wdaUrl) return;
+      const next: DevCfg = { ...e };
+      delete next.wdaUrl; delete next.address; delete next.wdaDeviceId;
+      all[k] = next;
+    });
+  }
   scaleCache.delete(udid);
   wdaChanged();
   // confirmed: xcodebuild has exited and devicectl showed no WebDriverAgent runner left on the phone.
@@ -1165,7 +1188,7 @@ function liveDevice(d: Device): Device | undefined {
       wdaControl: control,
       wdaStopped: !cf?.wda && cf?.wdaStopped ? { team: cf.wdaStopped.team, stoppedAt: cf.wdaStopped.stoppedAt } : null,
       ...(readiness ? { readiness: { ...readiness, hints } } : {}),
-      ...(cf && !cf.wda && cf.wdaUrl ? { wdaNotice: LEGACY_WDA_NOTICE } : {}),
+      wdaNotice: cf && !cf.wda && cf.wdaUrl ? LEGACY_WDA_NOTICE : null,
     },
   };
 }
@@ -1295,7 +1318,7 @@ export const backend: Backend & {
         meta: { wdaUrl: cf.wdaUrl, wdaReady: ws.ok, address: cf.address, udid: cf.udid ?? null, manual: true, wdaIp: v.ios?.ip, wdaControl: null, experimental: false },
       });
     }));
-    return out.map(liveDevice).filter((x): x is Device => !!x);
+    return out;
   },
 
   /** The control state of a listed device as of now (the daemon applies it to every read of a cached list). */

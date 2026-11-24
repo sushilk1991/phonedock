@@ -247,7 +247,8 @@ extension AppModel {
         controlSetups[device.id] = .stopping
         Task {
             do {
-                let data = try await c.send("POST", "/v1/ios/wda-stop", json: ["udid": udid], timeout: 60)
+                // devicectl over Wi-Fi may take up to a minute to end and confirm the runner on the phone.
+                let data = try await c.send("POST", "/v1/ios/wda-stop", json: ["udid": udid], timeout: 120)
                 await refresh()
                 // Stopped on this Mac either way; say so when the runner on the iPhone couldn't be confirmed gone.
                 let r = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
