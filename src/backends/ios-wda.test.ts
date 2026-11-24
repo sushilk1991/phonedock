@@ -11,7 +11,7 @@ import { PhoneDockError, type ExecResult } from '../core/types.ts';
 import {
   UPSTREAM_RUNNER_BUNDLE_ID, WdaSupervisor, buildArgv, buildKey, chooseTeam, classifyXcodebuild, ensureBuild, launchArgv,
   launchWda, parseApiKey, parseXcodeTeams, preflight, pruneBuilds, readProfile, readXcodeInfo, readXcodeTeams, rebuildReason,
-  runnerBundleId, startRunner, type ChildLike, type Exec, type PhoneFacts, type Runner, type SupervisorDeps, type WdaBuildDeps,
+  runnerBundleId, startRunner, type ChildLike, type Exec, type PhoneFacts, type Runner, type SupervisorDeps, type WdaBuildDeps, type XcodeInfo,
 } from './ios-wda.ts';
 
 const TEAM_A = 'AAAAA11111', TEAM_B = 'BBBBB22222', TEAM_FREE = 'FFFFF33333';
@@ -111,9 +111,9 @@ test('runner bundle id: upstream for paid teams, a team-specific one for persona
 // ── preflight ──
 
 test('preflight names the first thing to fix, before any build', () => {
-  const xcode = { build: '27B52', version: '27.2', minIos: '17.0' };
+  const xcode: XcodeInfo = { build: '27B52', version: '27.2', minIos: '17.0' };
   const ok: PhoneFacts = { found: true, paired: true, reachable: true, osVersion: '18.7', developerMode: true, locked: false };
-  const code = (x: typeof xcode | undefined, p: PhoneFacts | undefined) => preflight(x, p, UDID)?.code;
+  const code = (x: XcodeInfo | undefined, p: PhoneFacts | undefined) => preflight(x, p, UDID)?.code;
   assert.equal(code(undefined, ok), 'xcode_missing');
   assert.equal(code(xcode, undefined), 'not_found');
   assert.equal(code(xcode, { found: false }), 'not_found');

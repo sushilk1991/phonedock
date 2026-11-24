@@ -1003,11 +1003,17 @@ export class PhoneDockClient {
   disconnect(id: string): Promise<{ ok: boolean }> { return this.request('DELETE', `/v1/connect/${encodeURIComponent(id)}`); }
   /** Scan for iPhones on the network (Bonjour + devicectl). */
   discoverIos(): Promise<{ name: string; host?: string; udid?: string; source: string; service?: string; deviceId?: string }[]> { return this.request('GET', '/v1/ios/discover'); }
-  /** Build + run WebDriverAgent on a device (Job; resolves when WDA prints its URL, which is saved for the device). */
-  async wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string } & WaitOptions = {}): Promise<Job> {
+  /** Set up control for an iPhone on iOS 26 or older (Job): build the pinned WebDriverAgent once for the team, start
+   *  it, and keep it running. Resolves when WDA prints its URL, which is saved for the device. `team` is needed when
+   *  Xcode is signed in to several teams (wdaTeams); `apiKey*` stand in for an Apple ID in Xcode. */
+  async wdaSetup(udid: string, opts: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string } & WaitOptions = {}): Promise<Job> {
     const { wait, timeoutMs, onProgress, ...body } = opts;
     const r = await this.request<{ job: Job }>('POST', '/v1/ios/wda-setup', { body: { udid, ...body } });
     return wait === false ? r.job : this.waitJob(r.job.id, { timeoutMs: timeoutMs ?? 30 * 60_000, onProgress });
+  }
+  /** The signing teams Xcode is signed in to on the daemon's Mac (for wdaSetup's `team`). */
+  wdaTeams(): Promise<{ teams: { id: string; name: string; type?: string; free: boolean }[]; xcode: boolean; xcodeVersion?: string; minIos?: string }> {
+    return this.request('GET', '/v1/ios/wda-teams');
   }
   pair(address: string, code: string, opts: { restartAdb?: boolean } = {}): Promise<{ ok: boolean }> { return this.request('POST', '/v1/pair', { body: { address, code, ...opts } }); }
   /** Scan the Wi-Fi for Android phones with Wireless debugging (about 3 s). A phone offers `pairingPort` only while its pairing screen is open. */

@@ -809,7 +809,8 @@ type IosConnector = {
   connectWda: (input: string, o?: { name?: string; udid?: string }) => Promise<{ nativeId: string; wdaUrl: string; status: unknown }>;
   disconnect: (nid: string) => Promise<boolean>;
   discover: () => Promise<unknown[]>;
-  wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string }, p?: (l: string) => void) => Promise<unknown>;
+  wdaSetup: (udid: string, o: { team?: string; destination?: string; name?: string; apiKeyPath?: string; apiKeyId?: string; apiKeyIssuerId?: string }, p?: (l: string) => void) => Promise<unknown>;
+  wdaTeams: () => Promise<unknown>;
 };
 function iosBackend(): Backend & IosConnector {
   const b = backends.find((x) => x.id === 'ios-device') as (Backend & Partial<IosConnector>) | undefined;
@@ -856,13 +857,19 @@ r.post('/v1/ios/wda-setup', async (c) => {
   assertPhysicalAllowed('wda-setup');
   const body = await c.body(); if (!body.udid) throw badRequest('udid required');
   const b = iosBackend();
+  const opt = (k: string) => (body[k] !== undefined && body[k] !== null && body[k] !== '' ? String(body[k]) : undefined);
+  const udid = String(body.udid);
   const job = startJob('wda-setup', async (p) => {
-    const res = await b.wdaSetup(String(body.udid), { team: body.team ? String(body.team) : undefined, destination: body.destination ? String(body.destination) : undefined, name: body.name ? String(body.name) : undefined }, p);
+    const res = await b.wdaSetup(udid, {
+      team: opt('team'), destination: opt('destination'), name: opt('name'),
+      apiKeyPath: opt('apiKeyPath'), apiKeyId: opt('apiKeyId'), apiKeyIssuerId: opt('apiKeyIssuerId'),
+    }, p);
     invalidateDevices();
     return res;
-  });
+  }, `ios-device:${udid}`);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });
 });
+r.get('/v1/ios/wda-teams', async () => { assertPhysicalAllowed('wda-teams'); return iosBackend().wdaTeams(); });
 r.get('/v1/android/discover', async () => {
   assertPhysicalAllowed('discover');
   const b = androidDevice();

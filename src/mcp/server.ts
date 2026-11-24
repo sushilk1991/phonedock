@@ -950,7 +950,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
   });
 
   // ── physical connection ───────────────────────────────────────────────
-  tool('connect_device', 'Connect a physical phone over Wi-Fi so it shows up in list_devices. Android: address = "host:port" from Wireless debugging (adb connect). iPhone: platform="ios" with address = the iPhone IP (WebDriverAgent assumed on port 8100) or wda_url = full WebDriverAgent URL; WebDriverAgent must already be running on the phone (see docs/IPHONE-WIFI.md). Only connect devices the user asked for.', {
+  tool('connect_device', 'Connect a physical phone over Wi-Fi so it shows up in list_devices. Android: address = "host:port" from Wireless debugging (adb connect). iPhone: platform="ios" with address = the iPhone IP (WebDriverAgent assumed on port 8100) or wda_url = full WebDriverAgent URL, for a WebDriverAgent already running on the phone (e.g. started by another Mac). An iPhone on iOS 26 or older that is paired with this Mac needs no address: set up control once with `phonedock ios wda-setup --udid <udid>` (it builds, starts and keeps WebDriverAgent running; see docs/IPHONE-WIFI.md). Only connect devices the user asked for.', {
     platform: z.enum(['android', 'ios']).optional().describe('Default android unless wda_url is given'),
     address: z.string().optional().describe('Android host:port, or iPhone IP/hostname'),
     wda_url: z.string().optional().describe('iPhone WebDriverAgent URL, e.g. http://192.168.1.20:8100'),

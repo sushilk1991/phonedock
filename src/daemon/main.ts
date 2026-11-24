@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { DEFAULT_PORT } from '../core/paths.ts';
 import { PhoneDockError, type BootOptions } from '../core/types.ts';
-import { backends, closeOwnership, initBackends, listDevices, loadState, state, writeDaemonInfo, startJob, getBackend } from './core.ts';
+import { backends, closeOwnership, deviceFilter, initBackends, invalidateDevices, listDevices, loadState, state, writeDaemonInfo, startJob, getBackend } from './core.ts';
 import { HANDLED, Raw, readBody, sendError, sendJson, type Ctx } from './http.ts';
 import { router, VERSION } from './routes.ts';
 import { metrics } from './metrics.ts';
@@ -78,8 +78,16 @@ server.on('error', (e) => { console.error(`[phonedockd] listen failed: ${(e as E
 server.listen(port, '127.0.0.1', () => {
   console.log(`[phonedockd] v${VERSION} listening on http://127.0.0.1:${port} (pid ${process.pid}); backends: ${backends.map((b) => b.id).join(', ')}`);
   void autoStart();
+  // Older iPhones: relaunch the WebDriverAgent PhoneDock manages (it ended with the previous daemon or a reboot).
+  // A filtered service (tests, CI) never touches physical phones.
+  if (!deviceFilter && process.platform === 'darwin') iosSupervision()?.startWdaSupervisor?.(() => invalidateDevices());
   refreshAgentSkills(port).catch((e) => console.error(`[phonedockd] skill refresh failed: ${(e as Error).message}`));
 });
+
+/** The iPhone backend's WebDriverAgent supervisor hooks (through the loaded backend, so a broken module stays non-fatal). */
+function iosSupervision(): { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => void } | undefined {
+  return backends.find((b) => b.id === 'ios-device') as { startWdaSupervisor?: (onChange: () => void) => void; stopWdaSupervisor?: () => void } | undefined;
+}
 
 async function autoStart() {
   const recs = state.devices.filter((d) => d.autoStart);
@@ -102,6 +110,7 @@ const shutdown = (sig: string) => {
   if (exiting) return; exiting = true;
   console.log(`[phonedockd] ${sig} – exiting (devices keep running)`); server.close();
   const stopTraces = traces.size ? Promise.race([abortAllTraces(`daemon exiting (${sig})`), new Promise((r) => setTimeout(r, 25_000))]) : Promise.resolve();
+  iosSupervision()?.stopWdaSupervisor?.();
   void stopTraces.finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
 };
 process.on('SIGINT', () => shutdown('SIGINT'));

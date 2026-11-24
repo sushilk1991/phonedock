@@ -65,7 +65,9 @@ Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <co
             connect [<host:port>] [--serial S]   (no address: the one phone with Wireless debugging)
             (Android Wi-Fi commands take --restart-adb to restart a blocked adb server; see docs/API.md)
             connect --ios <ip|wda-url> [--name N] [--udid U] | discover --ios
-            ios wda-setup --udid <id> [--team TEAMID] [--name N]   (build + run WebDriverAgent; see docs/IPHONE-WIFI.md)
+            ios wda-setup --udid <id> [--team TEAMID] [--name N]   (older iPhones: set up control once; see docs/IPHONE-WIFI.md)
+              [--api-key-path AuthKey.p8 --api-key-id KEYID --api-key-issuer ISSUER]   (instead of an Apple ID in Xcode)
+            ios wda-teams   (the signing teams Xcode is signed in to)
 Human:      handoff request <id> <reason…> [--timeout S] [--wait] | handoff ls [--state S|--all] | handoff show|wait <hid>
             handoff resolve <hid> done|cancelled [--note N]   (also: handoff done|cancel <hid>)
 Recording:  actions <id> [--limit N] | replay <id> <file.json> | record <id> start|stop|status [--max S]
@@ -982,10 +984,21 @@ export async function run(argv: string[]): Promise<number> {
       return 0;
     }
     case 'ios': {
-      if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--name N]');
+      if (p[1] === 'wda-teams') {
+        const r = await c.wdaTeams();
+        out(r, () => !r.xcode ? 'Xcode isn’t installed (or xcode-select points at the Command Line Tools).'
+          : r.teams.length ? table(r.teams.map((t) => ({ team: t.id, name: t.name, kind: t.free ? 'personal (free)' : t.type ?? '' })), ['team', 'name', 'kind'])
+          : 'Xcode isn’t signed in to any team. Add your Apple ID in Xcode › Settings › Accounts, or pass an App Store Connect API key to `ios wda-setup`.');
+        return 0;
+      }
+      if (p[1] !== 'wda-setup') usage('Usage: phonedock ios wda-setup --udid <id> [--team <TEAMID>] [--name N] [--api-key-path P --api-key-id K --api-key-issuer I] | phonedock ios wda-teams');
       const udid = str(a.flags, 'udid') ?? p[2]; if (!udid) usage('Missing --udid <id>');
-      const job = await c.wdaSetup(udid, { team: str(a.flags, 'team'), destination: str(a.flags, 'destination'), name: str(a.flags, 'name'), wait: wantWait(a), onProgress: progressPrinter(quiet) });
-      out(job, () => job.state === 'done' ? `WebDriverAgent running at ${(job.result as { wdaUrl?: string })?.wdaUrl} – the device now shows up as Wi-Fi in \`phonedock devices\`` : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
+      const job = await c.wdaSetup(udid, {
+        team: str(a.flags, 'team'), destination: str(a.flags, 'destination'), name: str(a.flags, 'name'),
+        apiKeyPath: str(a.flags, 'apiKeyPath'), apiKeyId: str(a.flags, 'apiKeyId'), apiKeyIssuerId: str(a.flags, 'apiKeyIssuer') ?? str(a.flags, 'apiKeyIssuerId'),
+        wait: wantWait(a), onProgress: progressPrinter(quiet),
+      });
+      out(job, () => job.state === 'done' ? `WebDriverAgent running at ${(job.result as { wdaUrl?: string })?.wdaUrl}. PhoneDock keeps it running (after reboots and restarts too); \`phonedock disconnect ios-device:${udid}\` stops that.` : `wda-setup ${job.state} (job ${job.id})${job.error ? `: ${jobErrorText(job.error)}` : ''}`);
       return job.state === 'failed' ? 1 : 0;
     }
     case 'pair': {

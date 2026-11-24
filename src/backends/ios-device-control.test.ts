@@ -57,13 +57,22 @@ test('ios-device no-control error: iOS 27 with pymobiledevice3 but no input help
   assert.doesNotMatch(`${e.message} ${e.hints?.join(' ')}`, /WebDriverAgent/);
 });
 
-test('ios-device no-control error: iOS 26 and older, or an unknown version, still point at WebDriverAgent', () => {
+test('ios-device no-control error: iOS 26 and older, or an unknown version, point at one-step setup', () => {
   for (const os of ['26.4', '17.5', undefined]) {
     const e = noControlError('UDID-1', os, { pymd3: false, hid: false });
-    assert.equal(e.message, 'Could not control or inspect the iPhone');
-    assert.deepEqual(e.hints, ['Set up WebDriverAgent on the iPhone.']);
+    assert.equal(e.code, 'not_supported');
+    assert.equal(e.message, 'Set up control for this iPhone first');
+    assert.match(e.hints![0], /Set Up Control/);
+    assert.match(e.hints![0], /phonedock ios wda-setup --udid UDID-1/);
     assert.match(String(e.detail), /WebDriverAgent/);
+    assert.doesNotMatch(String(e.detail), /git clone/);
   }
+  // PhoneDock already manages it and is waiting on something: say what, as wda_not_ready.
+  const waiting = noControlError('UDID-1', '18.7', { pymd3: false, hid: false, control: {
+    managed: true, state: 'waiting_unlock', message: 'Unlock the iPhone so PhoneDock can start WebDriverAgent', attempts: 0, updatedAt: '2026-11-24T00:00:00Z' } });
+  assert.equal(waiting.code, 'wda_not_ready');
+  assert.equal(waiting.status, 503);
+  assert.match(waiting.message, /Unlock the iPhone/);
   // iOS 27 with everything installed only reaches this when native input is off for another reason: same as before.
   assert.equal(noControlError('UDID-1', '27.1', all).message, 'Could not control or inspect the iPhone');
 });
