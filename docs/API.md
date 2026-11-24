@@ -708,7 +708,9 @@ shown to have happened is a failure; the phone itself decides what the marker be
 Activity, and it isn't tried again until the phone is next used or restarted. A sleeping phone holds one RAM image on
 disk, the same `default_boot` an ordinary shutdown leaves.
 
-**Resuming.** The wake keeps a copy of `default_boot` (an APFS clone: no extra disk) and quick-boots with
+**Resuming.** One wake of a phone at a time, across daemons (a lock file in its AVD folder). With no emulator holding the
+AVD open, the wake keeps a copy of `default_boot`: its folder and the AVD's qcow2 disk images, which hold its other half
+(clones on macOS, `cp -c`: instant, no extra disk). Then it quick-boots with
 `-force-snapshot-load`: a state that won't load makes the emulator delete it and exit, not start fresh, so the daemon puts
 the copy back and the wake fails (`wake_failed`; the phone stays asleep, its state kept; Cold Boot starts it fresh).
 The guest's boot id, uptime and token show it is that save that came back; then the copy is dropped and the guest clock
