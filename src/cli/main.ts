@@ -478,10 +478,10 @@ export async function run(argv: string[]): Promise<number> {
         const detail = x.state === 'installing'
           ? `${x.progress?.phase ?? 'installing'}${x.progress?.percent !== undefined ? ` (${x.progress.percent}%)` : ''}`
           : x.state === 'failed'
-            ? (x.error?.message ?? 'failed')
+            ? (x.error?.message ?? x.detail ?? 'failed')
             : x.updateAvailable
               ? `update available (${x.pinnedVersion})`
-              : (x.source === 'override' ? 'env override' : x.source === 'external' ? 'host install' : '');
+              : (x.detail ?? (x.source === 'override' ? 'env override' : ''));
         return {
           id: x.id,
           state: x.state,

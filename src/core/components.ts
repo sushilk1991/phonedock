@@ -3,7 +3,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   accessSync, constants, createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
-  readlinkSync, renameSync, rmSync, statSync, writeFileSync,
+  readlinkSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join, normalize, relative, resolve, sep } from 'node:path';
 import { run, sleep } from './exec.ts';
@@ -26,7 +26,6 @@ const STAGING_DIR_NAME = '.staging';
 const MAX_REDIRECTS = 5;
 const PRUNE_UNUSED_MS = 30 * 86_400_000;
 const STAGING_ORPHAN_MS = 24 * 3_600_000;
-const DEFAULT_LOCK_STALE_MS = 5 * 60_000;
 const DEFAULT_LOCK_MISSING_GRACE_MS = 5_000;
 const DEFAULT_LOCK_HEARTBEAT_MS = 10_000;
 const DEFAULT_LOCK_POLL_MS = 500;
@@ -44,6 +43,7 @@ interface ReadyMarker {
 
 interface LockOwner {
   pid: number;
+  token: string;
   startedAt: string;
   heartbeatAt: string;
   key: string;
@@ -57,6 +57,7 @@ interface RuntimeState {
   lastAttemptAt?: string;
   nextRetryAt?: number;
   consecutiveFailures: number;
+  cachedExternal?: string | null;
   promise?: Promise<ComponentStatus>;
 }
 
@@ -89,6 +90,8 @@ export interface ComponentManagerOptions {
   lockHeartbeatMs?: number;
   lockPollMs?: number;
   lockWaitTimeoutMs?: number;
+  /** Override write stream factory (unit tests for filesystem error handling). */
+  createWriteStream?: typeof createWriteStream;
   /** Skip default network download / venv steps in unit tests when custom hooks provided. */
   pipExtraArgs?: string[];
   /** Called whenever a component's status changes (throttled for progress). */
@@ -130,7 +133,13 @@ export function isolatedPythonEnv(baseEnv: NodeJS.ProcessEnv = process.env): Nod
   return out;
 }
 
-/** Validate every tar entry path before extraction; rejects absolute paths, `..`, and special device nodes. */
+function hasUnsafeLinkTarget(target: string): boolean {
+  if (!target || target.includes('\0')) return true;
+  if (target.startsWith('/') || target.startsWith('\\')) return true;
+  return target.split(/[\\/]+/).includes('..');
+}
+
+/** Validate every tar entry path and link target before extraction; rejects absolute paths, `..`, unsafe links, and special device nodes. */
 export async function inspectTarSafety(tarballPath: string, targetDir: string): Promise<string[]> {
   const listRes = await run('/usr/bin/tar', ['-tzf', tarballPath], {
     timeoutMs: 30_000,
@@ -157,7 +166,7 @@ export async function inspectTarSafety(tarballPath: string, targetDir: string): 
       throw new PhoneDockError('Archive entry escapes destination directory', 'unsafe_archive', 502, undefined, `Rejected escaping tar entry: ${entry}`);
     }
   }
-  // Check verbose listing for device nodes or FIFOs.
+  // Check verbose listing for device nodes, FIFOs, and unsafe symlink/hardlink targets (absolute or `..`).
   const verbRes = await run('/usr/bin/tar', ['-tvzf', tarballPath], {
     timeoutMs: 30_000,
     failureMessage: 'Could not inspect downloaded archive metadata',
@@ -168,32 +177,52 @@ export async function inspectTarSafety(tarballPath: string, targetDir: string): 
     if (modeChar === 'b' || modeChar === 'c' || modeChar === 'p') {
       throw new PhoneDockError('Archive contains unsupported special file', 'unsafe_archive', 502, undefined, `Rejected tar entry: ${line}`);
     }
+    if (modeChar === 'l') {
+      const arrow = line.indexOf(' -> ');
+      const target = arrow >= 0 ? line.slice(arrow + 4) : '';
+      if (hasUnsafeLinkTarget(target)) {
+        throw new PhoneDockError('Archive contains an unsafe symlink target', 'unsafe_archive', 502, undefined, `Rejected symlink tar entry: ${line}`);
+      }
+    } else if (modeChar === 'h') {
+      const linkIdx = line.indexOf(' link to ');
+      const target = linkIdx >= 0 ? line.slice(linkIdx + 9) : '';
+      if (hasUnsafeLinkTarget(target)) {
+        throw new PhoneDockError('Archive contains an unsafe hardlink target', 'unsafe_archive', 502, undefined, `Rejected hardlink tar entry: ${line}`);
+      }
+    }
   }
   return entries;
 }
 
-/** Verify no extracted symlink points outside rootDir. */
+/** Verify every extracted entry and symlink chain resolves via realpath strictly inside rootDir. */
 export function verifyExtractedSymlinks(rootDir: string): void {
-  const base = resolve(rootDir);
+  const rootReal = realpathSync(rootDir);
+  const inside = (p: string) => p === rootReal || p.startsWith(rootReal + sep);
   const walk = (dir: string) => {
     for (const name of readdirSync(dir)) {
       const full = join(dir, name);
       const st = lstatSync(full);
       if (st.isSymbolicLink()) {
         const target = readlinkSync(full);
-        if (target.startsWith('/')) {
-          throw new PhoneDockError('Archive contains an absolute symlink', 'unsafe_archive', 502, undefined, `Symlink ${relative(base, full)} -> ${target}`);
+        if (hasUnsafeLinkTarget(target)) {
+          throw new PhoneDockError('Archive contains an unsafe symlink', 'unsafe_archive', 502, undefined, `Symlink ${relative(rootReal, full)} -> ${target}`);
         }
-        const resolved = resolve(dirname(full), target);
-        if (resolved !== base && !resolved.startsWith(base + sep)) {
-          throw new PhoneDockError('Archive contains an escaping symlink', 'unsafe_archive', 502, undefined, `Symlink ${relative(base, full)} -> ${target}`);
-        }
-      } else if (st.isDirectory()) {
+      }
+      let real: string;
+      try {
+        real = realpathSync(full);
+      } catch {
+        throw new PhoneDockError('Archive contains an unresolvable symlink', 'unsafe_archive', 502, undefined, `Unresolvable entry: ${relative(rootReal, full)}`);
+      }
+      if (!inside(real)) {
+        throw new PhoneDockError('Archive entry resolves outside destination directory', 'unsafe_archive', 502, undefined, `${relative(rootReal, full)} -> ${real}`);
+      }
+      if (st.isDirectory()) {
         walk(full);
       }
     }
   };
-  walk(base);
+  walk(rootReal);
 }
 
 /** Extract a tarball into targetDir after rejecting absolute paths, `..` traversal, and escaping symlinks. */
@@ -386,7 +415,7 @@ export class ComponentManager {
     } catch { /* best effort */ }
   }
 
-  /** Prune sibling keys that are NOT this daemon's pin and haven't been used in 30 days, plus old orphaned staging dirs. */
+  /** Prune sibling keys that are NOT this daemon's pin, NOT referenced by an env override, and haven't been used in 30 days. */
   prune(id?: ComponentId): { removedKeys: string[]; removedStaging: string[] } {
     const ids = id ? [id] : [...COMPONENT_IDS];
     const removedKeys: string[] = [];
@@ -397,12 +426,26 @@ export class ComponentManager {
       const dir = this.componentDir(cid);
       let pinned: string | undefined;
       try { pinned = this.pinnedKey(cid)?.key; } catch { pinned = undefined; }
+      const rawOverride = this.rawEnvOverride(cid);
+      const protectedOverrides: string[] = [];
+      if (rawOverride) {
+        protectedOverrides.push(resolve(rawOverride));
+        try { protectedOverrides.push(realpathSync(rawOverride)); } catch { /* may not exist */ }
+      }
+      const isProtectedByOverride = (keyDir: string): boolean => {
+        if (!protectedOverrides.length) return false;
+        const candidates = [resolve(keyDir)];
+        try { candidates.push(realpathSync(keyDir)); } catch { /* ignore */ }
+        return candidates.some((kd) => protectedOverrides.some((ov) => ov === kd || ov.startsWith(kd + sep)));
+      };
+
       let names: string[];
       try { names = readdirSync(dir); } catch { continue; }
       for (const name of names) {
         if (name.startsWith('.')) continue;
         if (pinned && name === pinned) continue; // never prune this daemon's pin
         const keyDir = join(dir, name);
+        if (isProtectedByOverride(keyDir)) continue; // never prune a key an active override points into
         const markerFile = join(keyDir, READY_FILE);
         if (!existsSync(markerFile)) continue; // don't touch in-progress or foreign dirs without a marker
         try {
@@ -455,13 +498,41 @@ export class ComponentManager {
     const s = this.spec(id);
     const rt = this.runtime.get(id)!;
     const pin = this.pinnedKey(id);
+    const rawOverride = this.rawEnvOverride(id);
+
+    // An explicitly set override that is missing or not executable stops auto-install and reports invalid override.
+    if (rawOverride !== undefined && !isExecutable(rawOverride)) {
+      const envName = id === 'ios-tools' ? 'PHONEDOCK_PYMD3_PYTHON' : 'PHONEDOCK_AXE';
+      return {
+        id,
+        displayName: s.displayName,
+        description: s.description,
+        state: 'failed',
+        pinnedVersion: s.version,
+        source: 'override',
+        updateAvailable: false,
+        estimatedBytes: s.estimatedDiskBytes,
+        ...(pin ? { downloadBytes: pin.artifact.size } : {}),
+        detail: `${envName} is set to a missing or non-executable path.`,
+        error: {
+          code: 'invalid_override',
+          message: `Configured ${envName} override is not executable`,
+          detail: `${envName}=${rawOverride}`,
+        },
+      };
+    }
+
     const managed = this.resolveManaged(id);
-    const external = !managed ? this.externalPath(id) : undefined;
+    // Never run synchronous external probes repeatedly on progress ticks while installing.
+    const external = !managed
+      ? (rt.installing && rt.cachedExternal !== undefined ? (rt.cachedExternal ?? undefined) : this.externalPath(id))
+      : undefined;
 
     let source: ComponentSource = 'none';
     let installedVersion: string | undefined;
     let sizeBytes: number | undefined;
     let updateAvailable = false;
+    let detail: string | undefined;
 
     if (managed) {
       source = managed.source;
@@ -472,7 +543,8 @@ export class ComponentManager {
       }
     } else if (external) {
       source = 'external';
-      updateAvailable = Boolean(pin);
+      updateAvailable = false;
+      detail = 'Using the copy installed on this Mac. PhoneDock installs its own pinned copy when needed.';
     }
 
     let state: ComponentStatus['state'];
@@ -502,6 +574,7 @@ export class ComponentManager {
       ...(pin ? { downloadBytes: pin.artifact.size } : {}),
       ...(rt.installing && rt.progress ? { progress: { ...rt.progress } } : {}),
       ...(rt.installing && rt.jobId ? { jobId: rt.jobId } : {}),
+      ...(detail && !rt.installing ? { detail } : {}),
       ...(rt.error && !rt.installing ? { error: { ...rt.error } } : {}),
       ...(rt.lastAttemptAt ? { lastAttemptAt: rt.lastAttemptAt } : {}),
       ...(rt.nextRetryAt && rt.nextRetryAt > this.now() ? { nextRetryAt: new Date(rt.nextRetryAt).toISOString() } : {}),
@@ -514,6 +587,7 @@ export class ComponentManager {
 
   /** Whether this component is already at the daemon's pinned key (or overridden by env). */
   isCurrent(id: ComponentId): boolean {
+    if (this.rawEnvOverride(id) !== undefined) return true;
     const resolved = this.resolveManaged(id);
     return Boolean(resolved && resolved.isPinned);
   }
@@ -524,24 +598,24 @@ export class ComponentManager {
     return rt?.installing ? rt.jobId : undefined;
   }
 
-  private emitStatus(id: ComponentId, force = false): ComponentStatus {
-    const st = this.status(id);
-    if (!this.opts.onChange) return st;
+  private emitStatus(id: ComponentId, force = false): ComponentStatus | undefined {
+    if (!this.opts.onChange) return force ? this.status(id) : undefined;
     const now = this.now();
     const last = this.lastEmitAt.get(id) ?? 0;
-    if (force || now - last >= 350) {
-      this.lastEmitAt.set(id, now);
-      try { this.opts.onChange(st); } catch { /* best effort */ }
-    }
+    if (!force && now - last < 350) return undefined;
+    this.lastEmitAt.set(id, now);
+    const st = this.status(id);
+    try { this.opts.onChange(st); } catch { /* best effort */ }
     return st;
   }
 
   /**
    * Non-blocking automatic install trigger with dedupe and exponential backoff.
-   * Respects PHONEDOCK_COMPONENTS_AUTO=0. Never throws or blocks callers.
+   * Respects PHONEDOCK_COMPONENTS_AUTO=0 and never triggers when an env override is set (valid or invalid).
    */
   triggerAuto(id: ComponentId, opts: { startJob?: (id: ComponentId, runFn: (onProgress: (line: string) => void, jobId: string) => Promise<ComponentStatus>) => string } = {}): boolean {
     if (!this.autoInstallEnabled()) return false;
+    if (this.rawEnvOverride(id) !== undefined) return false;
     if (this.isCurrent(id)) return false;
     const rt = this.runtime.get(id)!;
     if (rt.installing) return false;
@@ -601,12 +675,13 @@ export class ComponentManager {
       rt.error = undefined;
       rt.consecutiveFailures = 0;
       rt.nextRetryAt = undefined;
-      return this.emitStatus(id, true);
+      return this.emitStatus(id, true)!;
     }
 
     rt.installing = true;
     rt.jobId = opts.jobId;
     rt.error = undefined;
+    rt.cachedExternal = this.externalPath(id) ?? null;
     rt.lastAttemptAt = new Date(this.now()).toISOString();
 
     const setProgress = (phase: ComponentPhase, percent?: number, bytesDone?: number, bytesTotal?: number, detail?: string, force = false) => {
@@ -624,6 +699,7 @@ export class ComponentManager {
     setProgress('queued', 0, 0, artifact.size, `Preparing ${spec.displayName} ${spec.version}…`, true);
 
     let releaseLock: (() => void) | undefined;
+    let assertLockOwned: (() => void) | undefined;
     let stagingDir: string | undefined;
     let incompleteFinalDir: string | undefined;
 
@@ -634,14 +710,16 @@ export class ComponentManager {
         rt.installing = false;
         rt.progress = undefined;
         rt.jobId = undefined;
+        rt.cachedExternal = undefined;
         rt.consecutiveFailures = 0;
         rt.nextRetryAt = undefined;
         rt.promise = undefined;
         const bin = this.readReady(id, key)!.binaryPath;
         this.opts.onActivated?.(id, bin);
-        return this.emitStatus(id, true);
+        return this.emitStatus(id, true)!;
       }
       releaseLock = acquired.release;
+      assertLockOwned = acquired.assertOwned;
 
       // Re-check inside the lock in case another process activated it just before we entered.
       if (this.readReady(id, key)) {
@@ -649,12 +727,13 @@ export class ComponentManager {
         rt.installing = false;
         rt.progress = undefined;
         rt.jobId = undefined;
+        rt.cachedExternal = undefined;
         rt.consecutiveFailures = 0;
         rt.nextRetryAt = undefined;
         rt.promise = undefined;
         const bin = this.readReady(id, key)!.binaryPath;
         this.opts.onActivated?.(id, bin);
-        return this.emitStatus(id, true);
+        return this.emitStatus(id, true)!;
       }
 
       const stagingRoot = join(this.componentDir(id), STAGING_DIR_NAME);
@@ -671,6 +750,8 @@ export class ComponentManager {
         const frac = total > 0 ? Math.min(1, done / total) : 0;
         setProgress('downloading', 1 + frac * (dlWeight - 1), done, total);
       });
+
+      assertLockOwned();
 
       // 2. Verify sha256
       setProgress('verifying', dlWeight, artifact.size, artifact.size, 'Verifying checksum…', true);
@@ -689,6 +770,8 @@ export class ComponentManager {
       const payloadDir = join(stagingDir, 'payload');
       await safeExtractTarGz(archivePath, payloadDir);
       rmSync(archivePath, { force: true });
+
+      assertLockOwned();
 
       const finalDir = join(this.componentDir(id), key);
       let binaryRelPath: string;
@@ -710,6 +793,7 @@ export class ComponentManager {
         binaryRelPath = await this.verifyBinaryArchive(spec, payloadDir, (phase, pct, detail) => {
           setProgress(phase, pct, artifact.size, artifact.size, detail, true);
         });
+        assertLockOwned();
         if (existsSync(finalDir) && !existsSync(join(finalDir, READY_FILE))) {
           rmSync(finalDir, { recursive: true, force: true });
         }
@@ -718,6 +802,8 @@ export class ComponentManager {
           incompleteFinalDir = finalDir;
         }
       }
+
+      assertLockOwned();
 
       // 5. Atomic activation: write .ready.json via tmp+rename LAST so readers never see a half-built key.
       const nowIso = new Date(this.now()).toISOString();
@@ -735,6 +821,7 @@ export class ComponentManager {
       rt.installing = false;
       rt.progress = undefined;
       rt.jobId = undefined;
+      rt.cachedExternal = undefined;
       rt.error = undefined;
       rt.consecutiveFailures = 0;
       rt.nextRetryAt = undefined;
@@ -742,7 +829,7 @@ export class ComponentManager {
 
       const activatedBin = resolve(finalDir, binaryRelPath);
       this.opts.onActivated?.(id, activatedBin);
-      return this.emitStatus(id, true);
+      return this.emitStatus(id, true)!;
     } catch (err) {
       const pe = err instanceof PhoneDockError ? err : new PhoneDockError(
         `Couldn’t install ${spec.displayName}`,
@@ -754,6 +841,7 @@ export class ComponentManager {
       rt.installing = false;
       rt.progress = undefined;
       rt.jobId = undefined;
+      rt.cachedExternal = undefined;
       rt.promise = undefined;
       rt.error = { code: pe.code, message: pe.message, ...(pe.detail ? { detail: pe.detail } : {}) };
       rt.consecutiveFailures += 1;
@@ -821,13 +909,33 @@ export class ComponentManager {
     }
 
     const hash = createHash('sha256');
-    const out = createWriteStream(destPath, { mode: 0o644 });
+    const out = (this.opts.createWriteStream ?? createWriteStream)(destPath, { mode: 0o644 });
+    // Attach persistent error handler before reading any network chunks so ENOSPC / open errors never crash the daemon.
+    let streamErr: PhoneDockError | undefined;
+    let rejectStream!: (err: PhoneDockError) => void;
+    const streamFailed = new Promise<never>((_res, rej) => { rejectStream = rej; });
+    streamFailed.catch(() => { /* observed via Promise.race / streamErr checks */ });
+    out.on('error', (err: Error) => {
+      if (!streamErr) {
+        streamErr = new PhoneDockError(
+          'Could not write downloaded component to disk',
+          'download_write_failed',
+          500,
+          ['Check free disk space and folder permissions, then try again.'],
+          err.message,
+        );
+        rejectStream(streamErr);
+      }
+    });
+
     let bytesDone = 0;
     const reader = res.body.getReader();
 
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        if (streamErr) throw streamErr;
+        const { done, value } = await Promise.race([reader.read(), streamFailed]);
+        if (streamErr) throw streamErr;
         if (done) break;
         const chunk = Buffer.from(value);
         bytesDone += chunk.length;
@@ -842,20 +950,22 @@ export class ComponentManager {
         }
         hash.update(chunk);
         if (!out.write(chunk)) {
-          await new Promise<void>((resolveWrite, rejectWrite) => {
-            const onDrain = () => { out.off('error', onError); resolveWrite(); };
-            const onError = (err: Error) => { out.off('drain', onDrain); rejectWrite(err); };
-            out.once('drain', onDrain);
-            out.once('error', onError);
-          });
+          await Promise.race([
+            new Promise<void>((resolveWrite) => { out.once('drain', resolveWrite); }),
+            streamFailed,
+          ]);
         }
+        if (streamErr) throw streamErr;
         onBytes(bytesDone, artifact.size);
       }
-      await new Promise<void>((resolveEnd, rejectEnd) => {
-        out.once('finish', resolveEnd);
-        out.once('error', rejectEnd);
-        out.end();
-      });
+      await Promise.race([
+        new Promise<void>((resolveEnd) => {
+          out.once('finish', resolveEnd);
+          out.end();
+        }),
+        streamFailed,
+      ]);
+      if (streamErr) throw streamErr;
     } catch (e) {
       out.destroy();
       try { await reader.cancel(); } catch { /* ignore */ }
@@ -986,65 +1096,115 @@ export class ComponentManager {
     return relPath;
   }
 
-  /** Cross-process lock using atomic mkdir with owner.json heartbeat and stale-lock recovery. */
+  /** Cross-process lock using atomic mkdir with token-guarded owner.json and dead-PID stale recovery. */
   private async acquireLock(
     id: ComponentId,
     key: string,
     isTargetReady: () => boolean,
-  ): Promise<'already-ready' | { release: () => void }> {
+  ): Promise<'already-ready' | { release: () => void; assertOwned: () => void }> {
     const dir = this.componentDir(id);
     const lockDir = join(dir, LOCK_DIR_NAME);
     const ownerFile = join(lockDir, LOCK_OWNER_FILE);
-    const staleMs = this.opts.lockStaleMs ?? DEFAULT_LOCK_STALE_MS;
     const missingGraceMs = this.opts.lockMissingGraceMs ?? DEFAULT_LOCK_MISSING_GRACE_MS;
     const heartbeatMs = this.opts.lockHeartbeatMs ?? DEFAULT_LOCK_HEARTBEAT_MS;
     const pollMs = this.opts.lockPollMs ?? DEFAULT_LOCK_POLL_MS;
     const waitTimeoutMs = this.opts.lockWaitTimeoutMs ?? 10 * 60_000;
     const deadline = this.now() + waitTimeoutMs;
 
+    const readOwnerToken = (): string | undefined => {
+      try {
+        const parsed = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
+        return typeof parsed?.token === 'string' && parsed.token.length > 0 ? parsed.token : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+
     while (true) {
       if (isTargetReady()) return 'already-ready';
       try {
         mkdirSync(lockDir);
         const nowIso = new Date(this.now()).toISOString();
-        const owner: LockOwner = { pid: process.pid, startedAt: nowIso, heartbeatAt: nowIso, key };
+        const token = randomBytes(12).toString('hex');
+        const owner: LockOwner = { pid: process.pid, token, startedAt: nowIso, heartbeatAt: nowIso, key };
         atomicWriteJson(ownerFile, owner);
+        let lostLock = false;
+        const ownsLock = (): boolean => !lostLock && readOwnerToken() === token;
         const timer = setInterval(() => {
+          if (!ownsLock()) {
+            lostLock = true;
+            clearInterval(timer);
+            return;
+          }
           try {
-            if (existsSync(lockDir)) {
-              atomicWriteJson(ownerFile, { ...owner, heartbeatAt: new Date(this.now()).toISOString() });
-            }
+            atomicWriteJson(ownerFile, { ...owner, heartbeatAt: new Date(this.now()).toISOString() });
           } catch { /* ignore */ }
         }, heartbeatMs);
         timer.unref();
         let released = false;
         return {
+          assertOwned: () => {
+            if (!ownsLock()) {
+              lostLock = true;
+              clearInterval(timer);
+              throw new PhoneDockError(
+                `${this.spec(id).displayName} install lock was lost to another process`,
+                'lock_lost',
+                409,
+              );
+            }
+          },
           release: () => {
             if (released) return;
             released = true;
             clearInterval(timer);
-            try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* ignore */ }
+            // Only remove .lock if owner.json still carries our token; never delete another owner's lock.
+            if (readOwnerToken() === token) {
+              try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* ignore */ }
+            }
           },
         };
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
       }
 
-      // Lock exists: check if stale and reclaim atomically via rename.
+      // Lock exists: inspect owner.json safely without spinning on malformed metadata.
+      // Never steal from a live PID based on heartbeat age alone.
       let stale = false;
-      try {
-        if (existsSync(ownerFile)) {
-          const owner = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
-          const hb = Date.parse(owner.heartbeatAt ?? owner.startedAt ?? '');
-          const pidDead = typeof owner.pid === 'number' && owner.pid !== process.pid && !this.pidAlive(owner.pid);
-          const timedOut = Number.isFinite(hb) && this.now() - hb > staleMs;
-          if (pidDead || timedOut) stale = true;
-        } else {
+      let vanished = false;
+      if (existsSync(ownerFile)) {
+        let parsed: Partial<LockOwner> | undefined;
+        try {
+          parsed = JSON.parse(readFileSync(ownerFile, 'utf8')) as Partial<LockOwner>;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') vanished = true;
+          else parsed = undefined; // malformed JSON (e.g. truncated "{")
+        }
+        if (!vanished) {
+          if (parsed && typeof parsed.pid === 'number' && Number.isInteger(parsed.pid) && parsed.pid > 0) {
+            // Reclaim ONLY when the owning PID is dead.
+            if (!this.pidAlive(parsed.pid)) stale = true;
+          } else {
+            // Unreadable/malformed metadata: reclaim only after it stays unreadable past missingGraceMs (5s).
+            try {
+              const st = statSync(ownerFile);
+              if (this.now() - st.mtimeMs > missingGraceMs) stale = true;
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException).code === 'ENOENT') vanished = true;
+            }
+          }
+        }
+      } else {
+        try {
           const st = statSync(lockDir);
           if (this.now() - st.mtimeMs > missingGraceMs) stale = true;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') vanished = true;
         }
-      } catch {
-        // Lock disappeared or unreadable while checking; retry immediately.
+      }
+
+      if (vanished) {
+        await sleep(Math.min(pollMs, 10));
         continue;
       }
 
@@ -1055,7 +1215,7 @@ export class ComponentManager {
           rmSync(trash, { recursive: true, force: true });
           continue;
         } catch {
-          // Another process raced us to reclaim or released it; loop and retry.
+          // Another process raced us to reclaim or released it; yield before retrying.
         }
       }
 

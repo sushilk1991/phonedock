@@ -507,6 +507,7 @@ struct ComponentStatus: Codable, Hashable, Identifiable, Sendable {
     var downloadBytes: Int64?
     var progress: ComponentProgress?
     var jobId: String?
+    var detail: String?
     var error: ComponentErrorInfo?
     var lastAttemptAt: String?
     var nextRetryAt: String?

@@ -156,6 +156,11 @@ private struct ComponentRow: View {
                             Text("Update available (v\(component.pinnedVersion))")
                                 .font(Theme.Fonts.callout)
                                 .foregroundStyle(Theme.Ink.secondary)
+                        } else if let detail = component.detail, !detail.isEmpty {
+                            Text(detail)
+                                .font(Theme.Fonts.callout)
+                                .foregroundStyle(Theme.Ink.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         } else {
                             Text(component.description)
                                 .font(Theme.Fonts.callout)

@@ -694,6 +694,7 @@ export interface ComponentStatus {
   downloadBytes?: number;
   progress?: ComponentProgress;
   jobId?: string;
+  detail?: string;
   error?: ComponentErrorInfo;
   lastAttemptAt?: string;
   nextRetryAt?: string;

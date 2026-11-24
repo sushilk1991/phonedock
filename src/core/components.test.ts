@@ -5,13 +5,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  ComponentManager, isolatedPythonEnv, safeExtractTarGz, setComponentManager, getComponentManager,
+  ComponentManager, isolatedPythonEnv, safeExtractTarGz, setComponentManager, getComponentManager, verifyExtractedSymlinks,
 } from './components.ts';
 import {
   assertAllowedUrl, componentKey, loadManifest, sha256Hex, validateLockContent, validateManifest,
@@ -322,7 +323,7 @@ test('cross-process lock contention and stale-lock recovery (dead PID and stale 
       const lockDir = join(rootDir, 'axe', '.lock');
       mkdirSync(lockDir, { recursive: true });
       writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
-        pid: 999_999, startedAt: new Date(nowMs).toISOString(), heartbeatAt: new Date(nowMs).toISOString(), key,
+        pid: 999_999, token: 'dead-tok', startedAt: new Date(nowMs).toISOString(), heartbeatAt: new Date(nowMs).toISOString(), key,
       }));
       const mgr1 = new ComponentManager({
         rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
@@ -338,7 +339,7 @@ test('cross-process lock contention and stale-lock recovery (dead PID and stale 
       rmSync(join(rootDir, 'axe', key), { recursive: true, force: true });
       mkdirSync(lockDir, { recursive: true });
       writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({
-        pid: 424242, startedAt: new Date(nowMs).toISOString(), heartbeatAt: new Date(nowMs).toISOString(), key,
+        pid: 424242, token: 'live-tok', startedAt: new Date(nowMs).toISOString(), heartbeatAt: new Date(nowMs).toISOString(), key,
       }));
       const mgr2 = new ComponentManager({
         rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
@@ -566,6 +567,326 @@ test('python-venv install activates working non-broken venv symlinks and cleans 
       const out = execFileSync(resolved.path, [], { encoding: 'utf8' }).trim();
       assert.equal(out, 'fake-python');
     });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('P1 #1: live PID lock is never stolen on old heartbeat, and token mismatch aborts without clobbering new owner', async () => {
+  const work = makeTempDir('pd-comp-p1-lock-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    let releaseDownload!: () => void;
+    const downloadGate = new Promise<void>((r) => { releaseDownload = r; });
+
+    await withServer(async (_req, res) => {
+      await downloadGate;
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
+      const lockDir = join(rootDir, 'axe', '.lock');
+      const ownerFile = join(lockDir, 'owner.json');
+
+      // Part A: Live PID with 2-hour-old heartbeat MUST NOT be stolen
+      mkdirSync(lockDir, { recursive: true });
+      const ancient = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const origOwner = { pid: 55555, token: 'live-owner-tok', startedAt: ancient, heartbeatAt: ancient, key };
+      writeFileSync(ownerFile, JSON.stringify(origOwner));
+      const waiterMgr = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        pidAlive: () => true, lockPollMs: 15, lockWaitTimeoutMs: 70,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      await assert.rejects(() => waiterMgr.install('axe'), (e: any) => e.code === 'lock_timeout');
+      assert.deepEqual(JSON.parse(readFileSync(ownerFile, 'utf8')).token, 'live-owner-tok');
+      rmSync(lockDir, { recursive: true, force: true });
+
+      // Part B: If lock token changes mid-install, original owner aborts cleanly and does not overwrite or delete new lock
+      const ownerMgr = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        lockHeartbeatMs: 25, externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      const installP = ownerMgr.install('axe');
+      // Wait for ownerMgr to acquire .lock
+      for (let i = 0; i < 40 && !existsSync(ownerFile); i++) await new Promise((r) => setTimeout(r, 10));
+      assert.ok(existsSync(ownerFile));
+      const replacement = { pid: 77777, token: 'new-owner-tok', startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(), key };
+      writeFileSync(ownerFile, JSON.stringify(replacement));
+      // Let a heartbeat cycle fire and verify it did NOT overwrite replacement token
+      await new Promise((r) => setTimeout(r, 60));
+      assert.equal(JSON.parse(readFileSync(ownerFile, 'utf8')).token, 'new-owner-tok');
+      releaseDownload();
+      await assert.rejects(() => installP, (e: any) => e.code === 'lock_lost');
+      // New owner's lock MUST still exist untouched, staging cleaned up, target NOT activated
+      assert.ok(existsSync(ownerFile));
+      assert.equal(JSON.parse(readFileSync(ownerFile, 'utf8')).token, 'new-owner-tok');
+      assert.equal(existsSync(join(rootDir, 'axe', key)), false);
+      const staging = join(rootDir, 'axe', '.staging');
+      assert.equal(existsSync(staging) ? readdirSync(staging).length : 0, 0);
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('P1 #2: malformed lock metadata yields without spinning and reclaims after missing-grace timeout', async () => {
+  const work = makeTempDir('pd-comp-p1-malformed-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    await withServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const lockDir = join(rootDir, 'axe', '.lock');
+      const ownerFile = join(lockDir, 'owner.json');
+      mkdirSync(lockDir, { recursive: true });
+      writeFileSync(ownerFile, '{'); // malformed JSON
+
+      // Fresh malformed owner.json must yield and honor lockWaitTimeoutMs cleanly (no synchronous spin)
+      let timerFired = false;
+      const t = setTimeout(() => { timerFired = true; }, 20);
+      const mgrFresh = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        lockPollMs: 15, lockWaitTimeoutMs: 70, lockMissingGraceMs: 5_000,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      await assert.rejects(() => mgrFresh.install('axe'), (e: any) => e.code === 'lock_timeout');
+      clearTimeout(t);
+      assert.equal(timerFired, true, 'event loop was not blocked while waiting on malformed owner.json');
+
+      // Backdate owner.json mtime past 5s grace -> reclaimed and install succeeds
+      const past = new Date(Date.now() - 10_000);
+      utimesSync(ownerFile, past, past);
+      const mgrStale = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        lockPollMs: 15, lockMissingGraceMs: 5_000,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      const st = await mgrStale.install('axe');
+      assert.equal(st.state, 'ready');
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('P1 #3: async download write stream error rejects cleanly without uncaughtException and cleans staging', async () => {
+  const work = makeTempDir('pd-comp-p1-enos-');
+  let uncaught: unknown;
+  const onUncaught = (err: unknown) => { uncaught = err; };
+  process.on('uncaughtException', onUncaught);
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    await withServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      // Delay response slightly so write stream error fires while awaiting network data
+      setTimeout(() => res.end(tar.buf), 80);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+
+      const fakeStreamFactory = (() => {
+        const em = new EventEmitter() as any;
+        em.write = () => true;
+        em.end = () => {};
+        em.destroy = () => {};
+        setTimeout(() => em.emit('error', Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })), 15);
+        return em;
+      }) as any;
+
+      const mgr = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        createWriteStream: fakeStreamFactory,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      await assert.rejects(() => mgr.install('axe'), (e: any) => e.code === 'download_write_failed');
+      assert.equal(uncaught, undefined);
+      const staging = join(rootDir, 'axe', '.staging');
+      assert.equal(existsSync(staging) ? readdirSync(staging).length : 0, 0);
+    });
+  } finally {
+    process.off('uncaughtException', onUncaught);
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('P2 #4: archive validation rejects escaping symlink chains and unsafe hardlinks while allowing valid framework symlinks', async () => {
+  const work = makeTempDir('pd-comp-p2-links-');
+  try {
+    const buildTar = (kind: string, outPath: string) => {
+      execFileSync('python3', ['-c', `
+import io, tarfile, sys
+kind, out = sys.argv[1], sys.argv[2]
+with tarfile.open(out, 'w:gz') as tf:
+    if kind == 'chain':
+        for name, target in [('a', '.'), ('b', 'a/..'), ('axe', 'b/fixture')]:
+            ti = tarfile.TarInfo(name)
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = target
+            tf.addfile(ti)
+    elif kind == 'hardlink-dotdot':
+        ti = tarfile.TarInfo('axe')
+        ti.type = tarfile.LNKTYPE
+        ti.linkname = '../outside'
+        tf.addfile(ti)
+    elif kind == 'hardlink-abs':
+        ti = tarfile.TarInfo('axe')
+        ti.type = tarfile.LNKTYPE
+        ti.linkname = '/etc/passwd'
+        tf.addfile(ti)
+    elif kind == 'valid-framework':
+        for d in ['Frameworks', 'Frameworks/Foo.framework', 'Frameworks/Foo.framework/Versions', 'Frameworks/Foo.framework/Versions/A']:
+            ti = tarfile.TarInfo(d)
+            ti.type = tarfile.DIRTYPE
+            ti.mode = 0o755
+            tf.addfile(ti)
+        f = tarfile.TarInfo('Frameworks/Foo.framework/Versions/A/Foo')
+        data = b'ok'
+        f.size = len(data)
+        f.mode = 0o644
+        tf.addfile(f, io.BytesIO(data))
+        l1 = tarfile.TarInfo('Frameworks/Foo.framework/Versions/Current')
+        l1.type = tarfile.SYMTYPE
+        l1.linkname = 'A'
+        tf.addfile(l1)
+        l2 = tarfile.TarInfo('Frameworks/Foo.framework/Foo')
+        l2.type = tarfile.SYMTYPE
+        l2.linkname = 'Versions/Current/Foo'
+        tf.addfile(l2)
+`, kind, outPath]);
+    };
+
+    for (const bad of ['chain', 'hardlink-dotdot', 'hardlink-abs']) {
+      const p = join(work, `${bad}.tar.gz`);
+      buildTar(bad, p);
+      await assert.rejects(() => safeExtractTarGz(p, join(work, `out-${bad}`)), (e: any) => e.code === 'unsafe_archive');
+    }
+
+    // Also verify post-extraction realpath check catches an escaping chain directly on disk
+    const chainDir = join(work, 'direct-chain');
+    mkdirSync(chainDir, { recursive: true });
+    writeFileSync(join(work, 'fixture'), 'secret');
+    symlinkSync('.', join(chainDir, 'a'));
+    symlinkSync('a/..', join(chainDir, 'b'));
+    symlinkSync('b/fixture', join(chainDir, 'axe'));
+    assert.throws(() => verifyExtractedSymlinks(chainDir), (e: any) => e.code === 'unsafe_archive');
+
+    // Valid relative framework symlinks (same layout as AXe) must pass
+    const okTar = join(work, 'valid-framework.tar.gz');
+    buildTar('valid-framework', okTar);
+    await safeExtractTarGz(okTar, join(work, 'out-ok'));
+    assert.equal(readFileSync(join(work, 'out-ok', 'Frameworks/Foo.framework/Foo'), 'utf8'), 'ok');
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('P2 #5: progress throttling skips status/external probes on chunk updates', async () => {
+  const work = makeTempDir('pd-comp-p2-throttle-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0', { 'pad.txt': 'x'.repeat(20_000) });
+    await withServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      // Send in 40 small chunks
+      const chunkSize = Math.ceil(tar.buf.length / 40);
+      let off = 0;
+      const sendNext = () => {
+        if (off >= tar.buf.length) { res.end(); return; }
+        res.write(tar.buf.subarray(off, off + chunkSize));
+        off += chunkSize;
+        setImmediate(sendNext);
+      };
+      sendNext();
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      let externalProbes = 0;
+      let events = 0;
+      const mgr = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => { externalProbes++; return '/usr/local/bin/axe'; },
+        envOverride: () => undefined,
+        onChange: () => { events++; },
+      });
+      const st = await mgr.install('axe');
+      assert.equal(st.state, 'ready');
+      assert.equal(externalProbes, 1, 'external discovery must run at most once during install, never per chunk');
+      assert.ok(events < 15, `expected throttled events, got ${events}`);
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('P2 #6, P2 #7 & Item #9: override protects old key from pruning, invalid override blocks auto-install, external never claims updateAvailable', () => {
+  const work = makeTempDir('pd-comp-p2-overrides-');
+  try {
+    const toolsDir = join(work, 'tools');
+    const rootDir = join(work, 'components');
+    writeTestTools(toolsDir, { url: 'https://github.com/cameroncooke/AXe/releases/download/v1.8.0/a.tar.gz', sha256: 'c'.repeat(64), size: 100, version: '1.8.0' });
+
+    const oldKey = '1.7.0-aaaaaaaaaaaa';
+    const oldDir = join(rootDir, 'axe', oldKey);
+    mkdirSync(oldDir, { recursive: true });
+    const oldBin = join(oldDir, 'axe');
+    writeFileSync(oldBin, '#!/bin/sh\necho 1.7.0\n');
+    chmodSync(oldBin, 0o755);
+    const oldIso = '2026-09-01T00:00:00Z';
+    writeFileSync(join(oldDir, '.ready.json'), JSON.stringify({
+      key: oldKey, version: '1.7.0', activatedAt: oldIso, lastUsedAt: oldIso, sizeBytes: 10, binaryRelPath: 'axe',
+    }));
+    // Symlink pointing into the old managed key
+    const aliasLink = join(work, 'axe-override-link');
+    symlinkSync(oldBin, aliasLink);
+
+    // P2 #6: prune() 60 days later MUST NOT delete oldKey when envOverride resolves into it (directly or via symlink)
+    const nowMs = Date.parse('2026-11-24T00:00:00Z');
+    const mgrOverride = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', now: () => nowMs,
+      envOverride: (id) => (id === 'axe' ? aliasLink : undefined),
+      externalLookup: () => undefined,
+    });
+    assert.deepEqual(mgrOverride.prune('axe').removedKeys, []);
+    assert.ok(existsSync(oldBin));
+
+    // P2 #7: invalid override blocks auto-install and reports invalid_override
+    const missingOverride = join(work, 'does-not-exist', 'axe');
+    const mgrInvalid = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64', autoEnabled: () => true,
+      envOverride: (id) => (id === 'axe' ? missingOverride : undefined),
+      externalLookup: () => undefined,
+    });
+    assert.equal(mgrInvalid.triggerAuto('axe'), false);
+    const invalidSt = mgrInvalid.status('axe');
+    assert.equal(invalidSt.state, 'failed');
+    assert.equal(invalidSt.source, 'override');
+    assert.equal(invalidSt.updateAvailable, false);
+    assert.equal(invalidSt.error?.code, 'invalid_override');
+
+    // Item #9: external copy has updateAvailable=false and clear detail text
+    rmSync(oldDir, { recursive: true, force: true });
+    const extBin = join(work, 'host-axe');
+    writeFileSync(extBin, '#!/bin/sh\necho 1.8.0\n');
+    chmodSync(extBin, 0o755);
+    const mgrExt = new ComponentManager({
+      rootDir, toolsDir, platformKey: 'darwin-arm64',
+      envOverride: () => undefined,
+      externalLookup: (id) => (id === 'axe' ? extBin : undefined),
+    });
+    const extSt = mgrExt.status('axe');
+    assert.equal(extSt.state, 'ready');
+    assert.equal(extSt.source, 'external');
+    assert.equal(extSt.updateAvailable, false);
+    assert.match(extSt.detail ?? '', /installed on this Mac/i);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

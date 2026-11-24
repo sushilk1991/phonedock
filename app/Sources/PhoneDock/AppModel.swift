@@ -107,6 +107,7 @@ final class AppModel {
 
     private var eventsTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
+    private var componentPollTask: Task<Void, Never>?
     private var started = false
 
     var selectedDevice: Device? { devices.first { $0.id == selection } }
@@ -196,7 +197,7 @@ final class AppModel {
             if await DaemonLocator.health(port: c.base.port ?? 0) == nil {
                 connection = .failed("Daemon stopped responding")
                 client = nil
-                eventsTask?.cancel(); pollTask?.cancel()
+                eventsTask?.cancel(); pollTask?.cancel(); componentPollTask?.cancel(); componentPollTask = nil
                 Task { await connect() }
             }   // background polling never alerts; the connection pill shows trouble
         }
@@ -220,7 +221,7 @@ final class AppModel {
         Task {
             defer { restartingDaemon = false }
             let pid = daemonPid
-            eventsTask?.cancel(); pollTask?.cancel()
+            eventsTask?.cancel(); pollTask?.cancel(); componentPollTask?.cancel(); componentPollTask = nil
             client = nil; liveUpdates = false
             connection = .connecting("Stopping daemon…")
             if let pid, !(await DaemonLocator.stop(pid: pid)) {
@@ -262,9 +263,36 @@ final class AppModel {
     func loadComponents() async -> Bool {
         if componentsPinnedBySelfTest { return true }
         guard let c = client else { return false }
+        let wasInstalling = Set(components.filter { $0.state == "installing" }.map(\.id))
         guard let list = try? await c.components() else { return false }
         components = list
+        ensureComponentPolling()
+        let becameReady = list.contains { wasInstalling.contains($0.id) && $0.state == "ready" }
+        if becameReady {
+            Task { await refresh(); _ = await loadBackends() }
+        }
         return true
+    }
+
+    /// While any component is installing, poll every 3 s so a missed SSE terminal event can never leave the UI stuck.
+    private func ensureComponentPolling() {
+        guard !componentsPinnedBySelfTest else { componentPollTask?.cancel(); componentPollTask = nil; return }
+        let anyInstalling = components.contains { $0.state == "installing" }
+        if !anyInstalling {
+            componentPollTask?.cancel()
+            componentPollTask = nil
+            return
+        }
+        guard componentPollTask == nil else { return }
+        componentPollTask = Task { [weak self] in
+            defer { self?.componentPollTask = nil }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled, let self, self.client != nil, !self.componentsPinnedBySelfTest else { return }
+                _ = await self.loadComponents()
+                if !self.components.contains(where: { $0.state == "installing" }) { return }
+            }
+        }
     }
 
     func installComponent(_ id: String) {
@@ -403,6 +431,7 @@ final class AppModel {
                     let (bytes, resp) = try await DaemonClient.session.bytes(for: req)
                     guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw APIError(status: 0, code: "sse", message: "no events") }
                     self?.liveUpdates = true
+                    Task { _ = await self?.loadComponents() }
                     var event = "message"; var data = ""
                     for try await line in bytes.lines {
                         if line.hasPrefix("event:") { event = line.dropFirst(6).trimmingCharacters(in: .whitespaces) }
@@ -466,6 +495,7 @@ final class AppModel {
         } else {
             components.append(st)
         }
+        ensureComponentPolling()
     }
 
     // MARK: Handoffs

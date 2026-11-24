@@ -48,13 +48,21 @@ function acceptPython311(candidate: string): boolean {
   return probe.status === 0;
 }
 
-/** External host discovery only (PATH/uv/pipx, skipping managed components). Used for status reporting. */
+let externalCached: { key: string; at: number; path?: string } | undefined;
+
+/** External host discovery only (PATH/uv/pipx, skipping managed components). Cached briefly to avoid repeated spawnSync probes. */
 export function externalPymd3Python(): string | undefined {
-  return discoverPymd3Python({
+  const key = [process.env.PATH, process.env.HOME].join('\n');
+  if (externalCached?.key === key && Date.now() - externalCached.at < 5000 && (!externalCached.path || executable(externalCached.path))) {
+    return externalCached.path;
+  }
+  const path = discoverPymd3Python({
     launcher: which('pymobiledevice3'),
     home: process.env.HOME ?? '',
     accept: acceptPython311,
   });
+  externalCached = { key, at: Date.now(), path };
+  return path;
 }
 
 /** Cached by environment, with short negative caching so installing a tool doesn't require a daemon restart. */
@@ -63,6 +71,7 @@ let cached: { key: string; at: number; path?: string } | undefined;
 /** Clear the lookup cache immediately after a managed ios-tools install completes. */
 export function invalidatePymd3PythonCache(): void {
   cached = undefined;
+  externalCached = undefined;
 }
 
 export function pymd3Python(): string | undefined {
