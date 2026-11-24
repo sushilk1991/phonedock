@@ -37,7 +37,7 @@ Devices:    devices|ls [--backend B --platform P --state S]
                    --boot --auto-start --no-wait]
             boot <id> [--window] [--cold] [--no-wait] | shutdown <id> | rm <id> [--force]
             idle-sleep [off|10m|15m|30m|1h]   (no value: show it) put idle virtual phones to sleep after that long:
-              their memory is freed and any use wakes them where they left off (default 15m)
+              their memory is freed; any use wakes them, usually where they left off (default 15m)
             clone <id> <name> | window <id> | update <id> [--name N] [--auto-start true|false]
             snapshot ls|save|restore|rm <id> [name] | info <id>
 Observe:    screenshot <id> [-o file] [--max-size N] [--format png|jpeg] | ui <id> [--json] [--no-ocr]
@@ -566,7 +566,8 @@ export async function run(argv: string[]): Promise<number> {
     case 'boot': {
       const d = await dev();
       const job = await c.boot(d.id, { window: a.flags.window === true, coldBoot: a.flags.cold === true, headless: a.flags.window === true ? false : undefined, wait: wantWait(a), onProgress: progressPrinter(quiet) });
-      out(job ?? { ok: true }, () => `${d.name}: ${wantWait(a) ? (d.sleep && !a.flags.cold && a.flags.window !== true ? 'woke where it left off' : 'booted') : `booting (job ${job?.id})`}`);
+      const woke = (job as { progress?: string[] } | undefined)?.progress?.findLast((l) => /^woke in /.test(l));
+      out(job ?? { ok: true }, () => `${d.name}: ${wantWait(a) ? (woke ? (/started fresh/.test(woke) ? 'woke, started fresh (its previous screen is gone)' : 'woke where it left off') : 'booted') : `booting (job ${job?.id})`}`);
       return 0;
     }
     case 'shutdown': case 'stop': { const d = await dev(); out(await c.shutdown(d.id), () => `${d.name}: shut down`); return 0; }
@@ -1115,7 +1116,7 @@ export function idleSleepText(st: import('../sdk/client.ts').IdleSleepStatus): s
   const words = (s: number | null) => (s === null ? 'never' : s % 3600 === 0 ? `${s / 3600} hour${s === 3600 ? '' : 's'}` : s % 60 === 0 ? `${s / 60} minute${s === 60 ? '' : 's'}` : `${s} seconds`);
   const head = st.timeoutSec === null
     ? 'Idle virtual phones never go to sleep.'
-    : `Idle virtual phones go to sleep after ${words(st.timeoutSec)} without use: their memory is freed, and any use wakes them where they left off.`;
+    : `Idle virtual phones go to sleep after ${words(st.timeoutSec)} without use: their memory is freed, and any use wakes them, usually where they left off (otherwise they restart with their apps and data).`;
   const src = st.source === 'env' ? `\n(Set by PHONEDOCK_IDLE_SLEEP for this service${st.saved !== undefined ? `; the saved setting is ${words(st.saved)}` : ''}.)` : '';
   const lines = st.devices.map((d) => {
     if (!d.eligible) return `  ${d.name}: never sleeps (${d.why})`;

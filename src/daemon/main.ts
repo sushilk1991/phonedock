@@ -56,7 +56,7 @@ const server = createServer(async (req, res) => {
     let leave: (() => void) | undefined;
     try {
       // Idle sleep: a request that uses a device counts as use, and wakes it first if it is asleep (idle-sleep.ts).
-      leave = await enterRequest(ctx, method, m.path);
+      leave = await enterRequest(ctx, method, m.path, (m.h as { receipt?: boolean }).receipt === true);
       out = await m.h(ctx);
     } finally {
       leave?.();

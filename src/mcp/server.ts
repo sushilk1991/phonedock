@@ -86,7 +86,8 @@ export function errorResult(e: unknown): ToolResult {
     if (e.code === 'not_found' && /^No device\b|device .*not found/i.test(e.message)) hints.push('Call list_devices to see valid device ids/names.');
     const detail = agentDetail(e.detail);
     // input calls: whether resending is safe (only when nothing reached the device)
-    const dl = e.delivery === 'not_sent' ? '\nNot sent: nothing reached the device, so retrying is safe.'
+    const dl = e.code === 'woke_fresh' ? '\nNot sent: the phone woke and started fresh, so the screen this was aimed at is gone. Call get_ui or take a screenshot first.'
+      : e.delivery === 'not_sent' ? '\nNot sent: nothing reached the device, so retrying is safe.'
       : e.delivery === 'unknown' ? '\nDelivery unknown: it may have reached the device. Check get_ui or a screenshot before retrying.'
       : e.delivery === 'sent' ? '\nPart of it was sent: check the screen before retrying.' : '';
     const receipt = e.requestId ? `\nRequest ID: ${e.requestId}. Recover with get_request_result(request_id=${JSON.stringify(e.requestId)}).` : '';
@@ -436,7 +437,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     const d = await target(a.device);
     return { content: [text(JSON.stringify(await c.requestResult(d.id, a.request_id)))] };
   });
-  tool('list_devices', 'List all phones/VMs PhoneDock knows about (virtual + physical, all backends) with id, platform, state (running/stopped/…), OS, screen size and lease holder. Start here. Devices must be state=running before you can screenshot/tap; use boot_device for stopped ones. A phone marked "sleeping" was put to sleep by PhoneDock after sitting idle (its memory is freed): use it as usual, the first call wakes it where it left off in a few seconds. Never create another device because one is sleeping.', {
+  tool('list_devices', 'List all phones/VMs PhoneDock knows about (virtual + physical, all backends) with id, platform, state (running/stopped/…), OS, screen size and lease holder. Start here. Devices must be state=running before you can screenshot/tap; use boot_device for stopped ones. A phone marked "sleeping" was put to sleep by PhoneDock after sitting idle (its memory is freed): use it as usual, the first call wakes it in a few seconds, usually where it left off (when it starts fresh instead, the result says so, and a tap or swipe aimed at the old screen comes back unsent). Never create another device because one is sleeping.', {
     platform: z.enum(['android', 'ios', 'linux', 'other']).optional().describe('Filter by platform'),
     state: z.string().optional().describe('Filter by state, e.g. "running"'),
     backend: z.string().optional().describe('Filter by backend id, e.g. android-emulator, ios-simulator'),

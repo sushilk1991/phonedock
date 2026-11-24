@@ -129,6 +129,6 @@ test('devices: a sleeping phone says so, and that using it wakes it', () => {
     state: 'stopped', managed: true, capabilities: [], sleep: { since: '2026-11-24T10:00:00.000Z', reason: 'idle' } } as Device;
   const out = devicesTable([d]);
   assert.match(out, /stopped \(sleeping\)/);
-  assert.match(out, /pdtest-s24 is sleeping: memory freed; any use wakes it where it left off \(no need to start or create another\)\./);
+  assert.match(out, /pdtest-s24 is sleeping: memory freed; any use wakes it, usually where it left off \(no need to start or create another\)\./);
   assert.doesNotMatch(devicesTable([{ ...d, sleep: null }]), /sleeping/);
 });

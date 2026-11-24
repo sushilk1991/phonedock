@@ -98,7 +98,7 @@ struct Device: Codable, Hashable, Identifiable, Sendable {
     var meta: JSONValue?
     var handoff: Handoff?
     /// Set while PhoneDock has put this phone to sleep after it sat unused (idle sleep): `state` is "stopped", its
-    /// memory is freed, and any use wakes it where it left off. Older services never send it.
+    /// memory is freed, and any use wakes it, usually where it left off. Older services never send it.
     var sleep: DeviceSleep?
     /// The last time PhoneDock tried to put it to sleep and couldn't (it kept running).
     var sleepFailure: SleepFailure?

@@ -15,7 +15,7 @@ import type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
-  DeviceSleep, SleepState, WakeReport,
+  DeviceSleep,
 } from '../core/types.ts';
 import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
@@ -32,7 +32,7 @@ export type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
-  DeviceSleep, SleepState, WakeReport,
+  DeviceSleep,
 };
 
 /** GET /v1/idle-sleep (docs/API.md "Idle sleep"). `timeoutSec` null: never. */
@@ -44,18 +44,19 @@ export interface IdleSleepStatus {
   devices: { id: string; name: string; state: DeviceState; eligible: boolean; why?: string; sleep?: DeviceSleep; idleSec?: number;
     sleepsInSec?: number | null; keptAwakeBy?: string[]; sleepFailure?: { at: string; code: string; message: string } }[];
 }
-/** A request woke a sleeping phone before it ran (the `X-PhoneDock-Woke` response header). */
-export interface WakeNotice { deviceId?: string; name: string; ms: number }
+/** A request woke a sleeping phone before it ran (the `X-PhoneDock-Woke` response header). `fresh`: it started fresh
+ *  rather than where it left off (its apps and data are kept; what was on its screen is not). */
+export interface WakeNotice { deviceId?: string; name: string; ms: number; fresh?: boolean }
 /** "Woke Pixel 8 (7.2 s)": the same words in the CLI and MCP. */
-export const wakeNoticeText = (w: WakeNotice) => `Woke ${w.name} (${(w.ms / 1000).toFixed(1)} s)`;
+export const wakeNoticeText = (w: WakeNotice) => `Woke ${w.name} (${(w.ms / 1000).toFixed(1)} s)${w.fresh ? ', started fresh; its previous screen is gone' : ''}`;
 /** A sleeping phone in one line, for agents (list_devices, `phonedock devices`). */
-export const SLEEPING_NOTE = 'sleeping: memory freed; any use wakes it where it left off (no need to start or create another)';
+export const SLEEPING_NOTE = 'sleeping: memory freed; any use wakes it, usually where it left off (no need to start or create another)';
 export function parseWokeHeader(v: string | null | undefined, path?: string): WakeNotice | undefined {
-  const m = /^(\d+);\s*name=(.*)$/.exec(v ?? '');
+  const m = /^(\d+);\s*name=([^;]*)(;\s*fresh=1)?$/.exec(v ?? '');
   if (!m) return undefined;
   let name = m[2]; try { name = decodeURIComponent(m[2]); } catch { /* as sent */ }
   const id = /^\/v1\/devices\/([^/?]+)/.exec(path ?? '')?.[1];
-  return { ms: Number(m[1]), name, ...(id ? { deviceId: decodeURIComponent(id) } : {}) };
+  return { ms: Number(m[1]), name, ...(m[3] ? { fresh: true } : {}), ...(id ? { deviceId: decodeURIComponent(id) } : {}) };
 }
 
 /** Every input result: how far it got (`delivery`: sent / not_sent), whether sending it again is safe (`retrySafe`:

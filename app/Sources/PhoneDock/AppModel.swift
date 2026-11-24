@@ -775,7 +775,7 @@ final class AppModel {
 
     func boot(_ d: Device, cold: Bool = false, window: Bool = false) {
         guard let c = client else { return }
-        // A sleeping phone resumes where it left off (the service wakes it); anything else starts.
+        // A sleeping phone wakes (the service starts it, usually where it left off); anything else starts.
         let resume = d.isSleeping && !cold && !window
         pending[d.id] = resume ? SleepWords.resuming : "Starting…"   // until the service has the job: the click answers at once
         Task {

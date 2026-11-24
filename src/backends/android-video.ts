@@ -412,14 +412,15 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
   };
   const killFf = () => { try { ff?.kill('SIGKILL'); } catch { /* */ } ff = undefined; ffConfig = undefined; };
   const ffmpeg = opts.ffmpeg === null ? undefined : opts.ffmpeg ?? ffmpegPath();   // null: none (tests)
-  // Screenshots know nothing about the display: while polling them, ask the phone (every few seconds) whether it is on.
-  let displayOff = false; let powerReadAt = 0;
+  // Polling screenshots: ask the phone every few seconds whether its display is on. Off only on a recent reading.
+  let displayOff = false; let powerAskedAt = 0; let offReadAt = 0;
   const readDisplayPower = async () => {
-    if (Date.now() - powerReadAt < 3000) return;
-    powerReadAt = Date.now();
+    if (Date.now() - powerAskedAt < 3000) return;
+    powerAskedAt = Date.now();
     const r = await adb(await resolveSerial(serial), ['shell', 'dumpsys power | grep -m1 mWakefulness='], { allowFail: true, timeoutMs: 5000 }).catch(() => undefined);
-    const w = r && /mWakefulness=(\w+)/.exec(r.stdout)?.[1];
-    if (w) displayOff = w === 'Asleep' || w === 'Dozing';
+    const w = r?.code === 0 ? /mWakefulness=(\w+)/.exec(r.stdout)?.[1] : undefined;
+    displayOff = w === 'Asleep' || w === 'Dozing';
+    if (displayOff) offReadAt = Date.now();
   };
   let src: ScreenSource | undefined;
 
@@ -508,6 +509,6 @@ export function adbFrameStream(serial: SerialRef, opts: { maxSize?: number; fps?
       for (const cb of endCbs) cb();
     },
     restart() { if (!pollMode) src?.restart(); },
-    asleep() { return pollMode ? displayOff : !!src?.isAsleep; },
+    asleep() { return pollMode ? displayOff && Date.now() - offReadAt < 10_000 : !!src?.isAsleep; },
   };
 }

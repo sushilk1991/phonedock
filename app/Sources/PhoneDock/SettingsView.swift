@@ -350,7 +350,7 @@ struct IdleSleepSection: View {
     @State private var problem: String?
     @State private var saving = false
     static let choices: [(Int, String)] = [(-1, "Never"), (600, "10 minutes"), (900, "15 minutes"), (1800, "30 minutes"), (3600, "1 hour")]
-    static let help = "A sleeping phone frees its memory and wakes in a few seconds, right where it left off, when you or an agent use it."
+    static let help = "A sleeping phone frees its memory. When you or an agent use it, it wakes in a few seconds, usually right where it left off; otherwise it restarts with its apps and data."
 
     var body: some View {
         SettingsSection("Memory", note: Self.help) {

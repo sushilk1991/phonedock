@@ -1,19 +1,13 @@
-// Test support only (never imported by PhoneDock itself): a fake Android SDK whose `adb` and `emulator` are one small
-// Node script driven by a JSON state file, so the emulator backend's real code runs against it. It behaves like the
-// real tools where idle sleep depends on them (measured on emulator 35.x, Android 14):
-//  - a snapshot keeps the guest's identity (kernel boot id, uptime, the token PhoneDock writes before it sleeps);
-//  - `emu kill` saves `default_boot` on the way out (the quick-boot exit save) unless `exitSave` is false;
-//  - a snapshot is two halves: its folder (RAM) and an entry in each of the AVD's qcow2 disk images; deleting it (also
-//    when a load fails) removes both;
-//  - a quick boot resumes `default_boot`; with `-force-snapshot-load` a missing or bad one makes the emulator delete it
-//    and exit, as the real one does;
-//  - `dumpsys power` reports the last user activity as "(N ms ago)".
+// Test support only: a fake Android SDK (`adb` and `emulator`: one Node script and a JSON state file) that acts like the
+// real tools where idle sleep depends on them (measured: emulator 37.3.10, Android 14). A snapshot keeps the guest's
+// identity and disk (loading a stale one undoes later writes); `emu kill` saves `default_boot` (unless `exitSave` is
+// false); an ordinary boot loads it, rewriting its snapshot.pb, or cold-boots when it is missing or bad.
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-export interface FakeGuest { bootId: string; uptimeBase: number; startedAt: number; token?: string }
+export interface FakeGuest { bootId: string; uptimeBase: number; startedAt: number }
 export interface FakeEmulator { name: string; path: string; pid: number; guest: FakeGuest }
 export interface FakeSdkState {
   emulators: Record<string, FakeEmulator>;
@@ -25,10 +19,9 @@ export interface FakeSdkState {
   ignoreKill: boolean;
   userActivityAgoMs: number;
   instrument: boolean;
-  shellFails: boolean;
+  /** The guest's shell doesn't answer at all / only its `ps` fails / only `dumpsys power` says nothing. */
+  shellFails: boolean; psFails: boolean; dumpsysFails: boolean;
   wakefulness: 'Awake' | 'Asleep';
-  /** How long a starting emulator takes before adb lists it. */
-  bootDelayMs: number;
 }
 
 const SCRIPT = String.raw`#!/usr/bin/env node
@@ -42,32 +35,31 @@ const argv = process.argv.slice(2);
 const tool = path.basename(process.argv[1]);
 fs.appendFileSync(LOG, tool + ' ' + argv.join(' ') + '\n');
 const uptime = (g) => g.uptimeBase + (Date.now() - g.startedAt) / 1000;
-const snapDir = (emu, n) => path.join(emu.path, 'snapshots', n);
-const qcows = (dir) => { try { return fs.readdirSync(dir).filter((f) => f.endsWith('.qcow2')).map((f) => path.join(dir, f)); } catch { return []; } };
-const disk = (dir, n, on) => { for (const q of qcows(dir)) { const l = fs.readFileSync(q, 'utf8').split('\n').filter((x) => x && x !== 'snap:' + n); if (on) l.push('snap:' + n); fs.writeFileSync(q, l.join('\n') + '\n'); } };
-const onDisk = (dir, n) => qcows(dir).every((q) => fs.readFileSync(q, 'utf8').split('\n').includes('snap:' + n));
-const drop = (dir, n) => { fs.rmSync(path.join(dir, 'snapshots', n), { recursive: true, force: true }); disk(dir, n, false); };
-function save(s, emu, n) {
-  disk(emu.path, n, true);
-  const d = snapDir(emu, n); fs.mkdirSync(d, { recursive: true });
-  fs.writeFileSync(path.join(d, 'snapshot.pb'), JSON.stringify({ bootId: emu.guest.bootId, uptime: uptime(emu.guest), token: emu.guest.token }));
-  fs.writeFileSync(path.join(d, 'ram.bin'), Buffer.alloc(4096, 1));
+// The guest's disk, with the copy each snapshot keeps of it (the real ones live inside the qcow2 images).
+const diskFile = (dir) => path.join(dir, 'userdata-qemu.img.qcow2');
+const disk = (dir) => { try { return JSON.parse(fs.readFileSync(diskFile(dir), 'utf8')); } catch { return { files: {}, snaps: {} }; } };
+const putDisk = (dir, d) => fs.writeFileSync(diskFile(dir), JSON.stringify(d));
+function save(emu, n) {
+  const d = disk(emu.path); d.snaps[n] = { ...d.files }; putDisk(emu.path, d);
+  const sd = path.join(emu.path, 'snapshots', n); fs.mkdirSync(sd, { recursive: true }); fs.writeFileSync(path.join(sd, 'ram.bin'), Buffer.alloc(4096, 1));
+  fs.writeFileSync(path.join(sd, 'snapshot.pb'), JSON.stringify({ bootId: emu.guest.bootId, uptime: uptime(emu.guest) }));
 }
 function loadable(s, dir, n) {
-  if (s.badSnapshots.includes(n) || !onDisk(dir, n)) return undefined;
-  try { const j = JSON.parse(fs.readFileSync(path.join(dir, 'snapshots', n, 'snapshot.pb'), 'utf8')); return j.bootId ? j : undefined; } catch { return undefined; }
+  if (s.badSnapshots.includes(n)) return undefined;
+  try { const j = JSON.parse(fs.readFileSync(path.join(dir, 'snapshots', n, 'snapshot.pb'), 'utf8')); return j.bootId && disk(dir).snaps[n] ? j : undefined; } catch { return undefined; }
+}
+function load(dir, n, j) {   // the guest and its disk as they were at the save; the emulator rewrites snapshot.pb as it loads
+  const d = disk(dir); d.files = { ...d.snaps[n] }; putDisk(dir, d);
+  const pb = path.join(dir, 'snapshots', n, 'snapshot.pb'); const t = new Date(); fs.utimesSync(pb, t, t);
+  return { bootId: j.bootId, uptimeBase: j.uptime, startedAt: Date.now() };
 }
 if (tool !== 'adb') {   // emulator (or a renamed copy of it)
   const name = argv[argv.indexOf('-avd') + 1], port = argv[argv.indexOf('-port') + 1];
   const s = read();
   const dir = s.avdPaths[name] || path.join(process.env.ANDROID_AVD_HOME || '', name + '.avd');
-  let snap = argv.includes('-no-snapshot-load') ? undefined : loadable(s, dir, 'default_boot');
-  if (!snap && !argv.includes('-no-snapshot-load') && fs.existsSync(path.join(dir, 'snapshots', 'default_boot'))) {
-    drop(dir, 'default_boot');   // the real one deletes it, disk half included
-    if (argv.includes('-force-snapshot-load')) { console.log('Failed to load snapshot; Emulator will delete existing snapshot and exit.'); process.exit(0); }
-  } else if (!snap && argv.includes('-force-snapshot-load')) { console.log('Failed to load snapshot'); process.exit(0); }
-  const guest = snap ? { bootId: snap.bootId, uptimeBase: snap.uptime, startedAt: Date.now(), token: snap.token } : { bootId: crypto.randomUUID(), uptimeBase: 0, startedAt: Date.now() };
-  setTimeout(() => { const s2 = read(); s2.emulators['emulator-' + port] = { name, path: dir, pid: process.pid, guest }; write(s2); }, s.bootDelayMs || 0);
+  const snap = argv.includes('-no-snapshot-load') ? undefined : loadable(s, dir, 'default_boot');
+  const guest = snap ? load(dir, 'default_boot', snap) : { bootId: crypto.randomUUID(), uptimeBase: 0, startedAt: Date.now() };
+  s.emulators['emulator-' + port] = { name, path: dir, pid: process.pid, guest }; write(s);
   process.on('SIGTERM', () => process.exit(0));
   setTimeout(() => process.exit(0), 300_000);   // never outlives a test run by long, even orphaned
 } else {
@@ -85,33 +77,38 @@ if (tool !== 'adb') {   // emulator (or a renamed copy of it)
     if (c[0] === 'avd' && c[1] === 'path') { console.log(emu.path + '\nOK'); process.exit(0); }
     if (c[0] === 'avd' && c[1] === 'snapshot') {
       const op = c[2], n = c[3];
-      if (op === 'save') { save(s, emu, n); console.log('OK'); }
-      else if (op === 'load') { const j = loadable(s, emu.path, n); if (!j) { console.log('KO: snapshot not found'); process.exit(0); } emu.guest = { bootId: j.bootId, uptimeBase: j.uptime, startedAt: Date.now(), token: j.token }; write(s); console.log('OK'); }
-      else if (op === 'delete') { drop(emu.path, n); console.log('OK'); }
+      if (op === 'save') save(emu, n);
+      console.log('OK');
       process.exit(0);
     }
     if (c[0] === 'kill') {
       console.log('OK: killing emulator, bye bye');
       if (s.ignoreKill) process.exit(0);
-      if (s.exitSave) save(s, emu, 'default_boot');
+      if (s.exitSave) save(emu, 'default_boot');
       delete s.emulators[serial]; write(s);
       try { process.kill(emu.pid, 'SIGTERM'); } catch {}
       process.exit(0);
     }
     console.log('OK'); process.exit(0);
   }
-  if (rest[0] === 'shell' || rest[0] === 'exec-out') {
+  if (rest[0] === 'shell') {
     const cmd = rest.slice(1).join(' ');
     if (s.shellFails) { console.error('error: closed'); process.exit(1); }
-    const m = /echo (\S+) > \/data\/local\/tmp\/\.phonedock-sleep/.exec(cmd);
-    if (m) { emu.guest.token = m[1]; write(s); }
+    const w = /^echo (\S+) > \/data\/local\/tmp\/(\S+)$/.exec(cmd);
+    if (w) { const d = disk(emu.path); d.files[w[2]] = w[1]; putDisk(emu.path, d); process.exit(0); }
+    if (/^cat /.test(cmd)) {   // each file in turn, like the real one; a missing one is an error at the end
+      const files = disk(emu.path).files, out = cmd.split(/\s+/).slice(1).map((p) => /boot_id$/.test(p) ? emu.guest.bootId : p === '/proc/uptime' ? uptime(emu.guest).toFixed(2) + ' 0.00' : p.startsWith('/data/local/tmp/') ? files[p.slice(16)] : undefined);
+      if (out.some((x) => x !== undefined)) console.log(out.filter((x) => x !== undefined).join('\n'));
+      process.exit(out.includes(undefined) ? 1 : 0);
+    }
     const out = [];
-    if (/boot_id/.test(cmd)) out.push(emu.guest.bootId);
-    if (/\/proc\/uptime/.test(cmd)) out.push(uptime(emu.guest).toFixed(2) + ' 0.00');
-    if (/cat[^;|]*\.phonedock-sleep/.test(cmd)) out.push(emu.guest.token || '');
     if (/getprop sys\.boot_completed/.test(cmd)) out.push('1');
-    if (/dumpsys power/.test(cmd)) out.push('  mWakefulness=' + s.wakefulness, '  lastUserActivityTime=4242 (' + s.userActivityAgoMs + ' ms ago)');
-    if (/ps -A/.test(cmd) && s.instrument) out.push('app_process /system/bin com.android.commands.am.Am instrument -w pdtest.app.test/androidx.test.runner.AndroidJUnitRunner');
+    if (/dumpsys power/.test(cmd)) {
+      if (/mWakefulness/.test(cmd)) out.push('  mWakefulness=' + s.wakefulness);
+      if (/lastUserActivityTime/.test(cmd) && !s.dumpsysFails) out.push('  lastUserActivityTime=4242 (' + s.userActivityAgoMs + ' ms ago)');
+    }
+    // A guest script that reports its ps itself (PhoneDock's check), or a plain "ps | grep" that shows the process.
+    if (/ps -A/.test(cmd) && !s.psFails) out.push(/echo "ps ok/.test(cmd) ? 'ps ok ' + (s.instrument ? 1 : 0) : s.instrument ? 'app_process /system/bin com.android.commands.am.Am instrument -w pdtest.app.test/androidx.test.runner.AndroidJUnitRunner' : '');
     if (/date \+%s/.test(cmd)) out.push(String(Math.round(Date.now() / 1000)));
     console.log(out.join('\n'));
     process.exit(0);
@@ -135,7 +132,7 @@ export interface FakeSdk {
 export function fakeAndroidSdk(initial: Partial<FakeSdkState> = {}): FakeSdk {
   const root = mkdtempSync(join(tmpdir(), 'pd-fake-sdk-'));
   const statePath = join(root, 'state.json');
-  const st: FakeSdkState = { emulators: {}, avdPaths: {}, badSnapshots: [], exitSave: true, ignoreKill: false, userActivityAgoMs: 3_600_000, instrument: false, shellFails: false, wakefulness: 'Awake', bootDelayMs: 0, ...initial };
+  const st: FakeSdkState = { emulators: {}, avdPaths: {}, badSnapshots: [], exitSave: true, ignoreKill: false, userActivityAgoMs: 3_600_000, instrument: false, shellFails: false, psFails: false, dumpsysFails: false, wakefulness: 'Awake', ...initial };
   writeFileSync(statePath, JSON.stringify(st));
   writeFileSync(statePath + '.log', '');
   const script = SCRIPT.replace('__STATE__', JSON.stringify(statePath));
@@ -163,6 +160,6 @@ export function fakeManagedAvd(home: string, name: string, ramMB = 2048): string
   writeFileSync(join(avdHome, `${name}.ini`), `avd.ini.encoding=UTF-8\npath=${dir}\ntarget=android-34\n`);
   writeFileSync(join(dir, 'config.ini'), `hw.ramSize=${ramMB}\nhw.lcd.width=1080\nhw.lcd.height=2340\nimage.sysdir.1=system-images/android-34/google_apis_playstore/arm64-v8a/\n`);
   writeFileSync(join(dir, 'phonedock.json'), JSON.stringify({ vulkan: false }));
-  for (const q of ['userdata-qemu.img.qcow2', 'cache.img.qcow2']) writeFileSync(join(dir, q), '');   // the disk images
+  writeFileSync(join(dir, 'userdata-qemu.img.qcow2'), JSON.stringify({ files: {}, snaps: {} }));   // its disk
   return dir;
 }

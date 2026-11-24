@@ -32,8 +32,7 @@ export function getBackend(id: string): Backend {
 // listed and can't be controlled, new devices must use the prefix, and physical phones can't be connected or
 // discovered. For test runs and CI that share a Mac with devices they must never touch.
 export const deviceFilter = process.env.PHONEDOCK_DEVICE_FILTER?.trim() || undefined;
-/** Devices this service may control under the filter: what its latest scan of each backend listed under it. A device
- *  renamed out of the filter leaves on the next scan that sees it; a scan that failed (lists nothing) changes nothing. */
+/** What the latest complete scan of each backend listed under the filter (a failed or stale scan keeps what it had). */
 const filteredIds = new Set<string>();
 export function assertDeviceAllowed(id: string) {
   if (deviceFilter && !filteredIds.has(id)) throw filteredOut(id);
@@ -56,12 +55,16 @@ function filteredOut(id: string) {
   return new PhoneDockError("Couldn’t find the device", 'not_found', 404, ["Check the list of available devices."],
     `No device ${id} (this service only shows devices named ${deviceFilter}…)`);
 }
-function applyFilter(list: Device[]): Device[] {
+function applyFilter(list: Device[], backend?: string): Device[] {
   if (!deviceFilter) return list;
-  const out: Device[] = [];
-  for (const d of list) {
-    if (d.name.startsWith(deviceFilter) && d.kind !== 'physical') { out.push(d); filteredIds.add(d.id); } else filteredIds.delete(d.id);
+  const prefix = deviceFilter;
+  const out = list.filter((d) => d.name.startsWith(prefix) && d.kind !== 'physical');
+  const listed = new Set(out.map((d) => d.id));
+  for (const b of backend ? [backend] : backends.map((x) => x.id)) {
+    if (!inventory.isFresh(b)) continue;
+    for (const id of [...filteredIds]) if (id.startsWith(`${b}:`) && !listed.has(id)) filteredIds.delete(id);
   }
+  for (const d of list) if (listed.has(d.id)) filteredIds.add(d.id); else filteredIds.delete(d.id);
   return out;
 }
 
@@ -76,13 +79,19 @@ export interface ManagedRecord { id: string; backend: string; nativeId: string; 
 interface StateFile { devices: ManagedRecord[] }
 const STATE_FILE = () => join(stateDir(), 'state.json');
 export let state: StateFile = { devices: [] };
+let stateMtimeMs = -1;
+const stateFileMtime = () => { try { return statSync(STATE_FILE()).mtimeMs; } catch { return -1; } };
 export function loadState() {
+  stateMtimeMs = stateFileMtime();
   try { state = JSON.parse(readFileSync(STATE_FILE(), 'utf8')); if (!Array.isArray(state.devices)) state.devices = []; } catch { state = { devices: [] }; }
 }
+/** Another daemon on this state dir (the app's, a test one) may have renamed a device: names follow its file. */
+function followState() { if (stateFileMtime() !== stateMtimeMs) loadState(); }
 export function saveState() {
   const tmp = STATE_FILE() + '.tmp';
   writeFileSync(tmp, JSON.stringify(state, null, 2));
   renameSync(tmp, STATE_FILE());
+  stateMtimeMs = stateFileMtime();
 }
 export function record(id: string): ManagedRecord | undefined { return state.devices.find((d) => d.id === id); }
 export function upsertRecord(r: ManagedRecord) {
@@ -379,6 +388,7 @@ export function noteScreen(id: string, width?: number, height?: number) {
   if (d?.screen?.width && (d.screen.width !== width || d.screen.height !== height)) invalidateDevices();
 }
 export async function listDevices(fresh = false, backend?: string): Promise<Device[]> {
+  followState();
   if (!backend && !fresh && devCache && Date.now() - devCache.at < 2000) return applyFilter(decorate(devCache.list));
   let raw = await inventory.list(backends, { fresh, backend, ...(backend && fresh ? { waitMs: 30_000 } : {}) });
   // A read invalidated while in flight is discarded. An explicit target waits for its replacement, without
@@ -389,7 +399,7 @@ export async function listDevices(fresh = false, backend?: string): Promise<Devi
   }
   if (!backend) devCache = { at: Date.now(), list: raw };
   pruneLaunchSecrets(raw, backend);
-  const list = applyFilter(decorate(raw));
+  const list = applyFilter(decorate(raw), backend);
   refreshScreens(list);
   return list;
 }

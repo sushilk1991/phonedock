@@ -416,16 +416,25 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
   const results: StepResult[] = [];
   let failed: StepResult | undefined;
   // Keep the lease for the whole run: a long `sleep` step or a slow app must not let it lapse (and an idle phone go to
-  // sleep under the flow). Renewals stop, and the last one has landed, before the lease is given back.
+  // sleep under the flow). One renewal at a time; a failed one is tried again next time (the lease outlasts a few), but
+  // a phone someone else now holds fails the flow: what it did after that may not have been on this run's phone state.
   const renewEvery = o.leaseRenewMs ?? 200_000;
-  let renewing: Promise<unknown> = Promise.resolve();
-  const renewTimer = setInterval(() => { renewing = renewing.then(() => c.lease(device!.id).catch(() => undefined)); }, renewEvery);
+  let renewing: Promise<unknown> | undefined;
+  let leaseLost: string | undefined;
+  const renewTimer = setInterval(() => {
+    if (renewing || leaseLost) return;
+    renewing = c.lease(device!.id).then(() => undefined, (e) => {
+      if (errInfo(e).code === 'lease_conflict') leaseLost = errInfo(e).message ?? 'someone else holds it';
+    }).finally(() => { renewing = undefined; });
+  }, renewEvery);
   renewTimer.unref?.();
+  const lostStep = (i: number, s: Step): StepResult => ({ index: i + 1, step: redactLaunchStep(s), description: describeStep(s), status: 'fail', ms: 0, message: `lost the lease on ${device!.name}: ${leaseLost}` });
   try {
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i]; const safeStep = redactLaunchStep(s); const desc = describeStep(s); const st = Date.now();
       if (o.signal?.aborted) { results.push({ index: i + 1, step: safeStep, description: desc, status: 'skip', ms: 0, message: 'cancelled' }); continue; }
       if (failed) { results.push({ index: i + 1, step: safeStep, description: desc, status: 'skip', ms: 0 }); continue; }
+      if (leaseLost) { failed = lostStep(i, s); results.push(failed); log(stepLine(failed, steps.length)); continue; }
       let r: StepResult;
       const record = o.captureSteps && !['assert_visible', 'assert_not_visible', 'assert_text', 'sleep', 'wait_for', 'screenshot'].includes(s.kind);
       const beforeScreenshot = record ? await capture(i + 1, 'before') : undefined;
@@ -444,6 +453,8 @@ async function attemptFlow(c: FlowClient, flowIn: Flow, o: RunOptions, attempt: 
       results.push(r);
       log(stepLine(r, steps.length));
     }
+    await renewing;
+    if (leaseLost && !failed && steps.length) { failed = lostStep(steps.length - 1, steps[steps.length - 1]); failed.message = `${failed.message} (during or after the last step)`; }
     const res: FlowResult = { ...base, steps: results, ms: Date.now() - t0, status: failed ? 'fail' : 'pass', ...(failed ? { message: `step ${failed.index} (${failed.description}): ${failed.message}` } : {}) };
     if (failed) {
       const notRun = results.filter((r) => r.status === 'skip').length;

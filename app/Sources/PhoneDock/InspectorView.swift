@@ -1696,7 +1696,7 @@ enum ActivitySentence {
         case "device.restart_failed": return "Couldn’t restart the device: \(a["error"]?.stringValue ?? "it failed")"
         case "device.crashed": return a["summary"]?.stringValue ?? "The device stopped unexpectedly"
         case "device.sleep": return a["summary"]?.stringValue ?? "Went to sleep after sitting unused (memory freed)"
-        case "device.wake": return a["summary"]?.stringValue ?? "Woke where it left off"
+        case "device.wake": return a["summary"]?.stringValue ?? "Woke from sleep"
         case "device.sleep_failed": return a["summary"]?.stringValue ?? "Couldn’t go to sleep, so it keeps running"
         case "device.wake_failed": return "Couldn’t wake the device: \(a["error"]?.stringValue ?? "it failed")"
         case "device.disconnected": return a["summary"]?.stringValue ?? "The device disconnected"

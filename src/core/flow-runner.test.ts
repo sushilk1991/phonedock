@@ -689,3 +689,18 @@ test('runner: the lease is renewed for the whole run, so a long wait can’t let
     assert.equal(calls[calls.length - 1], 'release', 'nothing renews it after it is given back');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('runner: a phone someone else now holds fails the flow; a renewal that merely failed is tried again', async () => {
+  const { c } = fakeApp(); const dir = tmp(); const lease = c.lease.bind(c); let n = 0;
+  (c as { lease: typeof c.lease }).lease = async (id: string) => {   // the run's own lease, a blip, then someone else's
+    if (++n === 1) return lease(id);
+    throw Object.assign(new Error(n === 2 ? 'connection reset' : 'The device is in use by Claude Code'), { code: n === 2 ? 'internal' : 'lease_conflict' });
+  };
+  try {
+    const flow = parseFlow('name: Wait\nplatform: android\nsteps:\n  - sleep: 450\n  - sleep: 50\n', 'flows/wait.yaml');
+    const r = await runFlow(c, flow, { deviceId: 'android-emulator:pdtest-fake', artifactsDir: dir, settle: false, timeoutMs: 50, leaseRenewMs: 100 } as Parameters<typeof runFlow>[2]);
+    assert.equal(r.status, 'fail');
+    assert.match(r.message ?? '', /lost the lease/);
+    assert.ok(n >= 3, `renewed again after the blip (${n})`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

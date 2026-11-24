@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PhoneDockError, type Backend, type Device, type DeviceState, type SleepState, type VideoPacket, type VideoStream } from '../core/types.ts';
+import { PhoneDockError, type Backend, type Device, type DeviceState, type SleepState, type VideoPacket, type VideoStream, type WakeReport } from '../core/types.ts';
 import type { Ctx } from './http.ts';
 
 process.env.PHONEDOCK_HOME = mkdtempSync(join(tmpdir(), 'pd-idle-'));
@@ -21,7 +21,8 @@ const deferred = (): Deferred => { let resolve!: () => void; const promise = new
 const states = new Map<string, DeviceState>();
 const managed = new Map<string, boolean>();
 let calls: string[] = [];
-const hooks: { save?: () => Promise<void>; stop?: () => Promise<void>; wake?: () => Promise<void>; del?: () => Promise<void>; saveError?: PhoneDockError; window?: boolean; listDelayMs?: number } = {};
+const hooks: { save?: () => Promise<void>; stop?: () => Promise<void>; wake?: () => Promise<void>; del?: () => Promise<void>; guest?: () => Promise<string | undefined>;
+  saveError?: PhoneDockError; stopError?: PhoneDockError; wakeReport?: WakeReport; wakeLeavesStopped?: boolean; window?: boolean; listDelayMs?: number } = {};
 let videoListeners: ((p: VideoPacket) => void)[] = [];
 let framesAsleep = false;
 const fake = {
@@ -38,18 +39,25 @@ const fake = {
   async shutdown(nid: string) { calls.push(`shutdown:${nid}`); states.set(nid, 'stopped'); },
   async screenshot() { return Buffer.alloc(0); },
   async tap() {}, async swipe() {}, async type() {}, async key() {},
-  async saveSleep(nid: string): Promise<SleepState> {
-    calls.push(`save:${nid}`);
+  async prepareSleep(nid: string): Promise<SleepState> {
+    calls.push(`prepare:${nid}`);
     await hooks.save?.();
     if (hooks.saveError) throw hooks.saveError;
-    return { snapshot: 'phonedock_sleep', savedAt: new Date().toISOString(), bootId: 'boot-1', uptimeSec: 100 };
+    return { at: new Date().toISOString(), bootId: 'boot-1', uptimeSec: 100 };
   },
-  async stopAfterSleep(nid: string) { calls.push(`stop:${nid}`); await hooks.stop?.(); states.set(nid, 'stopped'); },
-  async wakeFromSleep(nid: string) { calls.push(`wake:${nid}`); await hooks.wake?.(); states.set(nid, 'running'); return { resumed: true, via: 'quickboot' as const }; },
-  async discardSleep(nid: string) { calls.push(`discard:${nid}`); },
+  async stopForSleep(nid: string, st: SleepState) {
+    calls.push(`stop:${nid}`); await hooks.stop?.(); states.set(nid, 'stopped');
+    if (hooks.stopError) throw hooks.stopError;
+    return { ...st, exitSave: { mtimeMs: 1 } };
+  },
+  async wakeFromSleep(nid: string) {
+    calls.push(`wake:${nid}`); await hooks.wake?.();
+    if (!hooks.wakeLeavesStopped) states.set(nid, 'running');
+    return hooks.wakeReport ?? { resumed: true, via: 'quickboot' as const };
+  },
   async delete(nid: string) { calls.push(`delete:${nid}`); await hooks.del?.(); states.delete(nid); },
   async listSnapshots() { return ['phonedock_sleep', 'default_boot', 'mine'].map((name) => ({ name, createdAt: new Date().toISOString() })); },
-  async keepAwake() { return hooks.window ? 'its emulator window is open' : undefined; },
+  async keepAwake(_nid: string, opts: { guest?: boolean } = {}) { return hooks.window ? 'its emulator window is open' : opts.guest ? hooks.guest?.() : undefined; },
   stream() { return { onFrame() {}, onEnd() {}, stop() {}, asleep: () => framesAsleep }; },
   video(): VideoStream {
     return { onPacket: (cb: (p: VideoPacket) => void) => { videoListeners.push(cb); }, onEnd() {}, stop() {} };
@@ -100,9 +108,6 @@ test('durations: off, plain seconds and units; anything else is refused', () => 
   assert.equal(S.parseIdleDuration(null), null);
   assert.equal(S.parseIdleDuration(600), 600);
   assert.equal(S.parseIdleDuration('soon'), undefined);
-  assert.equal(S.idleDurationWords(900), '15 minutes');
-  assert.equal(S.idleDurationWords(3600), '1 hour');
-  assert.equal(S.idleDurationWords(null), 'never');
 });
 
 test('the setting: 15 minutes by default, saved under the state dir, the environment overrides it for tests', () => {
@@ -122,11 +127,7 @@ test('the setting: 15 minutes by default, saved under the state dir, the environ
 
 test('GET/POST /v1/idle-sleep', async () => {
   delete process.env.PHONEDOCK_IDLE_SLEEP;
-  const call = async (method: string, body: unknown = {}) => {
-    const m = router.match(method, '/v1/idle-sleep');
-    assert.ok(m && m !== 'method');
-    return m.h({ params: m.params, owner: 'cli:test', body: async () => body, q: () => undefined } as unknown as Ctx) as Promise<{ timeoutSec: number | null; choices: unknown[]; devices: { id: string }[] }>;
-  };
+  const call = (method: string, body: Record<string, unknown> = {}) => hit(method, '/v1/idle-sleep', ID, body) as Promise<{ timeoutSec: number | null; choices: unknown[]; devices: { id: string }[] }>;
   assert.equal((await call('POST', { after: '30m' })).timeoutSec, 1800);
   assert.equal((await call('POST', { timeoutSec: null })).timeoutSec, null);
   await assert.rejects(call('POST', { after: 'later' }), (e: PhoneDockError) => e.code === 'bad_request');
@@ -167,6 +168,9 @@ test('use vs observe: what the app and `phonedock devices` do by themselves neve
   for (const r of ['/v1/devices/:id/boot', '/v1/devices/:id/shutdown', '/v1/devices/:id/restart']) assert.equal(k('POST', r), 'control');
   assert.equal(k('DELETE', '/v1/devices/:id'), 'control');
   assert.equal(k('DELETE', '/v1/devices/:id/lease'), 'control');
+  assert.equal(k('GET', '/v1/devices/:id/environment'), 'observe', 'a static read');
+  assert.equal(k('POST', '/v1/devices/:id/flow'), 'use', 'saving a flow reads the live screen');
+  assert.equal(k('POST', '/v1/devices/:id/shell', { 'x-phonedock-observe': '1' }), 'use', 'the header counts on GETs only');
 });
 
 // ── sleeping ────────────────────────────────────────────────────────────────
@@ -174,7 +178,7 @@ test('an idle phone sleeps once the timeout passes: saved, then stopped, and it 
   advance(59); await S.sweep();
   assert.equal(calls.join(), '', 'not before the timeout');
   advance(1); await S.sweep();
-  assert.deepEqual(calls, ['save:pdtest-a', 'stop:pdtest-a']);
+  assert.deepEqual(calls, ['prepare:pdtest-a', 'stop:pdtest-a']);
   const d = await device();
   assert.equal(d.state, 'stopped');
   assert.equal(d.sleep?.reason, 'idle');
@@ -207,14 +211,8 @@ test('every keep-awake signal keeps it awake past the timeout, and the clock sta
     ['request in flight', () => { let leave: (() => void) | undefined; void S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell').then((l) => { leave = l; }); return () => leave?.(); }],
     ['job', () => { const d = deferred(); core.startJob('replay', () => d.promise, ID); return () => d.resolve(); }],
     ['window', () => { hooks.window = true; return () => { hooks.window = false; }; }],
-    ['visible live view', () => {
-      const v = core.sharedVideo(ID, 720); v.viewers++;
-      return () => { v.viewers--; v.lastAccess = 0; };
-    }],
-    ['polled frames', () => {
-      const s = core.sharedStream(ID, 720); s.viewers++;
-      return () => { s.viewers--; s.lastAccess = 0; };
-    }],
+    ['visible live view', () => { const v = core.sharedVideo(ID, 720); v.viewers++; return () => { v.viewers--; v.lastAccess = 0; }; }],
+    ['polled frames', () => { const s = core.sharedStream(ID, 720); s.viewers++; return () => { s.viewers--; s.lastAccess = 0; }; }],
   ];
   for (const [name, start] of cases) {
     calls = []; S.resetIdleSleepForTests();
@@ -230,21 +228,12 @@ test('every keep-awake signal keeps it awake past the timeout, and the clock sta
   }
 });
 
-test('a live view whose phone screen is off, or that nobody watches, does not keep it awake', async () => {
+test('a live view (video or polled frames) of a phone whose screen is off does not keep it awake', async () => {
   const v = core.sharedVideo(ID, 720); v.viewers++;
   for (const cb of videoListeners) cb({ type: 'state', state: 'asleep' });
-  advance(61); await S.sweep();
-  assert.ok(calls.includes('stop:pdtest-a'));
-  v.viewers--; core.stopStreamsFor(ID);
-});
-
-test('polled frames of a phone whose screen is off do not keep it awake', async () => {
-  const s = core.sharedStream(ID, 720); s.viewers++;
-  framesAsleep = true;
-  try {
-    advance(61); await S.sweep();
-    assert.ok(calls.includes('stop:pdtest-a'));
-  } finally { framesAsleep = false; s.viewers--; core.stopStreamsFor(ID); }
+  const s = core.sharedStream(ID, 720); s.viewers++; framesAsleep = true;
+  try { advance(61); await S.sweep(); assert.ok(calls.includes('stop:pdtest-a')); }
+  finally { framesAsleep = false; v.viewers--; s.viewers--; core.stopStreamsFor(ID); }
 });
 
 test('scope: emulators PhoneDock didn’t create, and backends that can’t sleep, never sleep', async () => {
@@ -262,19 +251,19 @@ test('scope: emulators PhoneDock didn’t create, and backends that can’t slee
 test('a save that fails leaves the phone running, says why, and is not retried until the phone is used', async () => {
   hooks.saveError = new PhoneDockError('Couldn’t save the snapshot', 'snapshot_vulkan', 409, ['This emulator can’t save a snapshot after an app used Vulkan graphics (Chrome does).']);
   advance(61); await S.sweep();
-  assert.deepEqual(calls, ['save:pdtest-a']);
+  assert.deepEqual(calls, ['prepare:pdtest-a']);
   const d = await device();
   assert.equal(d.state, 'running');
   assert.equal(d.sleepFailure?.code, 'snapshot_vulkan');
   assert.match(d.sleepFailure?.message ?? '', /Vulkan/);
   assert.equal(S.readMarker(ID), undefined);
   advance(3600); await S.sweep(); await S.sweep();
-  assert.deepEqual(calls, ['save:pdtest-a'], 'held until it is used');
+  assert.deepEqual(calls, ['prepare:pdtest-a'], 'held until it is used');
   delete hooks.saveError;
   (await S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input'))!();
   assert.equal((await device()).sleepFailure, null, 'a use clears it');
   advance(61); await S.sweep();
-  assert.deepEqual(calls, ['save:pdtest-a', 'save:pdtest-a', 'stop:pdtest-a']);
+  assert.deepEqual(calls, ['prepare:pdtest-a', 'prepare:pdtest-a', 'stop:pdtest-a']);
 });
 
 // ── waking ──────────────────────────────────────────────────────────────────
@@ -290,7 +279,7 @@ test('a request that needs the phone wakes it first and says so; observe request
   const leave = await S.enterRequest(c, 'GET', '/v1/devices/:id/screenshot');
   leave!();
   assert.deepEqual(calls, ['wake:pdtest-a']);
-  assert.match(set['X-PhoneDock-Woke'] ?? '', /^\d+; name=pdtest-a$/);
+  assert.match(set['X-PhoneDock-Woke'] ?? '', /^\d+; name=pdtest-a$/, 'resumed: no "fresh"');
   const d = await device();
   assert.equal(d.state, 'running');
   assert.equal(d.sleep, null);
@@ -307,29 +296,24 @@ test('several requests hitting a sleeping phone share one wake', async () => {
   assert.deepEqual(calls, ['wake:pdtest-a']);
 });
 
-test('a request that arrives during the save cancels the sleep and waits for the save to end', async () => {
-  const save = deferred(); hooks.save = () => save.promise;
-  advance(61);
-  const sweeping = S.sweep();
-  while (!calls.includes('save:pdtest-a')) await tick();
-  let entered = false;
-  const req = S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input').then((l) => { entered = true; return l; });
-  await tick();
-  assert.equal(entered, false, 'it waits while the phone is paused for the save');
-  save.resolve();
-  (await req)!(); await sweeping;
-  assert.deepEqual(calls, ['save:pdtest-a', 'discard:pdtest-a']);
-  assert.equal((await device()).state, 'running');
-});
-
-test('a lease taken during the save cancels the sleep', async () => {
-  const save = deferred(); hooks.save = () => save.promise;
-  advance(61);
-  const sweeping = S.sweep();
-  while (!calls.includes('save:pdtest-a')) await tick();
-  core.acquireLease(ID, 'cli:agent');
-  save.resolve(); await sweeping;
-  assert.deepEqual(calls, ['save:pdtest-a', 'discard:pdtest-a']);
+test('a request (or a lease) that comes while the sleep is being decided calls it off; the request waits for that', async () => {
+  for (const by of ['request', 'lease']) {
+    calls = []; S.resetIdleSleepForTests(); core.clearLeases();
+    const save = deferred(); hooks.save = () => save.promise;
+    advance(61);
+    const sweeping = S.sweep();
+    while (!calls.includes('prepare:pdtest-a')) await tick();
+    let entered = false;
+    const req = by === 'lease' ? (core.acquireLease(ID, 'cli:agent'), Promise.resolve(() => {}))
+      : S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input').then((l) => { entered = true; return l; });
+    await tick();
+    assert.equal(entered, false, 'it waits while the sleep is being decided');
+    save.resolve();
+    (await req)!(); await sweeping;
+    assert.deepEqual(calls, ['prepare:pdtest-a'], by);
+    assert.equal(S.readMarker(ID), undefined);
+    assert.equal((await device()).state, 'running');
+  }
 });
 
 test('a request that arrives while it stops waits for the stop, then wakes it', async () => {
@@ -342,7 +326,7 @@ test('a request that arrives while it stops waits for the stop, then wakes it', 
   await tick();
   stop.resolve(); await sweeping;
   (await req)!();
-  assert.deepEqual(calls, ['save:pdtest-a', 'stop:pdtest-a', 'wake:pdtest-a']);
+  assert.deepEqual(calls, ['prepare:pdtest-a', 'stop:pdtest-a', 'wake:pdtest-a']);
   assert.ok(set['X-PhoneDock-Woke']);
 });
 
@@ -356,19 +340,34 @@ test('a client that hangs up while the phone wakes gets nothing done on its beha
   await assert.rejects(req, (e: PhoneDockError) => e.code === 'aborted' && e.delivery === 'not_sent');
 });
 
-async function route(method: string, suffix: string, body: unknown = {}) {
-  const m = router.match(method, `/v1/devices/${encodeURIComponent(ID)}${suffix}`);
-  assert.ok(m && m !== 'method');
-  return m.h({ params: m.params, owner: 'cli:test', body: async () => body, q: () => undefined, req: { headers: {} }, res: {} } as unknown as Ctx);
+const hit = async (method: string, path: string, id: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}) => {
+  const m = router.match(method, path.replace(':id', encodeURIComponent(id)));
+  assert.ok(m && m !== 'method', `${method} ${path}`);
+  const res = { headersSent: false, destroyed: false, setHeader() {} };
+  return m.h({ params: m.params, owner: 'cli:test', req: { method, headers }, res, url: new URL(`http://127.0.0.1${path}`), body: async () => body, q: () => undefined } as unknown as Ctx);
+};
+const jobDone = async (raw: unknown) => {
+  const { job } = JSON.parse(String((raw as { body: unknown }).body)) as { job: { id: string } };
+  for (let i = 0; i < 200 && core.getJob(job.id).state === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
+  return core.getJob(job.id);
+};
+/** A sleep marker as another daemon on this state dir writes it (just before it stops the phone). */
+async function marker(sinceMs = Date.now()) {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  const dir = join(process.env.PHONEDOCK_HOME!, 'devices', core.safeId(ID));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'sleep.json'), JSON.stringify({ v: 1, since: new Date(sinceMs).toISOString(), reason: 'idle', name: 'pdtest-a', idleSec: 900, state: { at: new Date(sinceMs).toISOString(), bootId: 'boot-1' } }));
 }
-async function finish(r: unknown) {
-  const { job } = JSON.parse(String((r as { body: string }).body)) as { job: { id: string } };
-  for (;;) { const j = core.getJob(job.id); if (j.state !== 'running') return j; await new Promise((x) => setTimeout(x, 5)); }
-}
+/** An input request with a request receipt, as the routes see it. */
+const inputCtx = (requestId: string, body: unknown = { kind: 'tap', x: 1, y: 2 }) => ({
+  params: { id: ID }, owner: 'cli:test', url: new URL('http://127.0.0.1/v1/devices/x/input'), body: async () => body,
+  req: { method: 'POST', headers: { 'x-phonedock-request-id': requestId } }, res: { headersSent: false, destroyed: false, setHeader() {} },
+}) as unknown as Ctx;
+const enterInput = (c: Ctx, route = '/v1/devices/:id/input') => (S.enterRequest as (...a: unknown[]) => Promise<(() => void) | undefined>)(c, 'POST', route, true);
 
 test('starting a sleeping phone wakes it where it left off', async () => {
   await putToSleep();
-  const j = await finish(await route('POST', '/boot'));
+  const j = await jobDone(await hit('POST', '/v1/devices/:id/boot', ID));
   assert.equal(j.state, 'done');
   assert.deepEqual(calls, ['wake:pdtest-a']);
   assert.ok(j.progress.some((l) => /woke in .*where it left off/.test(l)));
@@ -376,12 +375,11 @@ test('starting a sleeping phone wakes it where it left off', async () => {
 
 test('a phone the person stopped stays stopped: shutting down a sleeping phone forgets its sleep', async () => {
   await putToSleep();
-  await route('POST', '/shutdown');
+  await hit('POST', '/v1/devices/:id/shutdown', ID);
   assert.equal(S.readMarker(ID), undefined);
-  assert.deepEqual(calls, ['discard:pdtest-a'], 'its saved state is thrown away');
   assert.equal((await device()).sleep, null);
   assert.equal(await S.ensureAwake(ID, 'cli:test'), undefined, 'nothing wakes it');
-  assert.deepEqual(calls, ['discard:pdtest-a']);
+  assert.ok(!calls.includes('wake:pdtest-a'));
 });
 
 test('a daemon restart keeps the sleep, and idle clocks start fresh', async () => {
@@ -404,11 +402,7 @@ test('a phone another daemon put to sleep is not reported as crashed', async () 
   core.sseClients.add(fakeClient);
   try {
     await core.pollDevices(true);   // seen running
-    // Another daemon on this state dir saved and stopped it: only its marker on disk tells this one why.
-    const { mkdirSync, writeFileSync } = await import('node:fs');
-    const dir = join(process.env.PHONEDOCK_HOME!, 'devices', core.safeId(ID));
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'sleep.json'), JSON.stringify({ v: 1, since: new Date().toISOString(), reason: 'idle', name: 'pdtest-a', idleSec: 900, state: { snapshot: 's', savedAt: new Date().toISOString() } }));
+    await marker();   // another daemon on this state dir stopped it: only its marker on disk tells this one why
     states.set('pdtest-a', 'stopped'); core.invalidateDevices();
     await new Promise((r) => setTimeout(r, 100));
     await core.pollDevices(true);
@@ -417,66 +411,9 @@ test('a phone another daemon put to sleep is not reported as crashed', async () 
   } finally { core.sseClients.delete(fakeClient); }
 });
 
-test('a phone found running with a stale sleep marker (started outside PhoneDock) is not shown as sleeping', async () => {
-  await putToSleep();
-  await peerMarker('asleep', process.pid, Date.now() - 60_000);   // slept a minute ago: past the inventory's lag
-  states.set('pdtest-a', 'running'); core.invalidateDevices();
-  assert.equal((await device()).sleep, null);
-  await S.sweep();
-  assert.equal(S.readMarker(ID), undefined);
-});
-
-// ── review fixes (PR #13): each of these failed before its fix ─────────────────
-const hit = async (method: string, path: string, id: string, body: Record<string, unknown> = {}, headers: Record<string, string> = {}) => {
-  const m = router.match(method, path.replace(':id', encodeURIComponent(id)));
-  assert.ok(m && m !== 'method', `${method} ${path}`);
-  const res = { headersSent: false, destroyed: false, setHeader() {} };
-  return m.h({ params: m.params, owner: 'cli:test', req: { method, headers }, res, url: new URL(`http://127.0.0.1${path}`), body: async () => body, q: () => undefined } as unknown as Ctx);
-};
-const jobDone = async (raw: unknown) => {
-  const { job } = JSON.parse(String((raw as { body: unknown }).body)) as { job: { id: string } };
-  for (let i = 0; i < 200 && core.getJob(job.id).state === 'running'; i++) await new Promise((r) => setTimeout(r, 10));
-  return core.getJob(job.id);
-};
-async function peerMarker(phase: 'stopping' | 'asleep', pid: number, sinceMs = Date.now()) {
-  const { mkdirSync, writeFileSync } = await import('node:fs');
-  const dir = join(process.env.PHONEDOCK_HOME!, 'devices', core.safeId(ID));
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'sleep.json'), JSON.stringify({ v: 1, since: new Date(sinceMs).toISOString(), reason: 'idle', name: 'pdtest-a', idleSec: 900, phase, owner: { pid }, state: { snapshot: 'default_boot', savedAt: new Date(sinceMs).toISOString() } }));
-}
-async function deadPid(): Promise<number> {
-  const { spawn } = await import('node:child_process');
-  const c = spawn(process.execPath, ['-e', '0']);
-  await new Promise((r) => c.on('exit', r));
-  return c.pid!;
-}
-
-test('use vs observe: a static environment read is observe; saving a flow reads the live screen; the header counts on GETs only (#12)', () => {
-  assert.equal(S.classifyRequest('GET', '/v1/devices/:id/environment'), 'observe');
-  assert.equal(S.classifyRequest('POST', '/v1/devices/:id/flow'), 'use');
-  assert.equal(S.classifyRequest('POST', '/v1/devices/:id/shell', { 'x-phonedock-observe': '1' }), 'use');
-  assert.equal(S.classifyRequest('GET', '/v1/devices/:id/apps', { 'x-phonedock-observe': '1' }), 'observe');
-});
-
 test('the Snapshots list hides only the emulator’s own quick-boot state; a person’s "phonedock_sleep" is listed (#4)', async () => {
   const names = ((await hit('GET', '/v1/devices/:id/snapshots', ID)) as { name: string }[]).map((s) => s.name);
   assert.deepEqual(names, ['phonedock_sleep', 'mine']);
-});
-
-test('a resent request that already reached the phone is answered from its receipt, without waking it (#7)', async () => {
-  const { withRequestReceipt } = await import('./requests.ts');
-  const rc = () => ({
-    params: { id: ID }, owner: 'cli:test', url: new URL('http://127.0.0.1/v1/devices/x/input'), body: async () => ({ kind: 'tap', x: 1, y: 2 }),
-    req: { method: 'POST', headers: { 'x-phonedock-request-id': 'pdtest-tap-1' } }, res: { headersSent: false, destroyed: false, setHeader() {} },
-  }) as unknown as Ctx;
-  await withRequestReceipt(rc(), async () => ({ ok: true, delivery: 'delivered' }));
-  await putToSleep();
-  hooks.wake = async () => { throw new PhoneDockError('The device failed to start', 'boot_failed', 500); };
-  const leave = await S.enterRequest(rc(), 'POST', '/v1/devices/:id/input');
-  leave?.();
-  assert.ok(!calls.includes('wake:pdtest-a'), 'no wake for a request that is only replayed');
-  const again = await withRequestReceipt(rc(), async () => { throw new Error('must not run again'); }) as { delivery: string };
-  assert.equal(again.delivery, 'delivered');
 });
 
 test('restart during an automatic wake really restarts the phone (#8)', async () => {
@@ -503,17 +440,6 @@ test('no wake starts while the phone is being deleted (#8)', async () => {
   assert.ok(!calls.includes('wake:pdtest-a'), calls.join());
 });
 
-test('a request that woke the phone sees it running in the inventory right away (#9)', async () => {
-  await putToSleep();
-  hooks.listDelayMs = 600;
-  try {
-    (await S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input'))?.();
-    const d = (await core.listDevices(false)).find((x) => x.id === ID)!;
-    assert.equal(d.state, 'running');
-    assert.ok(!(d.meta as { stale?: boolean } | undefined)?.stale, 'not a stale read');
-  } finally { hooks.listDelayMs = 0; await new Promise((r) => setTimeout(r, 700)); }   // let the slow read finish
-});
-
 test('another daemon’s change to the setting is seen at once, Never included (#10)', async () => {
   const { utimesSync, writeFileSync } = await import('node:fs');
   delete process.env.PHONEDOCK_IDLE_SLEEP;
@@ -526,39 +452,150 @@ test('another daemon’s change to the setting is seen at once, Never included (
   };
   peer(null, 5);
   advance(700); await S.sweep();
-  assert.ok(!calls.includes('save:pdtest-a'), 'Never, chosen through the other daemon');
+  assert.ok(!calls.includes('prepare:pdtest-a'), 'Never, chosen through the other daemon');
   peer(600, 10);
   advance(700); await S.sweep();
-  assert.ok(calls.includes('save:pdtest-a'), 'and back to 10 minutes');
+  assert.ok(calls.includes('prepare:pdtest-a'), 'and back to 10 minutes');
   assert.ok(S.sweepEveryMs(null) > 0, 'it keeps watching the setting while it is Never');
   S.setIdleSleep(900);
 });
 
-test('a peer still stopping the phone: no marker is cleared under it, and a request waits for it (#3)', async () => {
-  await peerMarker('stopping', 1, Date.now() - 60_000);   // pid 1 stands in for the other daemon: alive, not us
-  states.set('pdtest-a', 'running'); core.invalidateDevices();
-  await S.sweep();
-  assert.ok(S.isSleeping(ID), 'the sweep left the peer’s marker alone');
-  let done = false;
-  const req = S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input').then((l) => { done = true; l?.(); });
-  await new Promise((r) => setTimeout(r, 400));
-  assert.ok(!done && !calls.includes('wake:pdtest-a'), 'it waits while the peer stops the phone');
-  states.set('pdtest-a', 'stopped'); core.invalidateDevices();
-  await peerMarker('asleep', 1);
-  await req;
-  assert.ok(calls.includes('wake:pdtest-a'), 'then wakes it');
+// ── second review (PR #13): each of these failed on 59685d4 ────────────────────────
+test('a stop with no proof it happened is never "memory freed", even when the device list reads stopped', async () => {
+  hooks.stopError = new PhoneDockError('The phone didn’t stop', 'sleep_failed', 500);   // and the (stale) list says stopped
+  const count = (a: string) => (core.readActions(ID, 1000) as { action: { action: string } }[]).filter((e) => e.action.action === a).length;
+  const [slept, failed] = [count('device.sleep'), count('device.sleep_failed')];
+  advance(61); await S.sweep();
+  assert.equal(count('device.sleep'), slept, 'no "went to sleep (memory freed)"');
+  assert.equal(count('device.sleep_failed'), failed + 1);
 });
 
-test('a daemon that died while stopping the phone: the next one goes by the emulator itself (#3)', async () => {
-  const pid = await deadPid();
-  await peerMarker('stopping', pid, Date.now() - 60_000);
-  states.set('pdtest-a', 'running'); core.invalidateDevices();
-  await S.sweep();
-  assert.ok(S.isSleeping(ID), 'still within the stop’s deadline: its exit may be on the way');
-  await peerMarker('stopping', pid, Date.now() - 600_000);
-  core.invalidateDevices(); await S.sweep();
-  assert.ok(!S.isSleeping(ID), 'long past it and still running: it never stopped');
-  await peerMarker('stopping', pid, Date.now() - 60_000);
+test('"Never", chosen while the phone’s own idle clock is read, wins: nothing is stopped', async () => {
+  delete process.env.PHONEDOCK_IDLE_SLEEP;
+  S.setIdleSleep(600);
+  hooks.guest = async () => { if (calls.includes('prepare:pdtest-a')) S.setIdleSleep(null); return undefined; };   // another daemon, or the person
+  try {
+    advance(601); await S.sweep();
+    assert.ok(!calls.includes('stop:pdtest-a'), calls.join());
+    assert.equal(S.readMarker(ID), undefined);
+  } finally { S.setIdleSleep(900); }
+});
+
+test('a wake that started fresh: the header says so, a tap is handed back unsent, an app launch goes ahead', async () => {
+  await putToSleep();
+  hooks.wakeReport = { resumed: false, via: 'cold', note: 'Its saved state didn’t load.' };
+  const { c, set } = ctx(ID);
+  const leave = await enterInput(c);
+  await assert.rejects(Promise.resolve(c.beforeRun?.()).then(() => { throw new Error('the tap went through'); }),
+    (e: PhoneDockError) => e.code === 'woke_fresh' && e.delivery === 'not_sent');
+  leave?.();
+  assert.match(set['X-PhoneDock-Woke'] ?? '', /; fresh=1$/);
+  await putToSleep();
+  const l = ctx(ID);
+  const leave2 = await enterInput(l.c, '/v1/devices/:id/apps/:appId/launch');
+  await l.c.beforeRun?.();
+  leave2?.();
+  assert.deepEqual(calls, ['wake:pdtest-a'], 'the launch woke it and went ahead');
+});
+
+test('pool acquire gives back the lease it took when the phone fails to wake', async () => {
+  await putToSleep();
+  hooks.wake = async () => { throw new PhoneDockError('The device failed to start', 'boot_failed', 500); };
+  await assert.rejects(Promise.resolve(hit('POST', '/v1/pool/acquire', ID, { deviceId: ID })));
+  assert.equal(core.getLease(ID), null, 'nobody holds it');
+});
+
+test('a marker on a phone that is still running: a request waits for that stop (another daemon’s), then wakes it', async () => {
+  await marker();                            // another daemon on this state dir is stopping it right now
+  core.invalidateDevices();
+  let done = false;
+  const req = S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell').then((l) => { done = true; l?.(); });
+  await new Promise((r) => setTimeout(r, 600));
+  assert.ok(!done && !calls.includes('wake:pdtest-a'), 'it waits while the phone still runs');
   states.set('pdtest-a', 'stopped'); core.invalidateDevices();
-  assert.deepEqual((await device()).sleep?.reason, 'idle', 'stopped: it is asleep');
+  await req;
+  assert.deepEqual(calls, ['wake:pdtest-a']);
+});
+
+test('each writer of the setting has its own temp file', async () => {
+  const { mkdirSync, rmSync } = await import('node:fs');
+  const shared = join(process.env.PHONEDOCK_HOME!, 'idle-sleep.json.tmp');
+  mkdirSync(shared, { recursive: true });   // the one name every writer used to share is taken
+  try { assert.doesNotThrow(() => S.setIdleSleep(1800)); }
+  finally { rmSync(shared, { recursive: true, force: true }); S.setIdleSleep(900); }
+});
+
+test('every input route is marked as running its wake inside its receipt', async () => {
+  const { inputRoute } = await import('./delivery.ts');
+  assert.equal((inputRoute(async () => ({ ok: true })) as { receipt?: boolean }).receipt, true);
+  for (const path of ['/v1/devices/x/input', '/v1/devices/x/swipe', '/v1/devices/x/fill', '/v1/devices/x/apps/y/launch']) {
+    const m = router.match('POST', path);
+    assert.ok(m && m !== 'method' && (m.h as { receipt?: boolean }).receipt === true, path);
+  }
+});
+
+test('a sleep marker on a phone that still runs, past any stop’s deadline: never shown asleep; the sweep, a request, a shutdown or a restart settle it', async () => {
+  await marker(Date.now() - 300_000);   // started outside PhoneDock, or its stop never happened
+  core.invalidateDevices();
+  assert.equal((await device()).sleep, null);
+  await S.sweep();
+  assert.equal(S.readMarker(ID), undefined, 'the sweep clears it');
+  await marker(Date.now() - 300_000);
+  (await S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/shell'))?.();
+  assert.equal(calls.length, 0, 'a request goes ahead, unwoken');
+  assert.equal(S.readMarker(ID), undefined);
+  await marker(Date.now() - 300_000);
+  await hit('POST', '/v1/devices/:id/shutdown', ID);
+  assert.ok(calls.includes('shutdown:pdtest-a'), 'a shutdown really stops it');
+  assert.equal(S.readMarker(ID), undefined);
+  states.set('pdtest-a', 'running'); calls = []; await marker(Date.now() - 300_000); core.invalidateDevices();
+  assert.equal((await jobDone(await hit('POST', '/v1/devices/:id/restart', ID))).state, 'done');
+  assert.deepEqual(calls, ['shutdown:pdtest-a', 'boot:pdtest-a'], 'and a restart really restarts it');
+});
+
+test('receipts: a resent input is answered from its receipt with no wake; an expired one, or a reused ID on a route without receipts, wakes the phone first', async () => {
+  const { withRequestReceipt } = await import('./requests.ts');
+  const { readdirSync, readFileSync, writeFileSync } = await import('node:fs');
+  for (const id of ['pdtest-tap-1', 'pdtest-old-1', 'pdtest-shot-1']) await withRequestReceipt(inputCtx(id), async () => ({ ok: true, delivery: 'sent' }));
+  const dir = join(process.env.PHONEDOCK_HOME!, 'requests');
+  for (const n of readdirSync(dir).filter((x) => x.endsWith('.json'))) {
+    const p = join(dir, n); const r = JSON.parse(readFileSync(p, 'utf8')) as { requestId: string };
+    if (r.requestId === 'pdtest-old-1') writeFileSync(p, JSON.stringify({ ...r, startedAt: new Date(Date.now() - 25 * 3600_000).toISOString() }));
+  }
+  await putToSleep();
+  hooks.wake = async () => { throw new PhoneDockError('The device failed to start', 'boot_failed', 500); };
+  const resent = inputCtx('pdtest-tap-1');
+  const leave = await enterInput(resent);
+  const again = await withRequestReceipt(resent, async () => { throw new Error('must not run again'); }) as { delivery: string };
+  leave?.();
+  assert.equal(again.delivery, 'sent');
+  assert.equal(calls.length, 0, 'no wake for a request that is only replayed');
+  delete hooks.wake;
+  const expired = inputCtx('pdtest-old-1'); let ran = false;
+  const l2 = await enterInput(expired);
+  await withRequestReceipt(expired, async () => { ran = true; return { ok: true, delivery: 'sent' }; });
+  l2?.();
+  assert.ok(ran && calls.includes('wake:pdtest-a'), 'an expired receipt: a new execution, after a wake');
+  await putToSleep();
+  const shot = ctx(ID, { 'x-phonedock-request-id': 'pdtest-shot-1' }); (shot.c as { owner: string }).owner = 'cli:test';
+  (await S.enterRequest(shot.c, 'GET', '/v1/devices/:id/screenshot'))?.();
+  assert.ok(calls.includes('wake:pdtest-a'), 'a route without receipts always wakes it');
+});
+
+test('a woken phone’s requests go once a fresh device list shows it running; if it never does, they fail unsent', async () => {
+  await putToSleep();
+  hooks.listDelayMs = 600;
+  try {
+    (await S.enterRequest(ctx(ID).c, 'POST', '/v1/devices/:id/input'))?.();
+    const d = (await core.listDevices(false)).find((x) => x.id === ID)!;
+    assert.equal(d.state, 'running');
+    assert.ok(!(d.meta as { stale?: boolean } | undefined)?.stale, 'not a stale read');
+  } finally { hooks.listDelayMs = 0; await new Promise((r) => setTimeout(r, 700)); }   // let the slow read finish
+  await putToSleep();
+  hooks.wakeLeavesStopped = true;
+  const timing = (S as { wakeTiming?: { readyMs: number } }).wakeTiming;
+  if (timing) timing.readyMs = 600;
+  try {
+    await assert.rejects(S.enterRequest(ctx(ID).c, 'GET', '/v1/devices/:id/screenshot'), (e: PhoneDockError) => e.code === 'not_ready' && e.delivery === 'not_sent');
+  } finally { if (timing) timing.readyMs = 30_000; }
 });

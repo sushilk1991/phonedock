@@ -20,5 +20,10 @@ test('screenshot fallback: asleep() follows the display, not the encoder (#13)',
     const t0 = Date.now();
     while (Date.now() - t0 < 30_000 && !s.asleep?.()) await new Promise((r) => setTimeout(r, 200));
     assert.equal(s.asleep?.(), true, 'the display is off');
-  } finally { s.stop(); }
+    // Then the phone stops answering: an unknown display is a lit one (someone may be watching it).
+    sdk.set({ shellFails: true });
+    const t1 = Date.now();
+    while (Date.now() - t1 < 30_000 && s.asleep?.()) await new Promise((r) => setTimeout(r, 200));
+    assert.equal(s.asleep?.(), false, 'an unreadable display is not "off"');
+  } finally { s.stop(); sdk.set({ shellFails: false }); }
 });
