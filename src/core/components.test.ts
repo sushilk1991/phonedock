@@ -1112,3 +1112,83 @@ test('Round 4 #3 (P2): startup cleanup deletes stage-<pid>-* only when PID is de
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test('Round 5: activation garbage recovery restores and adopts a concurrent ready winner instead of trashing it', async () => {
+  const work = makeTempDir('pd-comp-r5-garbage-race-');
+  try {
+    const tar = makeFakeAxeTarGz(work, '1.8.0');
+    await withServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(tar.buf.length) });
+      res.end(tar.buf);
+    }, async (base) => {
+      const toolsDir = join(work, 'tools');
+      const rootDir = join(work, 'components');
+      const m = writeTestTools(toolsDir, { url: `${base}/axe.tar.gz`, sha256: tar.sha256, size: tar.buf.length, version: '1.8.0' });
+      const key = componentKey(m.components.axe, m.components.axe.artifacts[0]);
+      const finalDir = join(rootDir, 'axe', key);
+
+      // Part A: Exact A/B schedule — garbage exists at <key>; A sees no .ready.json and pauses;
+      // B clears garbage and activates B's ready key; A renames B's ready key to .trash-*, sees .ready.json inside,
+      // renames B's ready key back to <key>, and adopts B instead of overwriting with A's payload.
+      mkdirSync(finalDir, { recursive: true });
+      writeFileSync(join(finalDir, '.last-used'), '2026-09-01T00:00:00Z\n');
+
+      const mgrB = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+
+      let bActivated = false;
+      const mgrA = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => undefined, envOverride: () => undefined,
+        onBeforeGarbageTrash: async (_id, k) => {
+          assert.equal(k, key);
+          const stB = await mgrB.install('axe');
+          assert.equal(stB.state, 'ready');
+          // Mark B's activated dir with a sentinel file so we can prove B's exact copy was restored & adopted
+          writeFileSync(join(finalDir, '.winner-sentinel'), 'B-won\n');
+          bActivated = true;
+        },
+      });
+
+      const stA = await mgrA.install('axe');
+      assert.equal(bActivated, true);
+      assert.equal(stA.state, 'ready');
+      assert.ok(existsSync(join(finalDir, '.ready.json')));
+      assert.equal(readFileSync(join(finalDir, '.winner-sentinel'), 'utf8').trim(), 'B-won', 'A must restore and adopt B winner');
+      assert.deepEqual(readdirSync(join(rootDir, 'axe')), [key]);
+
+      // Part B: Same A/B schedule, PLUS C places a ready copy at <key> before A restores B's trashed copy ->
+      // A gets ENOTEMPTY/EEXIST on restore, deletes trashed B, and adopts C at <key>.
+      rmSync(finalDir, { recursive: true, force: true });
+      mkdirSync(finalDir, { recursive: true });
+      writeFileSync(join(finalDir, '.last-used'), '2026-09-01T00:00:00Z\n');
+
+      const mgrC = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => undefined, envOverride: () => undefined,
+      });
+      const mgrA2 = new ComponentManager({
+        rootDir, toolsDir, platformKey: 'darwin-arm64', allowLocalhost: true,
+        externalLookup: () => undefined, envOverride: () => undefined,
+        onBeforeGarbageTrash: async () => {
+          await mgrB.install('axe');
+          writeFileSync(join(finalDir, '.winner-sentinel'), 'B2-won\n');
+        },
+        onBeforeGarbageRestore: async () => {
+          // C activates at <key> while A2 holds B2 in .trash-*
+          await mgrC.install('axe');
+          writeFileSync(join(finalDir, '.winner-sentinel'), 'C-won\n');
+        },
+      });
+
+      const stA2 = await mgrA2.install('axe');
+      assert.equal(stA2.state, 'ready');
+      assert.equal(readFileSync(join(finalDir, '.winner-sentinel'), 'utf8').trim(), 'C-won', 'A2 must discard duplicate trash and adopt C');
+      assert.deepEqual(readdirSync(join(rootDir, 'axe')), [key]);
+    });
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});

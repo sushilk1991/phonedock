@@ -74,6 +74,10 @@ export interface ComponentManagerOptions {
   onBeforePruneTrash?: (id: ComponentId, key: string) => void;
   /** Hook fired inside prune() after trashing a fresh key and before restoring it to <key> (unit tests). */
   onBeforePruneRestore?: (id: ComponentId, key: string) => void;
+  /** Hook fired during activation after observing <key> without .ready.json and before trashing it (unit tests). */
+  onBeforeGarbageTrash?: (id: ComponentId, key: string) => void | Promise<void>;
+  /** Hook fired during activation after trashing a concurrent ready winner and before restoring it to <key> (unit tests). */
+  onBeforeGarbageRestore?: (id: ComponentId, key: string) => void | Promise<void>;
   /** Override external discovery for status reporting. */
   externalLookup?: (id: ComponentId) => string | undefined;
   /** Override env override lookup (PHONEDOCK_PYMD3_PYTHON / PHONEDOCK_AXE). */
@@ -884,18 +888,43 @@ export class ComponentManager {
         if (this.readReady(id, key)) {
           this.touchUsed(id);
         } else if (!existsSync(join(finalDir, READY_FILE))) {
+          await this.opts.onBeforeGarbageTrash?.(id, key);
           const trashDir = join(compDir, `${TRASH_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
+          let trashed = false;
           try {
             renameSync(finalDir, trashDir);
+            trashed = true;
           } catch (err) {
             if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
           }
-          rmSync(trashDir, { recursive: true, force: true });
-          if (!tryActivate()) {
-            if (this.readReady(id, key)) {
+
+          if (trashed && existsSync(join(trashDir, READY_FILE))) {
+            // A concurrent winner cleared the garbage and activated a ready key before our rename: restore and adopt it.
+            await this.opts.onBeforeGarbageRestore?.(id, key);
+            try {
+              renameSync(trashDir, finalDir);
               this.touchUsed(id);
-            } else {
-              throw new PhoneDockError(`Could not activate ${spec.displayName}`, 'install_failed', 500);
+            } catch (err) {
+              const code = (err as NodeJS.ErrnoException).code;
+              if (code === 'ENOTEMPTY' || code === 'EEXIST') {
+                rmSync(trashDir, { recursive: true, force: true });
+                if (this.readReady(id, key)) {
+                  this.touchUsed(id);
+                } else {
+                  throw new PhoneDockError(`Could not activate ${spec.displayName}`, 'install_failed', 500);
+                }
+              } else {
+                throw err;
+              }
+            }
+          } else {
+            if (trashed) rmSync(trashDir, { recursive: true, force: true });
+            if (!tryActivate()) {
+              if (this.readReady(id, key)) {
+                this.touchUsed(id);
+              } else {
+                throw new PhoneDockError(`Could not activate ${spec.displayName}`, 'install_failed', 500);
+              }
             }
           }
         } else {
