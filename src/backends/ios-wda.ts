@@ -305,6 +305,12 @@ export function classifyXcodebuild(text: string, phase: 'build' | 'launch', ctx:
   if (/Unlock .* to Continue|device is locked|passcode protected|is passcode locked|device was locked|could not be,? unlocked/i.test(text)) {
     return new PhoneDockError('Unlock the iPhone', 'device_locked', 409, ['Unlock it and keep it unlocked, then set up control again.'], tail);
   }
+  // iOS asks for the passcode on the phone itself before it allows UI automation (for example after a restart); left
+  // unanswered for about a minute, the runner fails with this.
+  if (/enabling automation mode/i.test(text)) {
+    return new PhoneDockError('Enter the iPhone’s passcode on the phone', 'device_locked', 409,
+      ['The iPhone asks for its passcode to allow automation ("Enable UI Automation"). Set up control again and enter the passcode on the iPhone when it asks.'], tail);
+  }
   if (/Developer Mode (is )?(disabled|off|not enabled)|enable Developer Mode/i.test(text)) {
     return new PhoneDockError('Turn on Developer Mode on the iPhone', 'developer_mode_off', 409,
       ['On the iPhone open Settings › Privacy & Security › Developer Mode, turn it on and let it restart.'], tail);

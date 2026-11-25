@@ -197,6 +197,12 @@ test('xcodebuild failures become plain errors; unknown ones keep the old wda_set
   assert.equal(c('Untrusted Developer: Your device management settings do not allow apps from developer "Apple Development: X" on this iPhone.', 'launch'), 'wda_untrusted');
   assert.equal(c('error: The provisioning profile has expired.', 'launch'), 'signing_expired');
   assert.equal(c('Unlock Phone to Continue: The device is passcode protected.', 'launch'), 'device_locked');
+  // iOS asks for the passcode on the phone ("Enter iPhone Passcode for XCTest · Enable UI Automation"), e.g. after a
+  // restart; nobody entering it within a minute fails like this (seen on an iPhone XS, iOS 18).
+  const automation = classifyXcodebuild('Testing failed:\nWebDriverAgentRunner-Runner (623) encountered an error (The test runner failed to initialize for UI testing. (Underlying Error: Timed out while enabling automation mode.))\n** TEST EXECUTE FAILED **', 'launch');
+  assert.equal(automation.code, 'device_locked');
+  assert.match(automation.message, /passcode/i);
+  assert.match((automation.hints ?? []).join(' '), /Enable UI Automation/);
   assert.equal(c('Developer Mode disabled. To use Phone for development, enable Developer Mode in Settings', 'launch'), 'developer_mode_off');
   assert.equal(c('xcodebuild: error: Unable to find a destination matching the provided destination specifier', 'launch'), 'no_device');
   const other = classifyXcodebuild('lots of output\n** TEST BUILD FAILED **', 'build');
