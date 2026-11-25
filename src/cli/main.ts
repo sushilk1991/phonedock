@@ -37,7 +37,7 @@ Devices:    devices|ls [--backend B --platform P --state S]
                    --boot --auto-start --no-wait]
             boot <id> [--window] [--cold] [--no-wait] | shutdown <id> | rm <id> [--force]
             idle-sleep [off|10m|15m|30m|1h]   (no value: show it) put idle virtual phones to sleep after that long:
-              their memory is freed; any use wakes them, usually where they left off (default 15m)
+              their memory is freed; any use wakes them, usually where they left off (default off; 15m suggested)
             clone <id> <name> | window <id> | update <id> [--name N] [--auto-start true|false]
             snapshot ls|save|restore|rm <id> [name] | info <id>
 Observe:    screenshot <id> [-o file] [--max-size N] [--format png|jpeg] | ui <id> [--json] [--no-ocr]

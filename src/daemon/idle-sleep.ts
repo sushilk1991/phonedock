@@ -19,8 +19,9 @@ import type { Ctx } from './http.ts';
 // ── the setting ─────────────────────────────────────────────────────────────
 /** What the setting can be: never (null), 10, 15, 30 or 60 minutes. */
 export const IDLE_SLEEP_CHOICES: readonly (number | null)[] = [null, 600, 900, 1800, 3600];
-/** The default until someone chooses: 900 (15 minutes), or null to ship it off (also the default sentence in docs/API.md). */
-export const DEFAULT_IDLE_SLEEP_SEC: number | null = 900;
+/** The default until someone chooses: null, off (0.7.0 ships it off; 15 minutes is the suggested choice). Keep the
+ *  default sentence in docs/API.md in step. */
+export const DEFAULT_IDLE_SLEEP_SEC: number | null = null;
 let defaultSec: number | null = DEFAULT_IDLE_SLEEP_SEC;
 
 /** One sleeper: only the app's service (the default port), or one a test opts in with PHONEDOCK_IDLE_SLEEP set to a

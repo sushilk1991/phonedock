@@ -128,9 +128,9 @@ test('durations: off, plain seconds and units; anything else is refused', () => 
   assert.equal(S.parseIdleDuration('soon'), undefined);
 });
 
-test('the setting: 15 minutes by default, saved under the state dir, the environment overrides it for tests', () => {
+test('the setting: off by default, saved under the state dir, the environment overrides it for tests', () => {
   delete process.env.PHONEDOCK_IDLE_SLEEP;
-  assert.deepEqual(S.idleSleepSetting(), { timeoutSec: 900, source: 'default' });
+  assert.deepEqual(S.idleSleepSetting(), { timeoutSec: null, source: 'default' });
   assert.throws(() => S.setIdleSleep(120), (e: PhoneDockError) => e.code === 'bad_request');
   S.setIdleSleep(1800);
   assert.ok(existsSync(join(process.env.PHONEDOCK_HOME!, 'idle-sleep.json')));
@@ -627,10 +627,10 @@ test('one sleeper: the app’s service (47420), or one a test opts in with PHONE
   } finally { S.setIdleSleepRoleForTests({ sleeper: true }); }
 });
 
-test('the default is one constant, 15 minutes, and Never works as a default too', async () => {
+test('the default is one constant, off, and 15 minutes works as a default too', async () => {
   delete process.env.PHONEDOCK_IDLE_SLEEP;
   rmSync(join(process.env.PHONEDOCK_HOME!, 'idle-sleep.json'), { force: true });
-  assert.equal(S.DEFAULT_IDLE_SLEEP_SEC, 900);
+  assert.equal(S.DEFAULT_IDLE_SLEEP_SEC, null);
   try {
     for (const def of [900, null]) {
       S.setIdleSleepRoleForTests({ defaultSec: def });
