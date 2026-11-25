@@ -33,7 +33,7 @@ import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
 import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, withLifecycle } from './idle-sleep.ts';
 
-export const VERSION = '0.6.0';
+export const VERSION = '0.7.0';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;

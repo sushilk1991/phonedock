@@ -658,8 +658,9 @@ element refs are diagnostic identifiers, not native `e…` refs accepted by `/in
 
 ## Idle sleep
 Added in 0.7.0. A booted emulator holds its whole RAM (4–12 GB) even when unused for hours. Once an Android emulator
-PhoneDock created has gone unused for the idle timeout (the default is 15 minutes; `GET/POST /v1/idle-sleep`,
-`phonedock idle-sleep`, the app's Settings › General), it is stopped the ordinary way, freeing all of its memory. The
+PhoneDock created has gone unused for the idle timeout (off by default, 15 minutes suggested; `GET/POST
+/v1/idle-sleep`, `phonedock idle-sleep`, the app's Settings › General), it is stopped the ordinary way, freeing all of
+its memory. The
 next request that needs it boots it the ordinary way: usually right where it left off (its quick-boot save, about 5 s
 for a 3 GB phone on an M-series Mac); otherwise it restarts with its apps and data, and says so. Every failure or race
 ends one of those two ways, or as a request that fails and is safe to retry. Nothing copies, restores or replaces a disk
