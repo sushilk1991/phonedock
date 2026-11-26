@@ -32,6 +32,7 @@ import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTEN
 import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
 import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, withLifecycle } from './idle-sleep.ts';
+import { proxyManager } from './proxies.ts';
 
 export const VERSION = '0.7.0';
 const startedAt = Date.now();
@@ -177,6 +178,7 @@ r.del('/v1/devices/:id', async (c) => {
     stopStreamsFor(id);
     await stopRecordingFor(id, 'device deleted');
     await stopTraceFor(id, 'device deleted').catch(() => undefined);
+    await proxyManager().onDeviceDeleted(id);
     await need(b, 'delete', 'delete')(nid);
     removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
     invalidateDevices();
@@ -206,6 +208,8 @@ r.post('/v1/devices/:id/boot', async (c) => {
       forgetSleep(id);   // only now: a boot that fails leaves a sleeping phone asleep, for the sleeper's next wake
       p(`ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
       logAction(id, c.owner, { action: 'device.start' });
+      const booted = await getDevice(id, true);
+      await proxyManager().reapplyDevice(booted);
       return await getDevice(id, true);
     });
   }, id);
@@ -238,6 +242,7 @@ async function shutdownDevice(id: string, b: Backend, nid: string, owner: string
       stopStreamsFor(id);
       await stopRecordingFor(id, 'device shutdown');
       await stopTraceFor(id, 'device shutdown').catch(() => undefined);
+      await proxyManager().onDeviceStopped(id);
       await stop(nid);
     });
   } catch (e) { logAction(id, owner, { action: 'device.shutdown_failed', error: failText(e) }); throw e; }
@@ -269,6 +274,8 @@ r.post('/v1/devices/:id/restart', async (c) => {
     } catch (e) { logAction(id, owner, { action: 'device.restart_failed', error: failText(e) }); throw e; }
     p(`restarted in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     logAction(id, owner, { action: 'device.restart' });
+    const booted = await getDevice(id, true);
+    await proxyManager().reapplyDevice(booted);
     return await getDevice(id, true);
   }, id);
   return new Raw(202, JSON.stringify({ job }), { 'Content-Type': 'application/json' });

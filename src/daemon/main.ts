@@ -15,7 +15,9 @@ import './routes-notes.ts'; // app notes (same)
 import './routes-environment.ts';
 import './routes-diagnostics.ts';
 import './routes-idle.ts'; // GET/POST /v1/idle-sleep
+import './routes-proxy.ts'; // saved proxies and per-device proxy attachment
 import { enterRequest, isSleeping, startIdleSleep } from './idle-sleep.ts';
+import { proxyManager } from './proxies.ts';
 import { initComponents, stopComponents } from './routes-components.ts';
 import { refreshAgentSkills } from './skills.ts';
 import { abortAllTraces, reapOrphanTraces, traces } from './trace.ts';
@@ -85,6 +87,7 @@ server.on('error', (e) => { console.error(`[phonedockd] listen failed: ${(e as E
 server.listen(port, '127.0.0.1', () => {
   console.log(`[phonedockd] v${VERSION} listening on http://127.0.0.1:${port} (pid ${process.pid}); backends: ${backends.map((b) => b.id).join(', ')}`);
   void autoStart();
+  void listDevices(false).then((devs) => proxyManager().reconcileAll(devs)).catch(() => undefined);
   startIdleSleep();
   refreshAgentSkills(port).catch((e) => console.error(`[phonedockd] skill refresh failed: ${(e as Error).message}`));
 });
@@ -99,7 +102,12 @@ async function autoStart() {
     let b; try { b = getBackend(r.backend); } catch { continue; }
     if (!b.boot) continue;
     console.log(`[phonedockd] autoStart: booting ${r.id}`);
-    startJob('boot', async (p) => { await b.boot!(r.nativeId, { headless: r.spec?.headless ?? true, onProgress: p } as BootOptions); return { ok: true }; }, r.id);
+    startJob('boot', async (p) => {
+      await b.boot!(r.nativeId, { headless: r.spec?.headless ?? true, onProgress: p } as BootOptions);
+      const booted = (await listDevices(true, r.backend).catch(() => [])).find((x) => x.id === r.id);
+      if (booted) await proxyManager().reapplyDevice(booted);
+      return { ok: true };
+    }, r.id);
   }
 }
 
@@ -110,7 +118,9 @@ const shutdown = (sig: string) => {
   if (exiting) return; exiting = true;
   console.log(`[phonedockd] ${sig} – exiting (devices keep running)`); server.close();
   const stopTraces = traces.size ? Promise.race([abortAllTraces(`daemon exiting (${sig})`), new Promise((r) => setTimeout(r, 25_000))]) : Promise.resolve();
-  void stopTraces.finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
+  void stopTraces
+    .then(() => proxyManager().closeAll().catch(() => undefined))
+    .finally(() => { stopComponents(); closeOwnership(); setTimeout(() => process.exit(0), 300).unref(); });
 };
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

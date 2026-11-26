@@ -13,6 +13,7 @@ import {
   leaseView, listDevices, logAction, pendingHandoff, recordings, safeId, splitId, stopStreamsFor, uiCache, watched, withTransition,
 } from './core.ts';
 import { traces } from './trace.ts';
+import { proxyManager } from './proxies.ts';
 import { sleep } from '../core/exec.ts';
 import type { Ctx } from './http.ts';
 
@@ -225,12 +226,14 @@ const OBSERVE = new Set([
   'GET /v1/devices/:id/snapshots', 'GET /v1/devices/:id/info', 'GET /v1/devices/:id/trace', 'GET /v1/devices/:id/traces',
   'GET /v1/devices/:id/frame', 'GET /v1/devices/:id/stream', 'GET /v1/devices/:id/video', 'GET /v1/devices/:id/apps/:appId/data',
   'GET /v1/devices/:id/environment',   // the controls a kind of device supports: from its backend and kind alone
+  'GET /v1/devices/:id/proxy',
 ]);
 /** Lifecycle requests deal with a sleeping phone themselves (boot wakes it, shutdown and delete forget its sleep). */
 const CONTROL = new Set([
   'POST /v1/devices/:id/boot', 'POST /v1/devices/:id/shutdown', 'POST /v1/devices/:id/restart', 'DELETE /v1/devices/:id',
   'PATCH /v1/devices/:id', 'POST /v1/devices/:id/clone', 'DELETE /v1/devices/:id/lease', 'DELETE /v1/devices/:id/snapshots/:name',
   'POST /v1/devices/:id/window',   // a sleeping phone wakes with its own window, as a stopped one boots with it
+  'PUT /v1/devices/:id/proxy', 'DELETE /v1/devices/:id/proxy',   // attach/detach saves now and applies on wake
 ]);
 /** `X-PhoneDock-Observe: 1` on a GET (the app's background reads): never wakes, never counts. Other methods are use. */
 export const OBSERVE_HEADER = 'x-phonedock-observe';
@@ -352,6 +355,8 @@ export function wakeDevice(id: string, by = 'daemon', onProgress?: (l: string) =
       report = prior?.report ?? await b.wakeFromSleep(nativeId, marker.state, { ...boot, onProgress });
       try { await untilRunning(id, backend); }
       catch (e) { outcomes.set(id, prior ?? { ms: Date.now() - t0, name: marker.name, report, keptAt: now(), since: marker.since }); throw e; }
+      const wokenDev = await freshDevice(id, backend);
+      if (wokenDev) await proxyManager().reapplyDevice(wokenDev).catch(() => undefined);
     } catch (e) {
       const pe = e as PhoneDockError;
       logAction(id, by, { action: 'device.wake_failed', error: [pe.message ?? String(e), pe.hints?.[0]].filter(Boolean).join(' ').slice(0, 400) });
@@ -439,6 +444,7 @@ export async function sleepDevice(d: Pick<Device, 'id' | 'name' | 'nativeId'>, b
       return 'failed';
     }
     writeMarker(id, { ...marker, state: slept });
+    await proxyManager().onDeviceStopped(id).catch(() => undefined);
     uiCache.delete(id);
     const mins = Math.round(idleSec / 60);
     logAction(id, 'daemon', {
