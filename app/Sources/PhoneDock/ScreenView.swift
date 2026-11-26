@@ -9,6 +9,7 @@ struct ScreenInputHandlers {
     var pinch: (CGPoint, Double, Int) -> Void = { _, _, _ in }
     var type: (String) -> Void = { _ in }
     var paste: (String) -> Void = { _ in }
+    var pasteTooLarge: (Int) -> Void = { _ in }
     var copy: () -> Void = {}
     var key: (String) -> Void = { _ in }
     var dropFile: (URL) -> Void = { _ in }
@@ -153,23 +154,40 @@ final class DeviceScreenNSView: NSView {
         handlers.pinch(toDevice(anchor), scale, 300)
     }
 
+    static let maxPasteChars = 65_536
+
+    @objc func paste(_ sender: Any?) {
+        flushType()
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        if text.count > Self.maxPasteChars {
+            handlers.pasteTooLarge(text.count)
+            return
+        }
+        handlers.paste(text)
+    }
+
+    @objc func copy(_ sender: Any?) {
+        handlers.copy()
+    }
+
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(paste(_:)) {
+            return NSPasteboard.general.string(forType: .string)?.isEmpty == false
+        }
+        if item.action == #selector(copy(_:)) {
+            return true
+        }
+        return true
+    }
+
     override func keyDown(with e: NSEvent) {
         let special: [UInt16: String] = [36: "enter", 76: "enter", 51: "delete", 117: "delete", 53: "escape", 48: "tab",
                                          123: "left", 124: "right", 125: "down", 126: "up", 115: "home"]
         let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if mods == .command {
             let ch = e.charactersIgnoringModifiers?.lowercased()
-            if ch == "v" {
-                flushType()
-                if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
-                    handlers.paste(String(text.prefix(8192)))
-                }
-                return
-            }
-            if ch == "c" {
-                handlers.copy()
-                return
-            }
+            if ch == "v" { paste(nil); return }
+            if ch == "c" { copy(nil); return }
         }
         if e.modifierFlags.contains(.command) { super.keyDown(with: e); return }
         if let k = special[e.keyCode] {

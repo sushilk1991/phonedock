@@ -216,7 +216,14 @@ private struct DeviceLocationSection: View {
             .padding(.horizontal, Theme.Space.l)
             .disabled(disabled)
         }
-        .task(id: "\(device.id):\(device.state)") { await loadRoute() }
+        .task(id: "\(device.id):\(device.state)") {
+            await loadRoute()
+            while !Task.isCancelled && device.isRunning {
+                try? await Task.sleep(for: .seconds(route?.active == true ? 2 : 5))
+                if Task.isCancelled { break }
+                await loadRoute()
+            }
+        }
     }
 
     private func loadRoute() async {
@@ -254,13 +261,21 @@ private struct DeviceLocationSection: View {
         if let gpxType = UTType(filenameExtension: "gpx") {
             panel.allowedContentTypes = [gpxType, .xml]
         }
-        guard panel.runModal() == .OK, let url = panel.url,
-              let xml = try? String(contentsOf: url, encoding: .utf8),
-              let c = model.client else { return }
+        guard panel.runModal() == .OK, let url = panel.url, let c = model.client else { return }
         working = true
         Task {
             defer { working = false }
             do {
+                let xml: String = try await Task.detached(priority: .userInitiated) {
+                    let vals = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                    guard vals.isRegularFile == true else {
+                        throw APIError(status: 400, code: "bad_request", message: "Selected path is not a regular file.", hints: [], detail: nil)
+                    }
+                    if let sz = vals.fileSize, sz > 5 * 1024 * 1024 {
+                        throw APIError(status: 400, code: "bad_request", message: "GPX file exceeds the 5 MB limit.", hints: [], detail: nil)
+                    }
+                    return try String(contentsOf: url, encoding: .utf8)
+                }.value
                 struct StartResp: Decodable { var route: LocationRouteState? }
                 let data = try await c.send("POST", c.dev(device.id, "/location"), json: [
                     "gpx": xml,

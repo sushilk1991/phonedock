@@ -14,6 +14,7 @@ import {
 } from './core.ts';
 import { traces } from './trace.ts';
 import { proxyManager } from './proxies.ts';
+import { hasActiveLocationRoute } from './location-routes.ts';
 import { sleep } from '../core/exec.ts';
 import type { Ctx } from './http.ts';
 
@@ -205,6 +206,7 @@ export function keepAwakeReasons(id: string): string[] {
   if (pendingHandoff(id)) out.push('a person was asked to do something on it');
   if (recordings.has(id)) out.push('its screen is being recorded');
   if (traces.has(id)) out.push('a performance trace is running');
+  if (hasActiveLocationRoute(id)) out.push('a GPS route is playing');
   if (deviceJobRunning(id)) out.push('a job is running on it');
   if (watched(id)) out.push('its screen is on view');
   return out;
@@ -227,6 +229,7 @@ const OBSERVE = new Set([
   'GET /v1/devices/:id/frame', 'GET /v1/devices/:id/stream', 'GET /v1/devices/:id/video', 'GET /v1/devices/:id/apps/:appId/data',
   'GET /v1/devices/:id/environment',   // the controls a kind of device supports: from its backend and kind alone
   'GET /v1/devices/:id/proxy',
+  'GET /v1/devices/:id/location',
 ]);
 /** Lifecycle requests deal with a sleeping phone themselves (boot wakes it, shutdown and delete forget its sleep). */
 const CONTROL = new Set([
@@ -234,6 +237,7 @@ const CONTROL = new Set([
   'PATCH /v1/devices/:id', 'POST /v1/devices/:id/clone', 'DELETE /v1/devices/:id/lease', 'DELETE /v1/devices/:id/snapshots/:name',
   'POST /v1/devices/:id/window',   // a sleeping phone wakes with its own window, as a stopped one boots with it
   'PUT /v1/devices/:id/proxy', 'DELETE /v1/devices/:id/proxy',   // attach/detach saves now and applies on wake
+  'DELETE /v1/devices/:id/location',
 ]);
 /** `X-PhoneDock-Observe: 1` on a GET (the app's background reads): never wakes, never counts. Other methods are use. */
 export const OBSERVE_HEADER = 'x-phonedock-observe';

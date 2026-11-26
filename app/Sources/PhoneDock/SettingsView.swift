@@ -445,7 +445,7 @@ private struct SimSlimRowSection: View {
                             title: "Slim iOS simulators when booting",
                             detail: available
                                 ? (version.map { "Using \($0) · cuts RAM and background processes ~40%." } ?? "Cuts RAM and background processes ~40%.")
-                                : (loaded ? "Install simslim (`brew install sushilk1991/tap/simslim`) to enable." : "Checking SimSlim…")
+                                : (loaded ? "Install simslim (`brew install mobai-app/tap/simslim`) to enable." : "Checking SimSlim…")
                         )
                         if source == "env" {
                             Text("Set by PHONEDOCK_SIMSLIM_ENABLED for this background service.")

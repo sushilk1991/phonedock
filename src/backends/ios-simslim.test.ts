@@ -93,10 +93,11 @@ test('prepareSimslimBoot runs simslim on and caches parsed status', async () => 
     assert.equal(out.info?.slimmed, true);
     assert.equal(out.info?.disabledCount, 82);
     assert.equal(out.info?.managedTotal, 173);
-    assert.equal(calls[0][0], '/opt/homebrew/bin/simslim');
-    assert.ok(calls[0].includes('on'));
-    assert.ok(calls[0].includes(UDID));
-    assert.ok(calls[0].includes('--except'));
+    const onCall = calls.find((c) => c.includes('on'));
+    assert.ok(onCall);
+    assert.equal(onCall[0], '/opt/homebrew/bin/simslim');
+    assert.ok(onCall.includes(UDID));
+    assert.ok(onCall.includes('--except'));
     assert.equal(cachedSimslimStatus(UDID)?.disabledCount, 82);
   } finally {
     clearSimslimStatus(UDID);
@@ -112,6 +113,7 @@ test('prepareSimslimBoot falls back to stock boot and restores on simslim failur
     const deps = fakeDeps(dir, {
       runCmd: async (_cmd, args) => {
         calls.push(args);
+        if (args[0] === 'status') return { code: 0, stdout: JSON.stringify({ managedDisabled: 0, managedTotal: 173 }), stderr: '' };
         if (args.includes('on')) return { code: 1, stdout: '', stderr: 'runtime unsupported' };
         return { code: 0, stdout: '', stderr: '' };
       },
@@ -123,6 +125,43 @@ test('prepareSimslimBoot falls back to stock boot and restores on simslim failur
     assert.ok(calls.some((a) => a[0] === 'off' && a.includes('--preserve-boot-state')));
     assert.equal(cachedSimslimStatus(UDID)?.slimmed, false);
     assert.ok(notes.some((n) => /falling back/i.test(n)));
+  } finally {
+    clearSimslimStatus(UDID);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('prepareSimslimBoot preserves prior slim state on failed on, and honors explicit --no-slim stock restore', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pd-simslim-preserve-'));
+  const calls: string[][] = [];
+  try {
+    clearSimslimStatus(UDID);
+    // Already slimmed simulator: failed `on` must NOT call `off`
+    const deps = fakeDeps(dir, {
+      runCmd: async (_cmd, args) => {
+        calls.push(args);
+        if (args[0] === 'status') return { code: 0, stdout: JSON.stringify({ managedDisabled: 109, managedTotal: 173 }), stderr: '' };
+        if (args.includes('on')) return { code: 1, stdout: '', stderr: 'invalid profile' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    const out = await prepareSimslimBoot(UDID, { bootSlim: true, managed: true, alreadyBooted: false }, deps);
+    assert.equal(out.applied, false);
+    assert.equal(calls.some((a) => a.includes('off')), false);
+
+    // Explicit bootSlim: false (--no-slim) restores persistently slimmed simulator to stock
+    calls.length = 0;
+    const out2 = await prepareSimslimBoot(UDID, { bootSlim: false, managed: true, alreadyBooted: false }, deps);
+    assert.equal(out2.applied, false);
+    assert.ok(calls.some((a) => a.includes('off') && a.includes('--preserve-boot-state')));
+    assert.equal(cachedSimslimStatus(UDID)?.slimmed, false);
+
+    // off --no-reboot rejected; failed status throws instead of caching stock
+    await assert.rejects(simslimDeviceAction(UDID, 'off', { noReboot: true }, deps), (e: any) => e.code === 'bad_request');
+    const failStatusDeps = fakeDeps(dir, {
+      runCmd: async () => ({ code: 1, stdout: '', stderr: 'simulator offline' }),
+    });
+    await assert.rejects(simslimDeviceAction(UDID, 'status', {}, failStatusDeps), (e: any) => e.code === 'simslim_failed');
   } finally {
     clearSimslimStatus(UDID);
     rmSync(dir, { recursive: true, force: true });

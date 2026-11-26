@@ -59,11 +59,22 @@ async function runPythonHelper(scriptPath: string, payload: Record<string, unkno
   try {
     parsed = JSON.parse(r.stdout || '{}');
   } catch {
-    throw new PhoneDockError('The iOS Simulator Web Inspector returned an invalid response', 'webview_debug_failed', 502, undefined,
-      (r.stderr || r.stdout).trim().slice(0, 500));
+    throw new PhoneDockError(
+      'The iOS Simulator Web Inspector returned an invalid response',
+      'webview_debug_failed',
+      502,
+      undefined,
+      `helper_invalid_json (exit=${r.code}, bytes=${Buffer.byteLength(r.stdout ?? '', 'utf8')})`,
+    );
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new PhoneDockError('The iOS Simulator Web Inspector returned an invalid response', 'webview_debug_failed', 502);
+    throw new PhoneDockError(
+      'The iOS Simulator Web Inspector returned an invalid response',
+      'webview_debug_failed',
+      502,
+      undefined,
+      `helper_invalid_shape (exit=${r.code})`,
+    );
   }
   return parsed as Record<string, unknown>;
 }

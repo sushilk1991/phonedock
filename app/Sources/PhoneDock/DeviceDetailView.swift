@@ -430,7 +430,13 @@ private struct LiveScreen: View {
             // While an agent's help request is open, what the person types is usually a password, code or card
             // number: send it as secret, so Activity, the action log and saved flows show ••• instead of the text.
             type: { t in send(["action": "type", "text": t, "secret": model.pendingHandoff(for: d.id) != nil]) },
-            paste: { t in send(["action": "type", "text": t, "secret": model.pendingHandoff(for: d.id) != nil]) },
+            // Clipboard pastes may contain passwords, tokens, or codes even outside a handoff: always mark secret.
+            paste: { t in send(["action": "type", "text": t, "secret": true]) },
+            pasteTooLarge: { count in
+                model.fail("Clipboard text is too large to paste (\(count) characters; limit \(DeviceScreenNSView.maxPasteChars))",
+                           APIError(status: 400, code: "bad_request", message: "Shorten the text or send a file instead.", hints: [], detail: nil),
+                           device: d)
+            },
             copy: {
                 guard d.can("clipboard"), let c = model.client else { return }
                 Task {

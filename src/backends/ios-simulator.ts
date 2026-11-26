@@ -1543,7 +1543,13 @@ export const backend: Backend = {
     const coords = waypoints.map((w) => `${w.lat},${w.lon}`);
     await simctl(['location', udid, 'start', `--speed=${speed}`, ...coords]);
   },
-  async clearLocation(udid) { await simctl(['location', udid, 'clear'], { allowFail: true }); },
+  async clearLocation(udid) {
+    const r = await simctl(['location', udid, 'clear'], { allowFail: true });
+    if (r.code !== 0 && !/Shutdown|not booted|Invalid device state/i.test(r.stderr)) {
+      throw new PhoneDockError('Couldn’t clear the simulated location', 'location_failed', 500, undefined,
+        `simctl location clear failed: ${r.stderr.trim().slice(0, 300)}`);
+    }
+  },
 
   async pushNotification(udid, appId, payload) {
     const dir = mkdtempSync(join(tmpdir(), 'pd-push-'));

@@ -7,7 +7,8 @@
 // gets SIGTERM/SIGINT; the daemon also reclaims leases whose owner process (mcp:<client>:<pid>) has exited.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { readBoundedGpxFile } from '../core/gpx.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -991,7 +992,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       return { content: [text(r.stopped ? `Stopped GPS route on ${d.name}.` : `Cleared simulated location on ${d.name}.`)] };
     }
     if (a.gpx_path || a.waypoints) {
-      const gpx = a.gpx_path ? readFileSync(expandHome(a.gpx_path), 'utf8') : undefined;
+      const gpx = a.gpx_path ? readBoundedGpxFile(expandHome(a.gpx_path)) : undefined;
       const r = await c.startLocationRoute(d.id, { ...(gpx ? { gpx } : {}), ...(a.waypoints ? { waypoints: a.waypoints } : {}), ...(a.speed_mps !== undefined ? { speedMps: a.speed_mps } : {}), loop: a.loop });
       return { content: [text(`Started GPS route on ${d.name} (${r.route.waypoints} waypoints at ${r.route.speedMps} m/s${r.route.loop ? ', looping' : ''}).`)] };
     }

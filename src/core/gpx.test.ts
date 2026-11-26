@@ -72,7 +72,7 @@ test('location route manager uses native startLocationRoute when available and s
   assert.deepEqual(nativeCalls, [['pdtest-gpx', 3, 3.5]]);
   assert.equal(getLocationRouteStatus('ios-simulator:pdtest-gpx').active, true);
 
-  assert.equal(await stopLocationRoute('ios-simulator:pdtest-gpx'), true);
+  assert.equal(await stopLocationRoute('ios-simulator:pdtest-gpx').then((r) => r.stopped), true);
   assert.equal(cleared, 1);
   assert.equal(getLocationRouteStatus('ios-simulator:pdtest-gpx').active, false);
 
@@ -84,13 +84,42 @@ test('location route manager uses native startLocationRoute when available and s
   } as unknown as Backend;
 
   const st2 = await startDeviceLocationRoute('android-emulator:pdtest-gpx', androidBackend, 'pdtest-gpx', {
-    points: [{ lat: 37.7749, lon: -122.4194 }, { lat: 37.775, lon: -122.4193 }],
-    speedMps: 100,
+    points: [{ lat: 37.7749, lon: -122.4194 }, { lat: 37.7849, lon: -122.4194 }],
+    speedMps: 1,
     loop: false,
   });
   assert.equal(st2.active, true);
   assert.equal(st2.mode, 'stepper');
+  // Current stays at the starting point until the next fix actually completes
+  assert.deepEqual(st2.current, { lat: 37.7749, lon: -122.4194 });
   assert.deepEqual(fixes[0], [37.7749, -122.4194]);
   await stopLocationRoute('android-emulator:pdtest-gpx');
   assert.equal(getLocationRouteStatus('android-emulator:pdtest-gpx').active, false);
+});
+
+test('stop drains an in-flight start and looping stepper still calls clearLocation', async () => {
+  let releaseFirst!: () => void;
+  const firstPending = new Promise<void>((r) => { releaseFirst = r; });
+  let clearCalls = 0;
+  const slowBackend = {
+    id: 'ios-simulator',
+    setLocation: async () => { await firstPending; },
+    clearLocation: async () => { clearCalls++; },
+  } as unknown as Backend;
+
+  const startP = startDeviceLocationRoute('ios-simulator:pdtest-race', slowBackend, 'pdtest-race', {
+    points: [{ lat: 37.77, lon: -122.41 }, { lat: 37.78, lon: -122.42 }],
+    speedMps: 5,
+    loop: true,
+  });
+  const stopP = stopLocationRoute('ios-simulator:pdtest-race', true, slowBackend, 'pdtest-race');
+  releaseFirst();
+  await Promise.all([startP, stopP]);
+  assert.equal(getLocationRouteStatus('ios-simulator:pdtest-race').active, false);
+  assert.equal(clearCalls, 1);
+});
+
+test('parseGpx rejects files exceeding MAX_GPX_POINTS instead of dropping the destination', () => {
+  const pts = Array.from({ length: 10_001 }, (_, i) => `<trkpt lat="${(i % 80)}" lon="0"/>`).join('');
+  assert.throws(() => parseGpx(`<gpx><trk><trkseg>${pts}</trkseg></trk></gpx>`), (e: any) => e.code === 'bad_request');
 });

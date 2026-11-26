@@ -158,9 +158,9 @@ class PhoneDock:
         return self._request("GET", self._dev(device_id, "/audit"), query={"includeOffscreen": include_offscreen})
 
     def inspect_webview(self, device_id: str, app_id: Optional[str] = None, action: str = "snapshot",
-                        selector: Optional[str] = None, target_id: Optional[str] = None,
-                        bounds: Optional[Dict[str, float]] = None, capture_ms: Optional[int] = None,
-                        max_elements: Optional[int] = None) -> Dict[str, Any]:
+                        target_id: Optional[str] = None, bounds: Optional[Dict[str, float]] = None,
+                        capture_ms: Optional[int] = None, max_elements: Optional[int] = None, *,
+                        selector: Optional[str] = None) -> Dict[str, Any]:
         body = {k: v for k, v in {"appId": app_id, "action": action, "selector": selector, "targetId": target_id,
                                 "bounds": bounds, "captureMs": capture_ms, "maxElements": max_elements}.items() if v is not None}
         return self._request("POST", self._dev(device_id, "/webview"), body)

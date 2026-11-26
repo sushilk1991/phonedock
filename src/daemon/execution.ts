@@ -34,7 +34,11 @@ const queues = new Map<string, Promise<unknown>>();
 const epochs = new Map<string, number>();
 export const inputScope = () => storage.getStore();
 export const ownershipEpoch = (id: string) => epochs.get(id) ?? 0;
-export function ownershipChanged(id: string): void { epochs.set(id, ownershipEpoch(id) + 1); }
+export const ownershipChangeListeners = new Set<(id: string) => void>();
+export function ownershipChanged(id: string): void {
+  epochs.set(id, ownershipEpoch(id) + 1);
+  for (const fn of ownershipChangeListeners) { try { fn(id); } catch { /* listener error */ } }
+}
 export function assertInputActive(): void { storage.getStore()?.assertAllowed(); }
 export function inputWasSent(id: string, owner: string, action: unknown): void {
   const s = storage.getStore();

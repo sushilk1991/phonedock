@@ -56,7 +56,7 @@ export async function buildDoctorReport(deps: DoctorDeps = defaults): Promise<Do
       ? 'simslim is available to cut iOS simulator RAM and background processes'
       : 'simslim not found (optional: cuts iOS simulator RAM/CPU ~40%)',
     ...(simslimPath ? { path: simslimPath } : {}),
-    ...(!simslimPresent ? { hints: ['Optional: install simslim (`brew install sushilk1991/tap/simslim`) and enable it in Settings › General › Memory or `phonedock simslim on`.'] } : {}),
+    ...(!simslimPresent ? { hints: ['Optional: install simslim (`brew install mobai-app/tap/simslim`) and enable it in Settings › General › iOS Simulators or `phonedock simslim on`.'] } : {}),
   });
   let nativeOk = false; let timer: NodeJS.Timeout | undefined;
   try {

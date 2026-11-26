@@ -31,9 +31,13 @@ import { inputRoute } from './delivery.ts';
 import { encodeVideoPacket, pingMessage, stillMessage, videoHeader, VIDEO_CONTENT_TYPE, VIDEO_MSG, type VideoSink } from '../core/video.ts';
 import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
-import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, withLifecycle } from './idle-sleep.ts';
+import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, touchUse, withLifecycle } from './idle-sleep.ts';
 import { proxyManager } from './proxies.ts';
-import { getLocationRouteStatus, parseLocationRouteInput, startDeviceLocationRoute, stopLocationRoute } from './location-routes.ts';
+import {
+  cancelLocationRouteOnOwnershipChange, getLocationRouteStatus, parseLocationRouteInput, setFixedDeviceLocation, startDeviceLocationRoute, stopLocationRoute,
+} from './location-routes.ts';
+import { ownershipChangeListeners } from './execution.ts';
+ownershipChangeListeners.add(cancelLocationRouteOnOwnershipChange);
 
 export const VERSION = '0.8.0';
 const startedAt = Date.now();
@@ -190,9 +194,10 @@ r.del('/v1/devices/:id', async (c) => {
 r.post('/v1/devices/:id/boot', async (c) => {
   const { id, b, nid } = dev(c);
   const boot = need(b, 'boot', 'boot');
-  await getDevice(id);
+  const curDev = await getDevice(id);
   await assertSleepTarget(id);
   const opts = (await c.body()) as BootOptions;
+  if (curDev.state === 'running' || opts.slim !== undefined) checkLease(id, c.owner);
   const job = startJob('boot', async (p) => {
     const t0 = Date.now();
     // A phone PhoneDock put to sleep wakes with these options (a cold or windowed start as asked), usually where it left
@@ -204,6 +209,8 @@ r.post('/v1/devices/:id/boot', async (c) => {
     }
     return withLifecycle(id, async () => {
       await settleSleep(id);
+      const latest = await getDevice(id, true).catch(() => curDev);
+      if (latest.state === 'running' || opts.slim !== undefined) checkLease(id, c.owner);
       p(`booting ${id}${opts.coldBoot ? ' (cold)' : ''}`);
       try { await boot(nid, { ...opts, onProgress: p } as BootOptions); }
       catch (e) { logAction(id, c.owner, { action: 'device.start_failed', error: failText(e) }); throw e; }
@@ -830,23 +837,24 @@ r.post('/v1/devices/:id/location', async (c) => {
   const body = (await c.body()) as Record<string, unknown>;
   if (typeof body.gpx === 'string' || Array.isArray(body.waypoints)) {
     const spec = parseLocationRouteInput(body);
-    const status = await startDeviceLocationRoute(id, b, nid, spec);
+    const status = await startDeviceLocationRoute(id, b, nid, spec, c.owner, {
+      verifyOwner: (devId, owner) => { assertDeviceAllowed(devId); checkLease(devId, owner); },
+      onActivity: (devId) => touchUse(devId),
+    });
     logAction(id, c.owner, { action: 'location.route', waypoints: spec.points.length, speedMps: spec.speedMps, loop: spec.loop });
     return { ok: true, route: status };
   }
   const lat = Number(body.lat), lon = Number(body.lon);
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) throw badRequest('lat (-90..90) and lon (-180..180) required');
-  await stopLocationRoute(id, false);
-  await need(b, 'setLocation', 'location', ['Physical Android devices need a mock-location app'])(nid, lat, lon);
+  await setFixedDeviceLocation(id, b, nid, lat, lon);
   logAction(id, c.owner, { action: 'location', lat, lon });
   return { ok: true };
 });
 r.del('/v1/devices/:id/location', async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);
-  const stopped = await stopLocationRoute(id, true);
-  if (!stopped && b.clearLocation) await b.clearLocation(nid).catch(() => undefined);
-  logAction(id, c.owner, { action: 'location.stop' });
-  return { ok: true, stopped };
+  const { stopped, cleared } = await stopLocationRoute(id, true, b, nid);
+  logAction(id, c.owner, { action: 'location.stop', stopped, cleared });
+  return { ok: true, stopped, cleared };
 });
 r.post('/v1/devices/:id/push', async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);

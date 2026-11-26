@@ -12,6 +12,7 @@ import { localTime } from '../backends/ios-common.ts';
 import { appNotesDir, appNotesPath } from '../core/app-notes.ts';
 import { parseEnvironmentAction } from '../core/environment.ts';
 import { launchSummarySuffix } from '../core/launch-options.ts';
+import { readBoundedGpxFile } from '../core/gpx.ts';
 import type { LaunchArgs } from '../core/types.ts';
 
 const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | rm <appId> | path [appId]';
@@ -1029,7 +1030,7 @@ export async function run(argv: string[]): Promise<number> {
       }
       const gpxPath = str(a.flags, 'gpx');
       if (gpxPath) {
-        const gpx = readFileSync(resolve(gpxPath), 'utf8');
+        const gpx = readBoundedGpxFile(resolve(gpxPath));
         const speedMps = num(a.flags, 'speed');
         const r = await c.startLocationRoute(d.id, { gpx, ...(speedMps !== undefined ? { speedMps } : {}), loop: a.flags.loop === true });
         out(r, () => `Started GPX route on ${d.name} (${r.route.waypoints} waypoints at ${r.route.speedMps} m/s${r.route.loop ? ', looping' : ''})`);

@@ -3,6 +3,7 @@
 import { PhoneDockError } from '../core/types.ts';
 import { setSimslimSetting, simslimDeviceAction, simslimStatus } from '../backends/ios-simslim.ts';
 import { checkLease, invalidateDevices } from './core.ts';
+import { withLifecycle } from './idle-sleep.ts';
 import { badRequest, notSupported } from './http.ts';
 import { dev, router as r } from './routes.ts';
 
@@ -33,12 +34,19 @@ r.post('/v1/devices/:id/simslim', async (c) => {
   if (!['status', 'measure', 'on', 'off'].includes(action)) {
     throw new PhoneDockError('action must be status, measure, on, or off', 'bad_request', 400);
   }
-  if (action === 'on' || action === 'off') checkLease(id, c.owner);
-  const info = await simslimDeviceAction(nid, action as 'status' | 'measure' | 'on' | 'off', {
+  const actionOpts = {
     except: Array.isArray(body?.except) ? (body.except as string[]) : undefined,
     profilePath: 'profilePath' in (body ?? {}) ? (body.profilePath as string | null) : undefined,
     noReboot: body?.noReboot === true,
-  });
-  if (action === 'on' || action === 'off') invalidateDevices();
-  return info;
+  };
+  if (action === 'on' || action === 'off') {
+    checkLease(id, c.owner);
+    return withLifecycle(id, async () => {
+      checkLease(id, c.owner);
+      const info = await simslimDeviceAction(nid, action, actionOpts);
+      invalidateDevices();
+      return info;
+    });
+  }
+  return simslimDeviceAction(nid, action as 'status' | 'measure', actionOpts);
 });

@@ -1035,7 +1035,7 @@ export class PhoneDockClient {
     return this.request('POST', this.dev(id, '/location'), { body: opts });
   }
   locationRoute(id: string): Promise<LocationRouteStatus> { return this.request('GET', this.dev(id, '/location')); }
-  stopLocationRoute(id: string): Promise<{ ok: boolean; stopped: boolean }> { return this.request('DELETE', this.dev(id, '/location')); }
+  stopLocationRoute(id: string): Promise<{ ok: boolean; stopped: boolean; cleared?: boolean }> { return this.request('DELETE', this.dev(id, '/location')); }
   pushNotification(id: string, appId: string, payload: Record<string, unknown>): Promise<{ ok: boolean }> {
     return this.request('POST', this.dev(id, '/push'), { body: { appId, payload } });
   }

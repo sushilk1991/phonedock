@@ -11,7 +11,22 @@ import socket
 import struct
 import sys
 import time
+import urllib.parse
 import uuid
+
+
+def redact_url(raw: str) -> str:
+    try:
+        u = urllib.parse.urlsplit(str(raw))
+        if u.scheme not in ("http", "https", "ws", "wss"):
+            return f"{u.scheme}:[redacted]" if u.scheme else "[unavailable URL]"
+        host = u.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = f"{host}:{u.port}" if u.port else host
+        return urllib.parse.urlunsplit((u.scheme, netloc, u.path, "", ""))[:4096]
+    except Exception:
+        return "[unavailable URL]"
 
 
 def send_rpc(sock: socket.socket, selector: str, args: dict) -> None:
@@ -121,7 +136,7 @@ def setup_target(sock: socket.socket, conn_id: str, app_key: str, page_id, sende
         try:
             msg = recv_rpc(sock)
         except socket.timeout:
-            break
+            continue
         if msg.get("__selector") != "_rpc_applicationSentData:":
             continue
         raw = (msg.get("__argument") or {}).get("WIRMessageDataKey") or b""
@@ -208,18 +223,24 @@ def capture_network(sock, conn_id, app_key, page_id, sender, target_id, capture_
     send_inspector_cmd(sock, conn_id, app_key, page_id, sender, target_id, 2, "Network.enable", {})
     requests = {}
     truncated = False
+    enabled_ok = False
     deadline = time.time() + max(0.05, min(5.0, capture_ms / 1000.0))
     while time.time() < deadline:
-        sock.settimeout(max(0.05, deadline - time.time()))
+        sock.settimeout(max(0.05, min(0.35, deadline - time.time())))
         try:
             msg = recv_rpc(sock)
         except socket.timeout:
-            break
+            continue
         if msg.get("__selector") != "_rpc_applicationSentData:":
             continue
         raw = (msg.get("__argument") or {}).get("WIRMessageDataKey") or b""
         payload = unwrap_inspector_msg(raw)
         if not isinstance(payload, dict):
+            continue
+        if payload.get("id") == 2:
+            if payload.get("error"):
+                return {"error": "Network.enable rejected by Web Inspector"}
+            enabled_ok = True
             continue
         method = payload.get("method")
         params = payload.get("params") or {}
@@ -234,7 +255,7 @@ def capture_network(sock, conn_id, app_key, page_id, sender, target_id, capture_
             ts = params.get("timestamp")
             requests[req_id] = {
                 "method": str(req.get("method") or "?")[:16],
-                "url": str(req.get("url") or ""),
+                "url": redact_url(str(req.get("url") or "")),
                 "start": ts if isinstance(ts, (int, float)) else None,
             }
         elif req_id in requests:
@@ -249,6 +270,8 @@ def capture_network(sock, conn_id, app_key, page_id, sender, target_id, capture_
                     entry["durationMs"] = max(0, int(round((ts - entry["start"]) * 1000)))
                 if method == "Network.loadingFailed":
                     entry["failed"] = True
+    if not enabled_ok and not requests:
+        return {"error": "Network.enable was not acknowledged by Web Inspector"}
     out = []
     for r in requests.values():
         item = {"method": r["method"], "url": r["url"]}
@@ -323,7 +346,7 @@ def main():
                 "code": "ambiguous_target",
                 "error": "Choose one inspectable Safari tab or WebView target",
                 "availableTargets": [
-                    {"id": p["id"], "appId": p["appId"], "title": p["title"][:200], "url": p["url"]}
+                    {"id": p["id"], "appId": p["appId"], "title": p["title"][:200], "url": redact_url(p["url"])}
                     for p in pages[:20]
                 ],
             }))
@@ -335,12 +358,15 @@ def main():
             "id": selected["id"],
             "appId": selected["appId"],
             "title": selected["title"][:200],
-            "url": selected["url"],
+            "url": redact_url(selected["url"]),
         }
 
         if action == "network":
             net = capture_network(sock, conn_id, selected["appKey"], selected["pageId"], sender, target_id, capture_ms)
-            sys.stdout.write(json.dumps({"ok": True, "target": target_out, **net}))
+            if "error" in net:
+                sys.stdout.write(json.dumps({"ok": False, "code": "webview_debug_failed", "error": net["error"]}))
+            else:
+                sys.stdout.write(json.dumps({"ok": True, "target": target_out, **net}))
         else:
             ev = eval_js(sock, conn_id, selected["appKey"], selected["pageId"], sender, target_id, str(expression or "null"))
             if "error" in ev:

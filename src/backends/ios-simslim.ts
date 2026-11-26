@@ -264,9 +264,27 @@ export async function prepareSimslimBoot(
   deps: SimslimDeps = defaultDeps,
 ): Promise<SlimBootOutcome> {
   const plan = resolveSlimBootPlan(opts, deps);
-  if (!plan.want) return { applied: false };
-
   const bin = deps.resolveBinary();
+
+  // Explicit --no-slim / slim: false on a persistently slimmed simulator: restore to stock before booting.
+  if (!plan.want) {
+    if (opts.bootSlim === false && bin) {
+      const prior = await probeSlimState(udid, bin, deps);
+      if (prior === true) {
+        opts.onProgress?.('restoring simulator to stock before boot…');
+        const off = await deps.runCmd(bin, ['--boot-timeout', '3m', 'off', udid, '--preserve-boot-state'], { allowFail: true, timeoutMs: 120_000 })
+          .catch((e: unknown) => ({ code: 1, stdout: '', stderr: e instanceof Error ? e.message : String(e) }));
+        if (off.code === 0) {
+          deviceSlimCache.set(udid, { slimmed: false, disabledCount: 0, checkedAt: new Date().toISOString() });
+        } else {
+          const detail = (off.stderr || off.stdout || `exit ${off.code}`).trim().slice(0, 200);
+          opts.onProgress?.(`could not restore simulator to stock (${detail}); booting as-is`);
+        }
+      }
+    }
+    return { applied: false };
+  }
+
   if (!bin) {
     const fallbackReason = 'simslim is not installed; booted stock simulator';
     if (plan.explicit) {
@@ -281,10 +299,11 @@ export async function prepareSimslimBoot(
   if (plan.profilePath && !deps.exists(plan.profilePath)) {
     const fallbackReason = `SimSlim profile not found (${plan.profilePath}); booted stock simulator`;
     opts.onProgress?.(fallbackReason);
-    const info: SimslimDeviceInfo = { slimmed: false, checkedAt: new Date().toISOString(), fallbackReason };
-    deviceSlimCache.set(udid, info);
-    return { applied: false, info, fallbackReason };
+    return { applied: false, fallbackReason };
   }
+
+  // Record prior slim state so a failed attempt does not erase a pre-existing slim profile.
+  const priorSlimmed = await probeSlimState(udid, bin, deps);
 
   const profileArgs = simslimProfileArgs({ profilePath: plan.profilePath, except: plan.except });
   const args = ['--boot-timeout', '3m', 'on', udid, ...profileArgs, ...(opts.alreadyBooted ? ['--no-reboot'] : [])];
@@ -296,13 +315,21 @@ export async function prepareSimslimBoot(
 
   if (res.code !== 0) {
     const detail = (res.stderr || res.stdout || `exit ${res.code}`).trim().slice(0, 240);
-    const fallbackReason = `simslim failed (${detail}); falling back to stock simulator boot`;
+    const validationFailure = /invalid profile|unknown category|flag provided|mutually exclusive|no such file|parse profile/i.test(detail);
+    let rollbackNote = '';
+    if (priorSlimmed === false && !validationFailure) {
+      const rb = await deps.runCmd(bin, ['off', udid, '--preserve-boot-state'], { allowFail: true, timeoutMs: 60_000 })
+        .catch((e: unknown) => ({ code: 1, stdout: '', stderr: e instanceof Error ? e.message : String(e) }));
+      if (rb.code !== 0) rollbackNote = ' (rollback also failed)';
+    }
+    const fallbackReason = `simslim failed (${detail})${rollbackNote}; falling back to stock simulator boot`;
     opts.onProgress?.(fallbackReason);
-    // Best-effort restore so the simulator isn't left half-slimmed.
-    await deps.runCmd(bin, ['off', udid, '--preserve-boot-state'], { allowFail: true, timeoutMs: 60_000 }).catch(() => undefined);
-    const info: SimslimDeviceInfo = { slimmed: false, checkedAt: new Date().toISOString(), fallbackReason };
-    deviceSlimCache.set(udid, info);
-    return { applied: false, info, fallbackReason };
+    if (priorSlimmed !== true) {
+      const info: SimslimDeviceInfo = { slimmed: false, checkedAt: new Date().toISOString(), fallbackReason };
+      deviceSlimCache.set(udid, info);
+      return { applied: false, info, fallbackReason };
+    }
+    return { applied: false, fallbackReason };
   }
 
   const stRes = await deps.runCmd(bin, ['status', udid, '--json'], { allowFail: true, timeoutMs: 15_000 }).catch(() => undefined);
@@ -316,6 +343,16 @@ export async function prepareSimslimBoot(
   return { applied: true, info };
 }
 
+async function probeSlimState(udid: string, bin: string, deps: SimslimDeps): Promise<boolean | undefined> {
+  const cached = deviceSlimCache.get(udid);
+  const r = await deps.runCmd(bin, ['status', udid, '--json'], { allowFail: true, timeoutMs: 10_000 }).catch(() => undefined);
+  if (r?.code === 0) {
+    const raw = parseJsonSafe(r.stdout);
+    if (raw) return parseSimslimReport(raw).slimmed;
+  }
+  return cached?.slimmed;
+}
+
 export async function simslimDeviceAction(
   udid: string,
   action: 'status' | 'measure' | 'on' | 'off',
@@ -323,10 +360,13 @@ export async function simslimDeviceAction(
   deps: SimslimDeps = defaultDeps,
 ): Promise<SimslimDeviceInfo> {
   if (!UDID_RE.test(udid)) throw new PhoneDockError('Invalid simulator UDID', 'bad_request', 400);
+  if (action === 'off' && opts.noReboot) {
+    throw new PhoneDockError('simslim off requires a simulator reboot and does not support noReboot', 'bad_request', 400);
+  }
   const bin = deps.resolveBinary();
   if (!bin) {
     throw new PhoneDockError('SimSlim is not installed on this Mac', 'not_supported', 501,
-      ['Install simslim (e.g. `brew install sushilk1991/tap/simslim`) or set PHONEDOCK_SIMSLIM.']);
+      ['Install simslim (`brew install mobai-app/tap/simslim`) or set PHONEDOCK_SIMSLIM.']);
   }
 
   const setting = simslimSetting(deps);
@@ -367,9 +407,17 @@ export async function simslimDeviceAction(
 
   const stJson = stRes?.code === 0 ? parseJsonSafe(stRes.stdout) : undefined;
   const measJson = measRes?.code === 0 ? parseJsonSafe(measRes.stdout) : undefined;
+  if (action === 'status' && !stJson) {
+    throw new PhoneDockError('SimSlim could not read simulator status', 'simslim_failed', 502,
+      ['Make sure the simulator is booted and simslim is working.'],
+      (stRes?.stderr || stRes?.stdout || 'invalid status output').trim().slice(0, 400));
+  }
+  if (action === 'measure' && !measJson) {
+    throw new PhoneDockError('SimSlim returned invalid measurement output', 'simslim_failed', 502);
+  }
   const merged = stJson || measJson ? { ...(stJson ?? {}), ...(measJson ?? {}) } : undefined;
   const info = parseSimslimReport(merged, { profile: profilePath ?? undefined, except: profilePath ? undefined : except });
   if (action === 'on') info.slimmed = true;
-  deviceSlimCache.set(udid, info);
+  if (stJson || action === 'on') deviceSlimCache.set(udid, info);
   return info;
 }
