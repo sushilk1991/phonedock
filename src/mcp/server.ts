@@ -24,6 +24,7 @@ import { promptWarning, registerExtraTools } from './tools-extra.ts';
 import { registerFlowTools } from './tools-flow.ts';
 import { notesHint, registerNotesTools } from './tools-notes.ts';
 import { registerTraceTools } from './tools-trace.ts';
+import { registerProxyTools } from './tools-proxy.ts';
 import { formatUiObservation, humanNeeded, noteBatchDeviceWrite, resolveObserve, type FormatUiResult, type ObserveMode } from './ui-format.ts';
 export { humanNeeded };
 
@@ -182,6 +183,7 @@ const TOOL_META: Record<string, [string, Hints]> = {
   app_notes: ['Read / save app notes', { ...SAFE, idempotentHint: true }],
   list_runs: ['List recorded flow runs', READ],
   get_run: ['Get flow run details or PR Markdown', READ],
+  device_proxy: ['Manage and attach device proxies', { destructiveHint: false, openWorldHint: true }],
 };
 /** Title + hints for a tool; tools not in the table get a title from their name ("save_flow" → "Save flow"). */
 export function toolMeta(name: string): Hints & { title: string } {
@@ -1059,6 +1061,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
   registerFlowTools(kit);
   registerTraceTools(kit);
   registerNotesTools(kit);
+  registerProxyTools(kit);
 
   return server;
 }

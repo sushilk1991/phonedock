@@ -925,6 +925,41 @@ class PhoneDock:
     def release(self, device_id: str) -> Dict[str, Any]:
         return self._request("POST", "/v1/pool/release", {"owner": self.owner, "deviceId": device_id})
 
+    # ── proxies ───────────────────────────────────────────────────────────
+    def proxies(self) -> List[Dict[str, Any]]:
+        """List saved proxies (passwords are never returned)."""
+        return self._request("GET", "/v1/proxies")
+
+    def test_proxy_url(self, url: str) -> Dict[str, Any]:
+        """Test an unsaved proxy URL on the spot and return exit IP, country, and latency."""
+        return self._request("POST", "/v1/proxies/test", {"url": url})
+
+    def add_proxy(self, name: str, url: str, test: bool = False) -> Dict[str, Any]:
+        """Save an HTTP or SOCKS5 proxy."""
+        body: Dict[str, Any] = {"name": name, "url": url}
+        if test:
+            body["test"] = True
+        return self._request("POST", "/v1/proxies", body)
+
+    def update_proxy(self, proxy_id: str, name: Optional[str] = None, url: Optional[str] = None) -> Dict[str, Any]:
+        body = {k: v for k, v in {"name": name, "url": url}.items() if v is not None}
+        return self._request("PATCH", f"/v1/proxies/{_q(proxy_id)}", body)
+
+    def delete_proxy(self, proxy_id: str) -> Dict[str, Any]:
+        return self._request("DELETE", f"/v1/proxies/{_q(proxy_id)}")
+
+    def test_proxy(self, proxy_id: str) -> Dict[str, Any]:
+        return self._request("POST", f"/v1/proxies/{_q(proxy_id)}/test", {})
+
+    def device_proxy(self, device_id: str) -> Dict[str, Any]:
+        return self._request("GET", self._dev(device_id, "/proxy"))
+
+    def attach_proxy(self, device_id: str, proxy_id: str) -> Dict[str, Any]:
+        return self._request("PUT", self._dev(device_id, "/proxy"), {"proxyId": proxy_id})
+
+    def detach_proxy(self, device_id: str) -> Dict[str, Any]:
+        return self._request("DELETE", self._dev(device_id, "/proxy"))
+
     # ── events ────────────────────────────────────────────────────────────
     def events(self) -> Iterator[Dict[str, Any]]:
         """Yield {event, data} from the SSE stream (blocking)."""

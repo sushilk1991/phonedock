@@ -19,5 +19,5 @@ export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, Lease,
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
-  DeviceSleep,
+  DeviceSleep, ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState,
 } from './client.ts';

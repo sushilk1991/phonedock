@@ -223,6 +223,10 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
   It returns hangs and main-thread hot spots (iOS) or janky frames and frame times (Android). Change the code,
   rebuild, reinstall, and trace the same flow again: `stop_trace` shows each metric before → after.
   See [the performance loop](references/recipes.md#performance-loop).
+- **Route an Android device through a proxy.** `device_proxy action="test" url="socks5://…"` checks exit IP and country
+  before saving; `action="add" name="…" url="…"` saves it (0600 store, password never returned/logged);
+  `action="attach" device="…" proxy_id="…"` applies live on Android emulators and phones without restart (apps honoring
+  system HTTP proxy; UDP/QUIC not proxied; iOS returns `not_supported`). `action="detach"` clears it.
 
 Errors come back as results with a code and hints (`no_match` lists what is on screen; `not_supported` means this
 device can't do that, or that a managed component like `ios-tools` or `axe` is still setting up — check

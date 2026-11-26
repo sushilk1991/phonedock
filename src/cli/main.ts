@@ -19,7 +19,9 @@ const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | r
 // Keep flow parsing, visual comparison and report generation out of ordinary CLI startup.
 // Help still uses the commands' own text, so it cannot drift from their usage output.
 async function helpText(): Promise<string> {
-  const [{ FLOW_HELP }, { RUNS_HELP }, { TRACE_USAGE }] = await Promise.all([import('./flow-cmds.ts'), import('./runs-cmds.ts'), import('./trace-cmds.ts')]);
+  const [{ FLOW_HELP }, { RUNS_HELP }, { TRACE_USAGE }, { PROXY_USAGE }] = await Promise.all([
+    import('./flow-cmds.ts'), import('./runs-cmds.ts'), import('./trace-cmds.ts'), import('./proxy-cmds.ts'),
+  ]);
   return `phonedock – device runtime for AI agents
 
 Usage: phonedock <command> [args] [--json] [--owner NAME]
@@ -61,6 +63,8 @@ System:     shell <id> -- <cmd…> | push <id> <local> <remote> | pull <id> <rem
             notify <id> <appId> '<json payload>' | appearance <id> [dark|light]   (no mode: show the current one)
             settings <id> [key=value ...] | settings <id> --reset
             clipboard <id> [--get | --set TEXT]   (prints the text as is; --set with no TEXT reads it from stdin)
+            ${PROXY_USAGE}
+              Saved HTTP/SOCKS5 proxies (0600 store; pass "-" for URL to read from stdin). Applies live on Android.
 Multi-agent: lease <id> [--ttl S] [--force] | release <id> [--pool]
             acquire [--platform P] [--backend B] [--ttl S]
 Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <code> | disconnect <id>
@@ -1103,6 +1107,9 @@ export async function run(argv: string[]): Promise<number> {
     }
     case 'trace': case 'perf': {
       const { traceCmd } = await import('./trace-cmds.ts'); return traceCmd(c, a, JSON_OUT);
+    }
+    case 'proxy': case 'proxies': {
+      const { proxyCmd } = await import('./proxy-cmds.ts'); return proxyCmd(c, a, JSON_OUT);
     }
     default: usage(`Unknown command "${cmd}". Run \`phonedock help\`.`);
   }

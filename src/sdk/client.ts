@@ -22,7 +22,8 @@ import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } fr
 import type { UiAuditResult } from '../core/ui-audit.ts';
 import type { DoctorReport, DeviceDiagnosis } from '../core/doctor.ts';
 import type { WebViewOptions, WebViewResult } from '../backends/android-webview.ts';
-export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult };
+import type { ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState } from '../core/proxy.ts';
+export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult, ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState };
 
 export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, LaunchArgs, LaunchArgValue, LaunchOptions, Lease,
@@ -1070,6 +1071,40 @@ export class PhoneDockClient {
   /** Pair with just the code shown on the phone, then connect and wait until it is online. `serial` picks the phone when several show a pairing screen. */
   pairWithCode(code: string, opts: { serial?: string; restartAdb?: boolean } = {}): Promise<{ ok: boolean; device?: Device; message?: string; serial?: string }> {
     return this.request('POST', '/v1/pair', { body: { code, ...opts } });
+  }
+
+  // ── proxies ─────────────────────────────────────────────────────────────
+  /** List saved proxies (passwords are never returned). */
+  proxies(): Promise<ProxyView[]> { return this.request('GET', '/v1/proxies'); }
+  /** Test an unsaved proxy URL on the spot (returns exit IP, country, latency). */
+  testProxyUrl(url: string): Promise<ProxyTestResult> { return this.request('POST', '/v1/proxies/test', { body: { url } }); }
+  /** Save a new HTTP or SOCKS5 proxy; pass `test: true` to test before saving. */
+  addProxy(name: string, url: string, opts: { test?: boolean; lastTest?: ProxyTestResult } = {}): Promise<ProxyView> {
+    return this.request('POST', '/v1/proxies', { body: { name, url, ...opts } });
+  }
+  /** Update a saved proxy's name and/or URL. */
+  updateProxy(id: string, patch: { name?: string; url?: string }): Promise<ProxyView> {
+    return this.request('PATCH', `/v1/proxies/${enc(id)}`, { body: patch });
+  }
+  /** Delete a saved proxy (detaches any devices using it). */
+  deleteProxy(id: string): Promise<{ ok: boolean; detachedDevices: string[] }> {
+    return this.request('DELETE', `/v1/proxies/${enc(id)}`);
+  }
+  /** Test a saved proxy and update its stored lastTest result. */
+  testProxy(id: string): Promise<{ proxy: ProxyView; result: ProxyTestResult }> {
+    return this.request('POST', `/v1/proxies/${enc(id)}/test`, { body: {} });
+  }
+  /** Current proxy state for a device. */
+  deviceProxy(deviceId: string): Promise<DeviceProxyState> {
+    return this.request('GET', this.dev(deviceId, '/proxy'));
+  }
+  /** Attach a saved proxy to an Android device (applies live without restart; 501 on iOS). */
+  attachProxy(deviceId: string, proxyId: string): Promise<DeviceProxyState> {
+    return this.request('PUT', this.dev(deviceId, '/proxy'), { body: { proxyId } });
+  }
+  /** Detach any proxy from a device. */
+  detachProxy(deviceId: string): Promise<DeviceProxyState> {
+    return this.request('DELETE', this.dev(deviceId, '/proxy'));
   }
 }
 

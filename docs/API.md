@@ -1121,3 +1121,23 @@ person), kept between runs and shared by every client of the daemon: one Markdow
 `GET /v1/metrics` requires the daemon bearer token. It returns `routes`, `backends`, and `phases` timing in milliseconds, with lifetime `count` and `max`, and `p50`/`p95` computed from the most recent 1,024 samples per key. Routes are identified by method and route template; backend operations by backend ID and method. Long-lived stream routes measure handler setup rather than stream lifetime. Frame, screenshot, and input responses include a `Server-Timing: route;dur=...` header when headers have not already been sent.
 
 `phases["input.queue"]` measures time waiting for a device input slot; `phases["input.execute"]` measures the route handler inside that slot. Optional UI enrichment occurs afterward and is not included in `input.execute`. These are daemon timings, not device frame times or evidence of a speedup.
+
+## Proxies
+
+Bring-your-own HTTP (`http://`) and SOCKS5 (`socks5://`, `socks5h://`) proxies. Saved proxies live in `$PHONEDOCK_HOME/proxies.json` (mode `0600`). Passwords are never returned by any route, never written to `actions.jsonl`, and scrubbed from error strings; responses return a redacted `url` (`http://user:***@host:port`) and `hasAuth: true`.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | /v1/proxies | – | `ProxyView[]` (passwords omitted; `url` redacted) |
+| POST | /v1/proxies/test | `{ url }` | `ProxyTestResult`: `{ ok, ip?, country?, city?, org?, latencyMs, at, error? }` (tests an unsaved proxy on the spot via HTTPS IP echo, without saving) |
+| POST | /v1/proxies | `{ name, url, test?: boolean, lastTest? }` | `201 ProxyView` |
+| POST | /v1/proxies/:pid/test | – | `{ proxy: ProxyView, result: ProxyTestResult }` (persists `lastTest`) |
+| PATCH | /v1/proxies/:pid | `{ name?, url? }` | `ProxyView` (updating `url` rotates active forwarders and re-applies to running Android devices) |
+| DELETE | /v1/proxies/:pid | – | `{ ok: true, detachedDevices: string[] }` |
+| GET | /v1/devices/:id/proxy | – | `DeviceProxyState`: `{ deviceId, supported, reason?, proxyId, proxy, applied, localPort?, error?, note? }` (observe-only; never wakes a sleeping phone) |
+| PUT | /v1/devices/:id/proxy | `{ proxyId }` | `DeviceProxyState` (needs the lease; applies live on Android without restart; `501 not_supported` on iOS) |
+| DELETE | /v1/devices/:id/proxy | – | `DeviceProxyState` (needs the lease; detaches proxy and clears Android `http_proxy` + reverse tunnel) |
+
+* **Android (emulators and real Android phones over adb):** the daemon runs one local HTTP forwarder per attached proxy bound strictly to `127.0.0.1` on an ephemeral port, relaying only to the configured upstream (HTTP CONNECT with Basic auth or SOCKS5/SOCKS5H with RFC 1929 auth). It forwards the port with `adb -s <serial> reverse tcp:P tcp:P` and sets `adb -s <serial> shell settings put global http_proxy 127.0.0.1:P`. Multiple Android devices can share one proxy forwarder; the forwarder closes when the last attached device detaches or stops. Attachments persist across reboots, idle-sleep wakes, and daemon restarts. Android's global HTTP proxy covers apps that honor the system proxy; UDP/QUIC is not proxied (Chrome falls back to TCP).
+* **iOS:** iOS simulators share the Mac's network stack and real iPhones keep their HTTP proxy in Settings › Wi-Fi on the device, so `PUT`/`DELETE /v1/devices/:id/proxy` return `501 not_supported` with an explanation and hint.
+* **Surfaces:** CLI `phonedock proxy ls|add|test|rm|attach|detach|show` (`-` reads URL from stdin), MCP tool `device_proxy`, TypeScript/Python SDKs, and **Settings › Proxies** + **Info › Proxy** in the Mac app. SSE emits `event: proxies` when saved proxies change, and `Device.meta.proxy` exposes redacted attachment metadata.

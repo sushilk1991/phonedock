@@ -87,7 +87,7 @@ paths are confined to an approved root, including symlinks; compare/record/updat
 known secret text is redacted but screenshot pixels remain original.
 
 ## State on disk (`~/Library/Application Support/PhoneDock`, override with `PHONEDOCK_HOME`)
-`daemon.json` (port/token/pid) · `state.json` (managed devices) · `avd/` (PhoneDock-owned AVDs, isolated
+`daemon.json` (port/token/pid) · `state.json` (managed devices) · `proxies.json` (mode 0600, saved proxies & attachments) · `avd/` (PhoneDock-owned AVDs, isolated
 from `~/.android/avd`) · `qemu/<vm>/` · `ios-snapshots/` (APFS copy-on-write clones of simulator data) ·
 `devices/<id>/actions.jsonl` · `device-claims.sqlite` (plus SQLite WAL/SHM files) · `requests/` (bounded input receipts) · `downloads/` · `bin/pd-ocr` · `logs/`.
 
