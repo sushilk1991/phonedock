@@ -34,7 +34,7 @@ import { requestResult } from './requests.ts';
 import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, withLifecycle } from './idle-sleep.ts';
 import { proxyManager } from './proxies.ts';
 
-export const VERSION = '0.7.0';
+export const VERSION = '0.8.0';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;
