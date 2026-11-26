@@ -4,6 +4,10 @@ import AppKit
 // Bring your own proxy: Settings › Proxies (paste, test exit IP/country on the spot, save, delete)
 // and InfoTab › Proxy (live attach/detach picker on Android devices; honest explanation on iOS).
 
+extension Notification.Name {
+    static let phoneDockProxiesChanged = Notification.Name("PhoneDockProxiesChanged")
+}
+
 // MARK: - Models
 
 struct ProxyTestResult: Codable, Equatable, Sendable {
@@ -255,8 +259,11 @@ struct ProxiesSettings: View {
         Task {
             defer { testingDraft = false }
             do {
-                draftTest = try await c.testProxyUrl(url)
+                let res = try await c.testProxyUrl(url)
+                guard trimmedUrl == url else { return }
+                draftTest = res
             } catch {
+                guard trimmedUrl == url else { return }
                 draftTest = nil
                 draftError = (error as? APIError)?.message ?? error.localizedDescription
             }
@@ -278,6 +285,7 @@ struct ProxiesSettings: View {
                 nameInput = ""
                 urlInput = ""
                 draftTest = nil
+                NotificationCenter.default.post(name: .phoneDockProxiesChanged, object: nil)
             } catch {
                 draftError = (error as? APIError)?.message ?? error.localizedDescription
             }
@@ -294,6 +302,7 @@ struct ProxiesSettings: View {
                 if let idx = proxies.firstIndex(where: { $0.id == proxy.id }) {
                     proxies[idx] = res.proxy
                 }
+                NotificationCenter.default.post(name: .phoneDockProxiesChanged, object: nil)
             } catch {
                 loadError = (error as? APIError)?.message ?? error.localizedDescription
             }
@@ -306,6 +315,7 @@ struct ProxiesSettings: View {
             do {
                 try await c.deleteProxy(proxy.id)
                 proxies.removeAll { $0.id == proxy.id }
+                NotificationCenter.default.post(name: .phoneDockProxiesChanged, object: nil)
             } catch {
                 loadError = (error as? APIError)?.message ?? error.localizedDescription
             }
@@ -408,6 +418,12 @@ struct DeviceProxyView: View {
             }
         }
         .task(id: "\(device.id):\(device.state)") { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: .phoneDockProxiesChanged)) { _ in
+            Task { await load() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            Task { await load() }
+        }
     }
 
     private func pickerLabel(_ p: SavedProxy) -> String {

@@ -18,6 +18,9 @@ export interface ProxyTestResult {
   country?: string;
   city?: string;
   org?: string;
+  timezone?: string;
+  lat?: number;
+  lon?: number;
   latencyMs: number;
   at: string;
   error?: string;
@@ -56,6 +59,7 @@ export interface DeviceProxyState {
   proxy: ProxyView | null;
   applied: boolean;
   localPort?: number;
+  locationSynced?: { lat: number; lon: number; city?: string; country?: string };
   error?: string;
   note?: string;
 }

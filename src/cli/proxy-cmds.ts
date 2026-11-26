@@ -3,7 +3,7 @@ import type { PhoneDockClient, ProxyTestResult, ProxyView, DeviceProxyState } fr
 import { table, type ParsedArgs } from './args.ts';
 
 export const PROXY_USAGE =
-  'proxy ls | add <name> <url|-> [--test] | test <url|id|-> | rm <id> | attach <device> <id> | detach <device> | show <device>';
+  'proxy ls | add <name> <url|-> [--test] | test <url|id|-> | rm <id> | attach <device> <id> [--sync-location] | detach <device> | show <device>';
 
 async function readStdinLine(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -23,7 +23,8 @@ function fmtDeviceProxy(st: DeviceProxyState, name: string): string {
   if (!st.proxy) return `${name}: no proxy attached`;
   const status = st.error ? `error: ${st.error}` : st.applied ? `active (127.0.0.1:${st.localPort})` : 'saved (applies on boot)';
   const exit = st.proxy.lastTest?.ok ? ` · exit ${fmtTest(st.proxy.lastTest)}` : '';
-  return `${name}: ${st.proxy.name} [${st.proxy.id}] ${st.proxy.url} — ${status}${exit}${st.note ? `\n  ${st.note}` : ''}`;
+  const synced = st.locationSynced ? `\n  GPS synced to ${st.locationSynced.lat},${st.locationSynced.lon}${st.locationSynced.city ? ` (${[st.locationSynced.city, st.locationSynced.country].filter(Boolean).join(', ')})` : ''}` : '';
+  return `${name}: ${st.proxy.name} [${st.proxy.id}] ${st.proxy.url} — ${status}${exit}${synced}${st.note ? `\n  ${st.note}` : ''}`;
 }
 
 async function resolveUrlArg(raw: string): Promise<string> {
@@ -65,14 +66,14 @@ export async function proxyCmd(c: PhoneDockClient, a: ParsedArgs, jsonOut: boole
     case 'test': {
       if (p.length < 3) throw new Error('Usage: phonedock proxy test <url|id|->');
       const arg = await resolveUrlArg(p[2]);
-      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(arg)) {
-        const res = await c.testProxyUrl(arg);
-        emit(res, () => res.ok ? `OK: ${fmtTest(res)}` : `FAILED: ${fmtTest(res)}`);
-        return res.ok ? 0 : 1;
+      if (/^px_[0-9a-f]{8}$/i.test(arg)) {
+        const res = await c.testProxy(arg);
+        emit(res, () => `${res.proxy.name} [${res.proxy.id}]: ${res.result.ok ? 'OK' : 'FAILED'} — ${fmtTest(res.result)}`);
+        return res.result.ok ? 0 : 1;
       }
-      const res = await c.testProxy(arg);
-      emit(res, () => `${res.proxy.name} [${res.proxy.id}]: ${res.result.ok ? 'OK' : 'FAILED'} — ${fmtTest(res.result)}`);
-      return res.result.ok ? 0 : 1;
+      const res = await c.testProxyUrl(arg);
+      emit(res, () => res.ok ? `OK: ${fmtTest(res)}` : `FAILED: ${fmtTest(res)}`);
+      return res.ok ? 0 : 1;
     }
     case 'rm': case 'remove': case 'delete': {
       if (p.length < 3) throw new Error('Usage: phonedock proxy rm <id>');
@@ -81,9 +82,9 @@ export async function proxyCmd(c: PhoneDockClient, a: ParsedArgs, jsonOut: boole
       return 0;
     }
     case 'attach': {
-      if (p.length < 4) throw new Error('Usage: phonedock proxy attach <device> <proxyId>');
+      if (p.length < 4) throw new Error('Usage: phonedock proxy attach <device> <proxyId> [--sync-location]');
       const d = await c.resolveDevice(p[2]);
-      const st = await c.attachProxy(d.id, p[3]);
+      const st = await c.attachProxy(d.id, p[3], { syncLocation: a.flags.syncLocation === true });
       emit(st, () => fmtDeviceProxy(st, d.name));
       return 0;
     }

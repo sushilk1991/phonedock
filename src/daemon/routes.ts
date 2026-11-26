@@ -178,8 +178,8 @@ r.del('/v1/devices/:id', async (c) => {
     stopStreamsFor(id);
     await stopRecordingFor(id, 'device deleted');
     await stopTraceFor(id, 'device deleted').catch(() => undefined);
-    await proxyManager().onDeviceDeleted(id);
     await need(b, 'delete', 'delete')(nid);
+    await proxyManager().onDeviceDeleted(id);
     removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
     invalidateDevices();
     return { ok: true };
@@ -242,8 +242,8 @@ async function shutdownDevice(id: string, b: Backend, nid: string, owner: string
       stopStreamsFor(id);
       await stopRecordingFor(id, 'device shutdown');
       await stopTraceFor(id, 'device shutdown').catch(() => undefined);
-      await proxyManager().onDeviceStopped(id);
       await stop(nid);
+      await proxyManager().onDeviceStopped(id);
     });
   } catch (e) { logAction(id, owner, { action: 'device.shutdown_failed', error: failText(e) }); throw e; }
   uiCache.delete(id);
@@ -306,6 +306,8 @@ r.post('/v1/devices/:id/window', async (c) => {
   // A sleeping phone wakes with its own window, as a stopped one boots with it (no scrcpy needed).
   if (await ensureAwake(id, c.owner, undefined, { headless: false })) return { ok: true };
   await open(nid);
+  const opened = await getDevice(id, true).catch(() => undefined);
+  if (opened) await proxyManager().reapplyDevice(opened).catch(() => undefined);
   return { ok: true };
 });
 /** Snapshots the emulator keeps for itself (quick boot) are not the person's: never listed. */
@@ -333,6 +335,7 @@ r.post('/v1/devices/:id/snapshots/:name/restore', async (c) => {
     throw e;
   }
   logAction(id, c.owner, { action: 'snapshot.restore', name: c.params.name });
+  await proxyManager().reapplyDevice(d).catch(() => undefined);
   return { ok: true };
 });
 r.del('/v1/devices/:id/snapshots/:name', async (c) => {
@@ -974,6 +977,8 @@ r.post('/v1/pool/acquire', async (c) => {
       throw e;
     }
     invalidateDevices();
+    const booted = await getDevice(d.id, true);
+    await proxyManager().reapplyDevice(booted).catch(() => undefined);
     return { device: await getDevice(d.id, true), lease };
   };
   // Explicit device: lease exactly that one (boot it if stopped). Respects existing leases unless force.

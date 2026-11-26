@@ -237,19 +237,25 @@ async function negotiateHttpConnect(socket: net.Socket, proxy: ProxyEndpoint, ta
     }
     socket.write(headers.join('\r\n') + '\r\n\r\n');
 
-    const raw = await reader.readUntil(Buffer.from('\r\n\r\n'), MAX_HEADER_BYTES);
-    const firstLine = raw.toString('latin1').split('\r\n', 1)[0] ?? '';
-    const m = /^HTTP\/1\.[01]\s+(\d{3})(?:\s+(.*))?$/i.exec(firstLine);
-    if (!m) {
-      throw new PhoneDockError('Proxy returned an invalid HTTP CONNECT response', 'proxy_connect_failed', 502, undefined, scrub(firstLine, proxy));
+    // RFC 9110 §9.3.6: consume any 1xx informational responses and accept any 2xx final status.
+    for (let hop = 0; hop < 8; hop++) {
+      const raw = await reader.readUntil(Buffer.from('\r\n\r\n'), MAX_HEADER_BYTES);
+      const firstLine = raw.toString('latin1').split('\r\n', 1)[0] ?? '';
+      const m = /^HTTP\/1\.[01]\s+(\d{3})(?:\s+(.*))?$/i.exec(firstLine);
+      if (!m) {
+        throw new PhoneDockError('Proxy returned an invalid HTTP CONNECT response', 'proxy_connect_failed', 502, undefined, scrub(firstLine, proxy));
+      }
+      const status = Number(m[1]);
+      if (status >= 100 && status < 200) continue;
+      if (status === 407) {
+        throw new PhoneDockError('Proxy authentication failed', 'proxy_auth_failed', 502, ['Check the proxy username and password.'], `HTTP 407 ${m[2] ?? ''}`.trim());
+      }
+      if (status < 200 || status >= 300) {
+        throw new PhoneDockError(`Proxy refused CONNECT (HTTP ${status})`, 'proxy_connect_failed', 502, undefined, scrub(firstLine, proxy));
+      }
+      return;
     }
-    const status = Number(m[1]);
-    if (status === 407) {
-      throw new PhoneDockError('Proxy authentication failed', 'proxy_auth_failed', 502, ['Check the proxy username and password.'], `HTTP 407 ${m[2] ?? ''}`.trim());
-    }
-    if (status !== 200) {
-      throw new PhoneDockError(`Proxy refused CONNECT (HTTP ${status})`, 'proxy_connect_failed', 502, undefined, scrub(firstLine, proxy));
-    }
+    throw new PhoneDockError('Proxy sent too many 1xx informational responses', 'proxy_connect_failed', 502);
   } finally {
     reader.release();
   }
@@ -492,12 +498,24 @@ export async function testProxy(proxy: ProxyEndpoint, opts: TestProxyOptions = {
       const country = typeof data.country === 'string' && data.country.trim() ? data.country.trim() : undefined;
       const city = typeof data.city === 'string' && data.city.trim() ? data.city.trim() : undefined;
       const org = typeof data.org === 'string' && data.org.trim() ? data.org.trim() : undefined;
+      const timezone = typeof data.timezone === 'string' && data.timezone.trim() ? data.timezone.trim() : undefined;
+      let lat: number | undefined;
+      let lon: number | undefined;
+      if (typeof data.loc === 'string') {
+        const parts = data.loc.split(',').map((s) => Number(s.trim()));
+        if (parts.length === 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1]) && Math.abs(parts[0]) <= 90 && Math.abs(parts[1]) <= 180) {
+          lat = parts[0];
+          lon = parts[1];
+        }
+      }
       return {
         ok: true,
         ip,
         ...(country ? { country } : {}),
         ...(city ? { city } : {}),
         ...(org ? { org } : {}),
+        ...(timezone ? { timezone } : {}),
+        ...(lat !== undefined && lon !== undefined ? { lat, lon } : {}),
         latencyMs: Math.max(1, Math.round(performance.now() - t0)),
         at: new Date().toISOString(),
       };

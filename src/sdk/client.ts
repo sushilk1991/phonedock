@@ -1098,9 +1098,10 @@ export class PhoneDockClient {
   deviceProxy(deviceId: string): Promise<DeviceProxyState> {
     return this.request('GET', this.dev(deviceId, '/proxy'));
   }
-  /** Attach a saved proxy to an Android device (applies live without restart; 501 on iOS). */
-  attachProxy(deviceId: string, proxyId: string): Promise<DeviceProxyState> {
-    return this.request('PUT', this.dev(deviceId, '/proxy'), { body: { proxyId } });
+  /** Attach a saved proxy to an Android device (applies live without restart; 501 on iOS).
+   *  With `syncLocation: true`, also sets emulator GPS to match the proxy's exit coordinates when known. */
+  attachProxy(deviceId: string, proxyId: string, opts: { syncLocation?: boolean } = {}): Promise<DeviceProxyState> {
+    return this.request('PUT', this.dev(deviceId, '/proxy'), { body: { proxyId, ...(opts.syncLocation ? { syncLocation: true } : {}) } });
   }
   /** Detach any proxy from a device. */
   detachProxy(deviceId: string): Promise<DeviceProxyState> {

@@ -228,7 +228,7 @@ test('redactProxySecrets scrubs raw, percent-encoded, base64, and URL-embedded p
 // ── HTTP CONNECT & SOCKS5 clients ───────────────────────────────────────────
 
 test('testProxy works through HTTP CONNECT with and without auth, fails on wrong auth, and supports fallback', async () => {
-  const echo = await startEchoServer({ ip: '198.51.100.7', country: 'US', city: 'Boston', org: 'AS64500 TestNet' });
+  const echo = await startEchoServer({ ip: '198.51.100.7', country: 'US', city: 'Boston', org: 'AS64500 TestNet', loc: '42.3584,-71.0598', timezone: 'America/New_York' });
   const badEcho = await startEchoServer({ error: 'rate limited' }, { status: 429 });
   const openProxy = await startFakeHttpProxy();
   const authProxy = await startFakeHttpProxy({ expectedAuth: 'user1:topsecret' });
@@ -242,6 +242,9 @@ test('testProxy works through HTTP CONNECT with and without auth, fails on wrong
     assert.equal(r1.ip, '198.51.100.7');
     assert.equal(r1.country, 'US');
     assert.equal(r1.city, 'Boston');
+    assert.equal(r1.timezone, 'America/New_York');
+    assert.equal(r1.lat, 42.3584);
+    assert.equal(r1.lon, -71.0598);
 
     // Authenticated HTTP proxy (right password)
     const r2 = await testProxy(
@@ -360,5 +363,40 @@ test('startProxyForwarder chains CONNECT and plain HTTP to both HTTP and SOCKS5 
     assert.equal(p2.ip, '198.51.100.88');
   } finally {
     await Promise.all([fwHttp.close(), fwSocks.close(), httpUp.close(), socksUp.close(), echo.close()]);
+  }
+});
+
+test('HTTP CONNECT accepts 1xx informational responses and any 2xx final status (RFC 9110)', async () => {
+  const echo = await startEchoServer({ ip: '198.51.100.99', country: 'US' });
+  const srv = net.createServer((client) => {
+    let head = '';
+    const onData = (chunk: Buffer) => {
+      head += chunk.toString('latin1');
+      if (!head.includes('\r\n\r\n')) return;
+      client.off('data', onData);
+      const first = head.split('\r\n', 1)[0] ?? '';
+      const target = first.split(' ')[1] ?? '';
+      const [host, portStr] = target.split(':');
+      const up = net.connect(Number(portStr), host, () => {
+        client.write('HTTP/1.1 103 Early Hints\r\nLink: </>\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n');
+        client.pipe(up);
+        up.pipe(client);
+      });
+      up.on('error', () => client.destroy());
+      client.on('error', () => up.destroy());
+    };
+    client.on('data', onData);
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as net.AddressInfo).port;
+  try {
+    const r = await testProxy(
+      { scheme: 'http', host: '127.0.0.1', port },
+      { endpoints: [{ url: `http://127.0.0.1:${echo.port}/json` }] },
+    );
+    assert.equal(r.ok, true);
+    assert.equal(r.ip, '198.51.100.99');
+  } finally {
+    await Promise.all([new Promise<void>((r) => srv.close(() => r())), echo.close()]);
   }
 });

@@ -13,7 +13,7 @@ export interface ParseSpec {
 }
 
 export const GLOBAL_BOOLEAN = ['json', 'help', 'wait', 'no-wait', 'window', 'cold', 'boot', 'auto-start', 'force', 'system', 'headless', 'no-ocr', 'load', 'quiet', 'debug', 'pool',
-  'reset', 'secret', 'submit', 'full', 'all', 'restart-adb', 'android', 'dry-run', 'check', 'uninstall', 'launch', 'get', 'test'];
+  'reset', 'secret', 'submit', 'full', 'all', 'restart-adb', 'android', 'dry-run', 'check', 'uninstall', 'launch', 'get', 'test', 'sync-location'];
 /** Flags that always consume the next token as a value, even when it starts with `-` (e.g. `--arg -UITesting`). */
 export const VALUE_FLAGS = new Set(['arg', 'extra', 'args-json', 'env']);
 export const GLOBAL_ALIAS: Record<string, string> = { o: 'output', n: 'lines', h: 'help', j: 'json', q: 'quiet' };

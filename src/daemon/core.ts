@@ -371,10 +371,14 @@ export function dropLeaseOnStop(id: string) {
 // ── devices (aggregated, 2s cache) ──────────────────────────────────────────
 let devCache: { at: number; list: Device[] } | undefined;
 // Publish the completed scan; forcing a refresh here would immediately scan every backend again.
+export const inventoryUpdateListeners: ((backend: string, devices: Device[]) => void)[] = [];
 const inventory = new BackendInventory({
   onUpdate(backend, devices) {
     devCache = undefined;
-    if (devices) pruneLaunchSecrets(devices, backend);
+    if (devices) {
+      pruneLaunchSecrets(devices, backend);
+      for (const f of inventoryUpdateListeners) { try { f(backend, devices); } catch { /* best effort */ } }
+    }
     if (sseClients.size) setTimeout(() => void pollDevices(false), 50).unref();
   },
 });

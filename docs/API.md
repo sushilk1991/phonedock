@@ -1129,13 +1129,13 @@ Bring-your-own HTTP (`http://`) and SOCKS5 (`socks5://`, `socks5h://`) proxies. 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | /v1/proxies | – | `ProxyView[]` (passwords omitted; `url` redacted) |
-| POST | /v1/proxies/test | `{ url }` | `ProxyTestResult`: `{ ok, ip?, country?, city?, org?, latencyMs, at, error? }` (tests an unsaved proxy on the spot via HTTPS IP echo, without saving) |
+| POST | /v1/proxies/test | `{ url }` | `ProxyTestResult`: `{ ok, ip?, country?, city?, org?, timezone?, lat?, lon?, latencyMs, at, error? }` (tests an unsaved proxy on the spot via HTTPS IP echo, without saving) |
 | POST | /v1/proxies | `{ name, url, test?: boolean, lastTest? }` | `201 ProxyView` |
 | POST | /v1/proxies/:pid/test | – | `{ proxy: ProxyView, result: ProxyTestResult }` (persists `lastTest`) |
 | PATCH | /v1/proxies/:pid | `{ name?, url? }` | `ProxyView` (updating `url` rotates active forwarders and re-applies to running Android devices) |
 | DELETE | /v1/proxies/:pid | – | `{ ok: true, detachedDevices: string[] }` |
-| GET | /v1/devices/:id/proxy | – | `DeviceProxyState`: `{ deviceId, supported, reason?, proxyId, proxy, applied, localPort?, error?, note? }` (observe-only; never wakes a sleeping phone) |
-| PUT | /v1/devices/:id/proxy | `{ proxyId }` | `DeviceProxyState` (needs the lease; applies live on Android without restart; `501 not_supported` on iOS) |
+| GET | /v1/devices/:id/proxy | – | `DeviceProxyState`: `{ deviceId, supported, reason?, proxyId, proxy, applied, localPort?, locationSynced?, error?, note? }` (observe-only; never wakes a sleeping phone) |
+| PUT | /v1/devices/:id/proxy | `{ proxyId, syncLocation?: boolean }` | `DeviceProxyState` (needs the lease; applies live on Android without restart; optional `syncLocation: true` sets emulator GPS to the proxy's exit coordinates; `501 not_supported` on iOS) |
 | DELETE | /v1/devices/:id/proxy | – | `DeviceProxyState` (needs the lease; detaches proxy and clears Android `http_proxy` + reverse tunnel) |
 
 * **Android (emulators and real Android phones over adb):** the daemon runs one local HTTP forwarder per attached proxy bound strictly to `127.0.0.1` on an ephemeral port, relaying only to the configured upstream (HTTP CONNECT with Basic auth or SOCKS5/SOCKS5H with RFC 1929 auth). It forwards the port with `adb -s <serial> reverse tcp:P tcp:P` and sets `adb -s <serial> shell settings put global http_proxy 127.0.0.1:P`. Multiple Android devices can share one proxy forwarder; the forwarder closes when the last attached device detaches or stops. Attachments persist across reboots, idle-sleep wakes, and daemon restarts. Android's global HTTP proxy covers apps that honor the system proxy; UDP/QUIC is not proxied (Chrome falls back to TCP).

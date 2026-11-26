@@ -71,6 +71,7 @@ Raw input in one call (device pixels): `phonedock input <id> '[{"action":"tap","
 | Navigation | `back <id>` · `gesture <id> go_home` · `key <id> enter` · `hide-keyboard <id>` · `swipe <id> x1 y1 x2 y2` |
 | System prompts | `alert <id>` (shows it; exit 1 when none is up) · `alert <id> accept` · `alert <id> dismiss` · `alert <id> button "Allow Once"` |
 | Look and feel | `appearance <id> dark` · `rotate <id> landscape` · `location <id> <lat> <lon>` |
+| Proxies | `proxy test <url\|id\|->` · `proxy add <name> <url\|-> [--test]` · `proxy ls` · `proxy attach <id> <proxyId> [--sync-location]` · `proxy detach <id>` · `proxy show <id>` |
 | Debugging | `logs <id> -n 200 --filter MyApp` · `crashes <id> --since 15m` · `crashes <id> <crashId>` · `foreground <id>` |
 | Evidence | `screenshot <id> -o file.png` · `record <id> start --max 120` … `record <id> stop` |
 | Performance | `trace start <id> --app <appId> [--template T] [--time-limit 60] [--launch]` … `trace stop <id>` (summary, compared with the last run) · `trace run <id> --app <appId> --flow f.yaml` · `trace ls <id>` |

@@ -19,7 +19,8 @@ function fmtDeviceProxy(st: DeviceProxyState, deviceName: string): string {
   if (!st.proxy) return `${deviceName}: no proxy attached.`;
   const state = st.error ? `error: ${st.error}` : st.applied ? `active via 127.0.0.1:${st.localPort}` : 'saved (will apply on boot)';
   const exit = st.proxy.lastTest?.ok ? ` | exit ${st.proxy.lastTest.ip}${st.proxy.lastTest.country ? ` (${st.proxy.lastTest.country})` : ''}` : '';
-  return `${deviceName}: ${st.proxy.name} [${st.proxy.id}] ${st.proxy.url} — ${state}${exit}${st.note ? `\nNote: ${st.note}` : ''}`;
+  const synced = st.locationSynced ? ` | GPS synced to ${st.locationSynced.lat},${st.locationSynced.lon}` : '';
+  return `${deviceName}: ${st.proxy.name} [${st.proxy.id}] ${st.proxy.url} — ${state}${exit}${synced}${st.note ? `\nNote: ${st.note}` : ''}`;
 }
 
 export function registerProxyTools(k: ToolKit): void {
@@ -35,6 +36,7 @@ export function registerProxyTools(k: ToolKit): void {
       name: z.string().optional().describe('Short label when adding a proxy'),
       url: z.string().optional().describe('Proxy URL: http://, socks5://, or socks5h://[user:pass@]host:port (never returned)'),
       test: z.boolean().optional().describe('For action="add": test exit IP before returning'),
+      sync_location: z.boolean().optional().describe('For action="attach": also set emulator GPS coordinates to match the proxy exit city'),
     },
     async (a) => {
       switch (a.action) {
@@ -70,7 +72,7 @@ export function registerProxyTools(k: ToolKit): void {
         case 'attach': {
           if (!a.proxy_id) throw new Error('action="attach" requires proxy_id');
           const d = await target(a.device);
-          const st = await c.attachProxy(d.id, a.proxy_id);
+          const st = await c.attachProxy(d.id, a.proxy_id, { syncLocation: a.sync_location === true });
           return { content: [text(fmtDeviceProxy(st, d.name))] };
         }
         case 'detach': {

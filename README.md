@@ -41,6 +41,7 @@ PhoneDock requires **an Apple silicon Mac with macOS 15 or later**. The first ti
 - **Take over for sensitive steps.** When the agent asks you to sign in or use Face ID, take over and hand the device back when you’re done.
 - **Replay a test.** Save a flow, run it again after a change and share the result from the **Runs** tab. [Run tests in CI](docs/CI.md).
 - **Keep your Mac fast.** Turn on idle sleep in **Settings → General** (15 minutes is a good start), and an emulator nobody has used for that long goes to sleep and frees its memory. It wakes the next time you or your agent use it, usually right where it left off; otherwise it restarts with its apps and data.
+- **Bring your own proxy.** Paste an HTTP or SOCKS5 proxy in **Settings → Proxies** (or via CLI `phonedock proxy` / MCP `device_proxy`), test its exit IP and country on the spot, and attach it live to any Android phone, emulator, or virtual phone without restarting — with optional GPS sync to the exit city.
 
 <img src="docs/media/readme/window.png" alt="PhoneDock shows a live Android screen, an iPhone simulator and an iPad in one window">
 

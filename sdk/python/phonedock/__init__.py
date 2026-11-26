@@ -954,8 +954,11 @@ class PhoneDock:
     def device_proxy(self, device_id: str) -> Dict[str, Any]:
         return self._request("GET", self._dev(device_id, "/proxy"))
 
-    def attach_proxy(self, device_id: str, proxy_id: str) -> Dict[str, Any]:
-        return self._request("PUT", self._dev(device_id, "/proxy"), {"proxyId": proxy_id})
+    def attach_proxy(self, device_id: str, proxy_id: str, sync_location: bool = False) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"proxyId": proxy_id}
+        if sync_location:
+            body["syncLocation"] = True
+        return self._request("PUT", self._dev(device_id, "/proxy"), body)
 
     def detach_proxy(self, device_id: str) -> Dict[str, Any]:
         return self._request("DELETE", self._dev(device_id, "/proxy"))
