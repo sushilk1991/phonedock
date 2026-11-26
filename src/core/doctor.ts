@@ -47,6 +47,17 @@ export async function buildDoctorReport(deps: DoctorDeps = defaults): Promise<Do
   const emulator = tool('emulator', sdk ? join(sdk, 'emulator', 'emulator') : undefined, 'Install the Android SDK emulator and a compatible system image.');
   tool('ffmpeg', deps.which('ffmpeg'), 'Install ffmpeg for image comparisons and fallback video processing.');
   tool('scrcpy', deps.which('scrcpy'), 'Install scrcpy for Android streaming.');
+  const simslimPath = deps.which('simslim');
+  const simslimPresent = !!simslimPath && deps.exists(simslimPath);
+  checks.push({
+    id: 'simslim',
+    status: simslimPresent ? 'ready' : 'warning',
+    summary: simslimPresent
+      ? 'simslim is available to cut iOS simulator RAM and background processes'
+      : 'simslim not found (optional: cuts iOS simulator RAM/CPU ~40%)',
+    ...(simslimPath ? { path: simslimPath } : {}),
+    ...(!simslimPresent ? { hints: ['Optional: install simslim (`brew install sushilk1991/tap/simslim`) and enable it in Settings › General › Memory or `phonedock simslim on`.'] } : {}),
+  });
   let nativeOk = false; let timer: NodeJS.Timeout | undefined;
   try {
     const native = await Promise.race([deps.nativeAvailability(), new Promise<never>((_r, reject) => {

@@ -70,7 +70,9 @@ Raw input in one call (device pixels): `phonedock input <id> '[{"action":"tap","
 | Apps | `apps <id>` · `install <id> <path.app\|.apk>` · `launch <id> <appId> [--arg V]... [--extra K=V]... [--args-json JSON] [--env K=V]...` · `terminate <id> <appId>` · `open-url <id> <url>` |
 | Navigation | `back <id>` · `gesture <id> go_home` · `key <id> enter` · `hide-keyboard <id>` · `swipe <id> x1 y1 x2 y2` |
 | System prompts | `alert <id>` (shows it; exit 1 when none is up) · `alert <id> accept` · `alert <id> dismiss` · `alert <id> button "Allow Once"` |
-| Look and feel | `appearance <id> dark` · `rotate <id> landscape` · `location <id> <lat> <lon>` |
+| Look and feel | `appearance <id> dark` · `rotate <id> landscape` · `location <id> <lat> <lon>` · `location <id> --gpx route.gpx [--speed 5] [--loop]` · `location <id> --stop` |
+| SimSlim (iOS) | `simslim [status\|on\|off]` · `simslim <id> [status\|measure\|on\|off]` · `boot <id> --slim` |
+| Web Inspector | `webview <id> [appId]` · `webview <id> [appId] --measure "h1, .cta"` · `webview <id> [appId] --network` |
 | Proxies | `proxy test <url\|id\|->` · `proxy add <name> <url\|-> [--test]` · `proxy ls` · `proxy attach <id> <proxyId> [--sync-location]` · `proxy detach <id>` · `proxy show <id>` |
 | Debugging | `logs <id> -n 200 --filter MyApp` · `crashes <id> --since 15m` · `crashes <id> <crashId>` · `foreground <id>` |
 | Evidence | `screenshot <id> -o file.png` · `record <id> start --max 120` … `record <id> stop` |

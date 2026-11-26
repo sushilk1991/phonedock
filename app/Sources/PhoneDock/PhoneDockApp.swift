@@ -955,7 +955,7 @@ struct DeviceRow: View {
         case "stopping": Text("Shutting down…").foregroundStyle(.secondary)
         case "error":
             OnSelection(plain: Theme.Status.errorText, selected: nil) { Text("Needs attention") }
-        case "unauthorized": Text("Allow USB debugging").foregroundStyle(.secondary)
+        case "unauthorized": Text(device.platform == "ios" ? "Trust this Mac" : "Allow USB debugging").foregroundStyle(.secondary)
         case "offline": Text("Not connected").foregroundStyle(.secondary)
         case "stopped" where device.isSleeping:
             ViewThatFits(in: .horizontal) {

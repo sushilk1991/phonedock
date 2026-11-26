@@ -1,5 +1,6 @@
 import { buildDoctorReport, diagnoseKnownDevice, type DoctorReport } from '../core/doctor.ts';
 import { inspectAndroidWebView, validateWebViewOptions, type WebViewOptions, type WebViewResult } from '../backends/android-webview.ts';
+import { inspectIosSimWebView } from '../backends/ios-webview.ts';
 import { PhoneDockError, type Backend, type Device } from '../core/types.ts';
 import { checkLease, getDevice } from './core.ts';
 import { dev, router } from './routes.ts';
@@ -11,8 +12,9 @@ export interface DiagnosticRouteDeps {
   knownDevice(id: string): Promise<Device>;
   checkLease(id: string, owner: string): void;
   inspect(serial: string, options: WebViewOptions): Promise<WebViewResult>;
+  inspectIosSim?(udid: string, options: WebViewOptions): Promise<WebViewResult>;
 }
-const defaults: DiagnosticRouteDeps = { doctor: buildDoctorReport, device: dev, knownDevice: getDevice, checkLease, inspect: inspectAndroidWebView };
+const defaults: DiagnosticRouteDeps = { doctor: buildDoctorReport, device: dev, knownDevice: getDevice, checkLease, inspect: inspectAndroidWebView, inspectIosSim: inspectIosSimWebView };
 export function registerDiagnosticRoutes(r: Router, deps: DiagnosticRouteDeps = defaults): void {
   r.get('/v1/doctor', async (c) => {
     const report = await deps.doctor(); const requested = c.q('device');
@@ -23,13 +25,29 @@ export function registerDiagnosticRoutes(r: Router, deps: DiagnosticRouteDeps = 
   });
   r.post('/v1/devices/:id/webview', async (c) => {
     const d = deps.device(c); deps.checkLease(d.id, c.owner);
-    if (!['android-emulator', 'android-device'].includes(d.b.id)) throw new PhoneDockError('WebView diagnostics currently support debug-enabled Android apps only', 'not_supported', 501,
-      ['Use native accessibility or OCR for this device. iOS WebView inspection is not implemented.']);
+    const isAndroid = ['android-emulator', 'android-device'].includes(d.b.id);
+    const isIosSim = d.b.id === 'ios-simulator';
+    if (!isAndroid && !isIosSim) throw new PhoneDockError('WebView diagnostics support Android devices/emulators and iOS simulators', 'not_supported', 501,
+      ['Use native accessibility or OCR for this device.']);
     const body = await c.body();
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new PhoneDockError('Pass a WebView diagnostic request object', 'bad_request', 400);
-    const options: WebViewOptions = { appId: body.appId, action: body.action ?? 'snapshot', targetId: body.targetId,
-      bounds: body.bounds, captureMs: body.captureMs, maxElements: body.maxElements };
-    validateWebViewOptions(options);
+    const options: WebViewOptions = {
+      ...(body.appId !== undefined ? { appId: body.appId } : {}),
+      action: body.action ?? 'snapshot',
+      ...(body.selector !== undefined ? { selector: body.selector } : {}),
+      targetId: body.targetId,
+      bounds: body.bounds,
+      captureMs: body.captureMs,
+      maxElements: body.maxElements,
+    };
+    validateWebViewOptions(options, { requireAppId: isAndroid });
+    if (isIosSim) {
+      const device = await deps.knownDevice(d.id);
+      if (device.state !== 'running') throw new PhoneDockError('The selected iOS simulator is not running', 'offline', 409,
+        ['Boot the simulator and open Safari or a debuggable WKWebView first.']);
+      deps.checkLease(d.id, c.owner);
+      return (deps.inspectIosSim ?? inspectIosSimWebView)(d.nid, options);
+    }
     let serial: string | undefined;
     if (d.b.id === 'android-emulator') serial = await (d.b as Backend & { runningSerial(nativeId: string): Promise<string | undefined> }).runningSerial?.(d.nid);
     else {

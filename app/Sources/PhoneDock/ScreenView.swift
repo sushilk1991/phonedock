@@ -6,7 +6,10 @@ import os.signpost
 struct ScreenInputHandlers {
     var tap: (CGPoint) -> Void = { _ in }
     var swipe: (CGPoint, CGPoint, Int) -> Void = { _, _, _ in }
+    var pinch: (CGPoint, Double, Int) -> Void = { _, _, _ in }
     var type: (String) -> Void = { _ in }
+    var paste: (String) -> Void = { _ in }
+    var copy: () -> Void = {}
     var key: (String) -> Void = { _ in }
     var dropFile: (URL) -> Void = { _ in }
     /// A file is being dragged over the screen (drives the "Drop to Install" overlay).
@@ -35,6 +38,9 @@ final class DeviceScreenNSView: NSView {
     private var scrollAccum = CGSize.zero
     private var scrollAnchor: CGPoint?
     private var scrollWork: DispatchWorkItem?
+    private var pinchScale: CGFloat = 1.0
+    private var pinchAnchor: CGPoint?
+    private var pinchWork: DispatchWorkItem?
     private var typeBuffer = ""
     private var typeWork: DispatchWorkItem?
 
@@ -124,9 +130,47 @@ final class DeviceScreenNSView: NSView {
         handlers.swipe(toDevice(start), toDevice(end), 250)
     }
 
+    override func magnify(with e: NSEvent) {
+        if pinchAnchor == nil { pinchAnchor = local(e) }
+        pinchScale *= max(0.25, 1.0 + e.magnification)
+        pinchWork?.cancel()
+        if e.phase == .ended || e.phase == .cancelled {
+            flushPinch()
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in self?.flushPinch() }
+        pinchWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: work)
+    }
+
+    private func flushPinch() {
+        pinchWork?.cancel()
+        guard let anchor = pinchAnchor else { return }
+        let scale = Double(min(max(pinchScale, 0.25), 4.0))
+        pinchAnchor = nil
+        pinchScale = 1.0
+        guard abs(scale - 1.0) > 0.04 else { return }
+        handlers.pinch(toDevice(anchor), scale, 300)
+    }
+
     override func keyDown(with e: NSEvent) {
         let special: [UInt16: String] = [36: "enter", 76: "enter", 51: "delete", 117: "delete", 53: "escape", 48: "tab",
                                          123: "left", 124: "right", 125: "down", 126: "up", 115: "home"]
+        let mods = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods == .command {
+            let ch = e.charactersIgnoringModifiers?.lowercased()
+            if ch == "v" {
+                flushType()
+                if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
+                    handlers.paste(String(text.prefix(8192)))
+                }
+                return
+            }
+            if ch == "c" {
+                handlers.copy()
+                return
+            }
+        }
         if e.modifierFlags.contains(.command) { super.keyDown(with: e); return }
         if let k = special[e.keyCode] {
             flushType()

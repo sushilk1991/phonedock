@@ -190,3 +190,30 @@ test('real loopback HTTP and WebSocket exercise the production CDP transport wit
     await new Promise<void>((r, reject) => server.close((e) => e ? reject(e) : r()));
   }
 });
+
+test('Android WebView measure returns matched elements bounding boxes and computed styles', async () => {
+  const measured = {
+    viewport: { width: 360, height: 720, offsetLeft: 0, offsetTop: 0, scale: 1 },
+    matchCount: 1,
+    elements: [{
+      tag: 'button', id: 'buy-btn', classes: ['primary', 'lg'], text: 'Buy Now', visible: true,
+      bounds: { x: 20, y: 100, width: 320, height: 48 },
+      styles: { display: 'flex', fontSize: '16px', color: 'rgb(255, 255, 255)', backgroundColor: 'rgb(0, 122, 255)' },
+    }],
+    truncated: false,
+  };
+  const f = fixture({
+    socketReply: (m, s) => s.event({ id: m.id, result: { result: { value: measured } } }),
+  });
+  const res = await inspectAndroidWebView('pdtest-serial', {
+    appId: 'com.example.test', action: 'measure', selector: 'button#buy-btn',
+    bounds: { x: 0, y: 0, width: 720, height: 1440 },
+  }, f.deps);
+  assert.equal(res.action, 'measure');
+  if (res.action !== 'measure') assert.fail('measure');
+  assert.equal(res.matchCount, 1);
+  assert.equal(res.coordinateSpace, 'device');
+  assert.deepEqual(res.elements[0].bounds, { x: 40, y: 200, width: 640, height: 96 });
+  assert.equal(res.elements[0].styles.fontSize, '16px');
+  assert.equal(f.sockets[0].closed, true);
+});

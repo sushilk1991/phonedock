@@ -44,8 +44,25 @@ test('invalid route input is rejected before transport discovery', async () => {
   registerDiagnosticRoutes(router, { doctor: async () => ({} as never), device: (c) => ({ id: c.params.id, b, nid: 'pdtest' }),
     knownDevice: async () => ({} as Device), checkLease: () => {}, inspect: async () => ({} as never) });
   const post = router.match('POST', '/v1/devices/android-emulator%3Apdtest/webview'); assert.ok(post && post !== 'method');
-  for (const body of [null, [], { appId: 'bad;cmd' }, { appId: 'com.example.test', captureMs: 6000 }]) {
+  for (const body of [null, [], { appId: 'bad;cmd' }, { appId: 'com.example.test', captureMs: 6000 }, { appId: 'com.example.test', action: 'measure' }]) {
     await assert.rejects(Promise.resolve(post.h({ params: post.params, owner: 'test', body: async () => body } as Ctx)), (e: any) => e.code === 'bad_request');
   }
   assert.equal(calls, 0);
+});
+
+test('iOS simulator WebView route accepts optional appId and measure selector', async () => {
+  const router = new Router(); const calls: unknown[] = [];
+  const b = { id: 'ios-simulator', platform: 'ios' } as Backend;
+  registerDiagnosticRoutes(router, {
+    doctor: async () => ({ ok: true }) as never,
+    device: (c) => ({ id: c.params.id, b, nid: '11111111-2222-3333-4444-555555555555' }),
+    knownDevice: async () => ({ state: 'running', meta: {} } as Device),
+    checkLease: () => {},
+    inspect: async () => { throw new Error('should not call android inspect'); },
+    inspectIosSim: async (udid, options) => { calls.push([udid, options.action, options.selector]); return { action: 'measure' } as never; },
+  });
+  const post = router.match('POST', '/v1/devices/ios-simulator%3A11111111-2222-3333-4444-555555555555/webview');
+  assert.ok(post && post !== 'method');
+  await post.h({ params: post.params, owner: 'test', body: async () => ({ action: 'measure', selector: 'h1' }) } as Ctx);
+  assert.deepEqual(calls, [['11111111-2222-3333-4444-555555555555', 'measure', 'h1']]);
 });

@@ -33,6 +33,7 @@ import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
 import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, withLifecycle } from './idle-sleep.ts';
 import { proxyManager } from './proxies.ts';
+import { getLocationRouteStatus, parseLocationRouteInput, startDeviceLocationRoute, stopLocationRoute } from './location-routes.ts';
 
 export const VERSION = '0.8.0';
 const startedAt = Date.now();
@@ -178,6 +179,7 @@ r.del('/v1/devices/:id', async (c) => {
     stopStreamsFor(id);
     await stopRecordingFor(id, 'device deleted');
     await stopTraceFor(id, 'device deleted').catch(() => undefined);
+    await stopLocationRoute(id, false);
     await need(b, 'delete', 'delete')(nid);
     await proxyManager().onDeviceDeleted(id);
     removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
@@ -242,6 +244,7 @@ async function shutdownDevice(id: string, b: Backend, nid: string, owner: string
       stopStreamsFor(id);
       await stopRecordingFor(id, 'device shutdown');
       await stopTraceFor(id, 'device shutdown').catch(() => undefined);
+      await stopLocationRoute(id, false);
       await stop(nid);
       await proxyManager().onDeviceStopped(id);
     });
@@ -818,13 +821,32 @@ async function appPids(b: Backend, nid: string, app: string): Promise<Set<string
   } catch { /* not running, or no shell: fall back to lines that name the app */ }
   return new Set();
 }
+r.get('/v1/devices/:id/location', (c) => {
+  const { id } = dev(c);
+  return getLocationRouteStatus(id);
+});
 r.post('/v1/devices/:id/location', async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);
-  const body = await c.body(); const lat = Number(body.lat), lon = Number(body.lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw badRequest('lat and lon required');
+  const body = (await c.body()) as Record<string, unknown>;
+  if (typeof body.gpx === 'string' || Array.isArray(body.waypoints)) {
+    const spec = parseLocationRouteInput(body);
+    const status = await startDeviceLocationRoute(id, b, nid, spec);
+    logAction(id, c.owner, { action: 'location.route', waypoints: spec.points.length, speedMps: spec.speedMps, loop: spec.loop });
+    return { ok: true, route: status };
+  }
+  const lat = Number(body.lat), lon = Number(body.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) throw badRequest('lat (-90..90) and lon (-180..180) required');
+  await stopLocationRoute(id, false);
   await need(b, 'setLocation', 'location', ['Physical Android devices need a mock-location app'])(nid, lat, lon);
   logAction(id, c.owner, { action: 'location', lat, lon });
   return { ok: true };
+});
+r.del('/v1/devices/:id/location', async (c) => {
+  const { id, b, nid } = dev(c); checkLease(id, c.owner);
+  const stopped = await stopLocationRoute(id, true);
+  if (!stopped && b.clearLocation) await b.clearLocation(nid).catch(() => undefined);
+  logAction(id, c.owner, { action: 'location.stop' });
+  return { ok: true, stopped };
 });
 r.post('/v1/devices/:id/push', async (c) => {
   const { id, b, nid } = dev(c); checkLease(id, c.owner);

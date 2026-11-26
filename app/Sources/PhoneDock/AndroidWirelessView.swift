@@ -77,6 +77,7 @@ struct AndroidWirelessView: View {
 
     // Typed address
     @State private var showAddress = false
+    @State private var showOemTips = false
     @State private var pairAddress = ""
     @State private var pairCode = ""
     @State private var address = ""
@@ -107,6 +108,7 @@ struct AndroidWirelessView: View {
                 list
                 disclosure("Use a QR code instead", isOn: $showQR, anchor: "QR code") { qrBody }
                 disclosure("Enter an address", isOn: $showAddress, anchor: "Enter an address") { addressBody }
+                disclosure("Phone-specific tips (Samsung, Xiaomi, OnePlus, vivo)", isOn: $showOemTips, anchor: "OEM tips") { oemTipsBody }
             }
         }
         .task { await pollLoop() }
@@ -333,6 +335,27 @@ struct AndroidWirelessView: View {
     }
 
     // MARK: Disclosures
+
+    private var oemTipsBody: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            oemTip("Samsung (One UI)",
+                   "Settings › About phone › Software information › tap Build number 7×. Keep Auto Blocker off if Wireless debugging turns off.")
+            oemTip("Xiaomi / Redmi / POCO (HyperOS / MIUI)",
+                   "Enable both USB debugging AND \"USB debugging (Security settings)\" in Developer options so taps and installs aren’t blocked.")
+            oemTip("OnePlus / OPPO / realme (OxygenOS / ColorOS)",
+                   "Enable \"Disable permission monitoring\" at the bottom of Developer options if installs or input fail.")
+            oemTip("vivo / iQOO (Funtouch OS / OriginOS)",
+                   "Settings › System management › Developer options › enable both USB debugging and \"USB debugging (Security settings)\".")
+        }
+        .font(Theme.Fonts.callout)
+    }
+
+    private func oemTip(_ maker: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+            Text(maker).font(Theme.Fonts.callout.weight(.medium)).foregroundStyle(Theme.Ink.primary)
+            Text(detail).foregroundStyle(Theme.Ink.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
 
     private func disclosure<Content: View>(_ title: String, isOn: Binding<Bool>, anchor: String, @ViewBuilder content: @escaping () -> Content) -> some View {
         DisclosureRow(title: title, isExpanded: isOn, anchor: anchor, content: content)

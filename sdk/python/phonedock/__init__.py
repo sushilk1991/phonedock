@@ -157,11 +157,12 @@ class PhoneDock:
     def audit_ui(self, device_id: str, include_offscreen: bool = False) -> Dict[str, Any]:
         return self._request("GET", self._dev(device_id, "/audit"), query={"includeOffscreen": include_offscreen})
 
-    def inspect_webview(self, device_id: str, app_id: str, action: str = "snapshot", target_id: Optional[str] = None,
+    def inspect_webview(self, device_id: str, app_id: Optional[str] = None, action: str = "snapshot",
+                        selector: Optional[str] = None, target_id: Optional[str] = None,
                         bounds: Optional[Dict[str, float]] = None, capture_ms: Optional[int] = None,
                         max_elements: Optional[int] = None) -> Dict[str, Any]:
-        body = {k: v for k, v in {"appId": app_id, "action": action, "targetId": target_id, "bounds": bounds,
-                                "captureMs": capture_ms, "maxElements": max_elements}.items() if v is not None}
+        body = {k: v for k, v in {"appId": app_id, "action": action, "selector": selector, "targetId": target_id,
+                                "bounds": bounds, "captureMs": capture_ms, "maxElements": max_elements}.items() if v is not None}
         return self._request("POST", self._dev(device_id, "/webview"), body)
 
     def is_running(self) -> bool:
@@ -417,8 +418,11 @@ class PhoneDock:
     def delete(self, device_id: str, force: bool = False) -> Dict[str, Any]:
         return self._request("DELETE", self._dev(device_id), query={"force": 1 if force else None})
 
-    def boot(self, device_id: str, wait: bool = True, cold: bool = False, window: bool = False) -> Dict[str, Any]:
-        r = self._request("POST", self._dev(device_id, "/boot"), {"coldBoot": cold, "window": window})
+    def boot(self, device_id: str, wait: bool = True, cold: bool = False, window: bool = False, slim: Optional[Union[bool, str]] = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"coldBoot": cold, "window": window}
+        if slim is not None:
+            body["slim"] = slim
+        r = self._request("POST", self._dev(device_id, "/boot"), body)
         return self.wait_job(r["job"]["id"], timeout=600) if wait and r.get("job") else r
 
     def shutdown(self, device_id: str) -> Dict[str, Any]:
@@ -433,6 +437,23 @@ class PhoneDock:
         """Set it: None (never) or 600, 900, 1800, 3600 seconds; or "off", "10m", "15m", "30m", "1h"."""
         body = {"after": after} if isinstance(after, str) else {"timeoutSec": after}
         return self._request("POST", "/v1/idle-sleep", body)
+
+    def simslim(self) -> Dict[str, Any]:
+        """SimSlim setting and availability for iOS simulators."""
+        return self._request("GET", "/v1/simslim")
+
+    def set_simslim(self, enabled: Optional[bool] = None, except_categories: Optional[List[str]] = None, profile_path: Optional[str] = None) -> Dict[str, Any]:
+        body: Dict[str, Any] = {}
+        if enabled is not None:
+            body["enabled"] = enabled
+        if except_categories is not None:
+            body["except"] = except_categories
+        if profile_path is not None:
+            body["profilePath"] = profile_path
+        return self._request("POST", "/v1/simslim", body)
+
+    def device_simslim(self, device_id: str, action: str = "status", no_reboot: bool = False) -> Dict[str, Any]:
+        return self._request("POST", self._dev(device_id, "/simslim"), {"action": action, "noReboot": no_reboot})
 
     def clone(self, device_id: str, name: str, wait: bool = True) -> Dict[str, Any]:
         r = self._request("POST", self._dev(device_id, "/clone"), {"name": name})
@@ -896,6 +917,20 @@ class PhoneDock:
 
     def set_location(self, device_id: str, lat: float, lon: float) -> Dict[str, Any]:
         return self._request("POST", self._dev(device_id, "/location"), {"lat": lat, "lon": lon})
+
+    def start_location_route(self, device_id: str, gpx: Optional[str] = None, waypoints: Optional[List[Dict[str, float]]] = None, speed_mps: float = 5.0, loop: bool = False) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"speedMps": speed_mps, "loop": loop}
+        if gpx is not None:
+            body["gpx"] = gpx
+        if waypoints is not None:
+            body["waypoints"] = waypoints
+        return self._request("POST", self._dev(device_id, "/location"), body)
+
+    def location_route(self, device_id: str) -> Dict[str, Any]:
+        return self._request("GET", self._dev(device_id, "/location"))
+
+    def stop_location_route(self, device_id: str) -> Dict[str, Any]:
+        return self._request("DELETE", self._dev(device_id, "/location"))
 
     def push_file(self, device_id: str, local: str, remote: str) -> Dict[str, Any]:
         return self._request("POST", self._dev(device_id, "/files/push"), {"local": os.path.abspath(local), "remote": remote})

@@ -21,9 +21,11 @@ import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
 import type { UiAuditResult } from '../core/ui-audit.ts';
 import type { DoctorReport, DeviceDiagnosis } from '../core/doctor.ts';
-import type { WebViewOptions, WebViewResult } from '../backends/android-webview.ts';
+import type { WebViewOptions, WebViewResult, WebViewMeasure, WebViewMeasuredElement, WebViewTarget } from '../backends/android-webview.ts';
 import type { ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState } from '../core/proxy.ts';
-export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult, ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState };
+import type { SimslimStatus, SimslimDeviceInfo } from '../backends/ios-simslim.ts';
+import type { LocationRouteStatus } from '../daemon/location-routes.ts';
+export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult, WebViewMeasure, WebViewMeasuredElement, WebViewTarget, ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState, SimslimStatus, SimslimDeviceInfo, LocationRouteStatus };
 
 export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, LaunchArgs, LaunchArgValue, LaunchOptions, Lease,
@@ -735,6 +737,14 @@ export class PhoneDockClient {
   setIdleSleep(after: number | null | string): Promise<IdleSleepStatus> {
     return this.request('POST', '/v1/idle-sleep', { body: typeof after === 'string' ? { after } : { timeoutSec: after } });
   }
+  /** SimSlim global setting and availability for iOS simulators. */
+  simslim(): Promise<SimslimStatus> { return this.request('GET', '/v1/simslim'); }
+  setSimslim(patch: { enabled?: boolean; except?: string[]; profilePath?: string | null }): Promise<SimslimStatus> {
+    return this.request('POST', '/v1/simslim', { body: patch });
+  }
+  deviceSimslim(id: string, action: 'status' | 'measure' | 'on' | 'off' = 'status', opts: { except?: string[]; profilePath?: string | null; noReboot?: boolean } = {}): Promise<SimslimDeviceInfo> {
+    return this.request('POST', this.dev(id, '/simslim'), { body: { action, ...opts } });
+  }
   async clone(id: string, name: string, opts: WaitOptions = {}): Promise<Device> {
     const r = await this.request<{ job: Job }>('POST', this.dev(id, '/clone'), { body: { name } });
     if (opts.wait === false) return { id: '', name, state: 'creating', job: r.job } as unknown as Device;
@@ -1021,6 +1031,11 @@ export class PhoneDockClient {
     return typeof r === 'string' ? r : JSON.stringify(r, null, 2);
   }
   setLocation(id: string, lat: number, lon: number): Promise<{ ok: boolean }> { return this.request('POST', this.dev(id, '/location'), { body: { lat, lon } }); }
+  startLocationRoute(id: string, opts: { gpx?: string; waypoints?: { lat: number; lon: number }[]; speedMps?: number; loop?: boolean; name?: string }): Promise<{ ok: boolean; route: LocationRouteStatus }> {
+    return this.request('POST', this.dev(id, '/location'), { body: opts });
+  }
+  locationRoute(id: string): Promise<LocationRouteStatus> { return this.request('GET', this.dev(id, '/location')); }
+  stopLocationRoute(id: string): Promise<{ ok: boolean; stopped: boolean }> { return this.request('DELETE', this.dev(id, '/location')); }
   pushNotification(id: string, appId: string, payload: Record<string, unknown>): Promise<{ ok: boolean }> {
     return this.request('POST', this.dev(id, '/push'), { body: { appId, payload } });
   }

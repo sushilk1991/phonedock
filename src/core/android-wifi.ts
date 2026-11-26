@@ -139,6 +139,47 @@ export function describePhone(p: AndroidPhone): string {
   return `${p.model ?? 'Android phone'} (${p.serial}${p.ip ? `, ${p.ip}` : ''})`;
 }
 
+export interface OemAndroidGuide {
+  maker: string;
+  steps: string[];
+  gotcha?: string;
+}
+
+/** Maker-specific Developer Options & USB/Wireless debugging steps (many OEM ROMs gate input or installs behind extra toggles). */
+export const OEM_ANDROID_GUIDES: readonly OemAndroidGuide[] = [
+  {
+    maker: 'Samsung (One UI)',
+    steps: [
+      'Settings › About phone › Software information › tap Build number 7 times',
+      'Settings › Developer options › enable USB debugging and Wireless debugging',
+    ],
+    gotcha: 'If Wireless debugging turns off on its own, keep Auto Blocker off under Security and privacy.',
+  },
+  {
+    maker: 'Xiaomi / Redmi / POCO (HyperOS / MIUI)',
+    steps: [
+      'Settings › About phone › tap OS version / MIUI version 7 times',
+      'Settings › Additional settings › Developer options › enable USB debugging AND "USB debugging (Security settings)"',
+    ],
+    gotcha: 'Without "USB debugging (Security settings)" (requires a Mi account + SIM), taps, typing and APK installs fail with SecurityException.',
+  },
+  {
+    maker: 'OnePlus / OPPO / realme (OxygenOS / ColorOS)',
+    steps: [
+      'Settings › About device › Version › tap Build number 7 times',
+      'Settings › System settings › Developer options › enable USB debugging and Wireless debugging',
+    ],
+    gotcha: 'Turn on "Disable permission monitoring" at the bottom of Developer options if app installs or input are blocked.',
+  },
+  {
+    maker: 'vivo / iQOO (Funtouch OS / OriginOS)',
+    steps: [
+      'Settings › About phone › Software information › tap Software version 7 times',
+      'Settings › System management › Developer options › enable USB debugging and "USB debugging (Security settings)"',
+    ],
+  },
+];
+
 export const OPEN_PAIRING_HINT = 'Open Wireless debugging › Pair device with pairing code on the phone and keep it open';
 
 export function noPairingError(serial?: string): PhoneDockError {

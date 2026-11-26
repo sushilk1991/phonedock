@@ -36,6 +36,9 @@ the pixels of a standard 1024 px screenshot, and converts: see `docs/AGENTS-GUID
 | POST | /v1/components/:id/install | – | `202 { job, component }` — starts (or attaches idempotently to an already-running) download, SHA-256 verification, isolated install and self-check for `ios-tools` or `axe`; `404 not_found` for unknown ids |
 | GET | /v1/idle-sleep | – | Added in 0.7.0. `{ timeoutSec, source, saved?, sleeper, choices, devices }`: when idle Android emulators PhoneDock created go to sleep (`timeoutSec`: seconds, `null` = never; `sleeper`: whether this service is the one that puts phones to sleep; `source`: `setting`, `default` or `env` when `PHONEDOCK_IDLE_SLEEP` overrides the saved `saved`), and each such device: `{ id, name, state, eligible, why?, sleep?, idleSec?, sleepsInSec?, keptAwakeBy?: string[], sleepFailure? }`. See *Idle sleep* |
 | POST | /v1/idle-sleep | `{ timeoutSec: null \| 600 \| 900 \| 1800 \| 3600 }` or `{ after: "off" \| "10m" \| "15m" \| "30m" \| "1h" }` | Added in 0.7.0. Saves the setting (under `$PHONEDOCK_HOME`, shared by the app, the CLI and agents) and returns what GET returns; other values are `bad_request` |
+| GET | /v1/simslim | – | Global SimSlim setting and host availability for PhoneDock-managed iOS simulators: `{ enabled, except, profilePath, source, available, binary?, version?, defaultExcept }` |
+| POST | /v1/simslim | `{ enabled?, except?, profilePath? }` | Updates the SimSlim setting (`$PHONEDOCK_HOME/simslim.json`) and returns `GET /v1/simslim` |
+| POST | /v1/devices/:id/simslim | `{ action?: 'status'\|'measure'\|'on'\|'off', except?, profilePath?, noReboot? }` | Inspect, measure (`footprintMB`, `processCount`), enable or disable SimSlim on one `ios-simulator` device (`501 not_supported` on other backends; `on`/`off` check lease) |
 | GET | /v1/disguise | – | `{ backend, defaultProfile, defaultCarrier, profiles[], carriers[] }`: what a virtual phone (`options.disguise`) can present as. Each profile: `{ id, name, manufacturer, model, androidRelease, sdk, image, screen }`, where `image` is the Google Play system image it runs on (install it via `/v1/backends/android-emulator/images/install`); each carrier: `{ id, name, country }`. Added in 0.4.0 |
 | GET | /v1/jobs/:id | – | `Job` = `{ id, kind, state: 'running'|'done'|'failed', progress: string[] (last 50 lines, each starting with the Mac's local time `HH:MM:SS`), result?, error?: { code, message, hints?, detail? }, startedAt, endedAt? }` |
 | GET | /v1/jobs | – | `Job[]` (recent) |
@@ -506,7 +509,9 @@ It refuses `needsHuman` kinds with `403 needs_human` (hand off with `/handoff` i
 | POST | /v1/devices/:id/files/push | `{ local, remote }` | `{ ok }` |
 | POST | /v1/devices/:id/files/pull | `{ remote, local }` | `{ ok }` |
 | GET | /v1/devices/:id/logs | `?lines=300&filter=&app=` (`app`: a package or bundle id; only that app's lines) | `text/plain` |
-| POST | /v1/devices/:id/location | `{ lat, lon }` | `{ ok }` |
+| GET | /v1/devices/:id/location | – | Active GPX/waypoint playback state: `{ active, name?, mode?, waypoints, index, speedMps, loop, startedAt?, current? }` |
+| POST | /v1/devices/:id/location | `{ lat, lon }` or `{ gpx \| waypoints, speedMps?, loop?, name? }` | `{ ok, route? }` — sets a single simulated GPS coordinate, or plays back a GPX/waypoint route (native `simctl location start` on iOS simulators; timed `emu geo fix` stepper on Android emulators) |
+| DELETE | /v1/devices/:id/location | – | `{ ok, stopped }` — stops any active GPS route and clears simulated location on supported backends |
 | POST | /v1/devices/:id/push | `{ appId, payload }` | `{ ok }` |
 | POST | /v1/devices/:id/rotate | `{ orientation: 'portrait'\|'landscape' }` | `{ ok, orientation, screen?, note? }` once the screen has turned (see *Rotation*). `orientation` is what the screen shows afterwards; `note` is set when it stayed put |
 | GET | /v1/devices/:id/foreground | – | `{ app: AppInfo \| null }` |
@@ -614,7 +619,7 @@ have no `name` unless it came from an install, and reading the clipboard returns
 | GET | /v1/devices/:id/environment | – | Supported actions, permission services, biometric prerequisites, status-bar fields, and limitations |
 | POST | /v1/devices/:id/environment | One `EnvironmentAction` below | `{ ok, action, warnings, path?, delivery, retrySafe, requestId? }`; requires ownership like input |
 | GET | /v1/devices/:id/audit | `?includeOffscreen=1` | `{ source, capturedAt, snapshotId?, findings, examined, limitations }` |
-| POST | /v1/devices/:id/webview | `{ appId, action: 'snapshot'\|'network', targetId?, bounds?: {x,y,width,height}, captureMs?: 2000, maxElements?: 200 }` | Read-only debug-enabled Android WebView DOM or bounded network metadata |
+| POST | /v1/devices/:id/webview | `{ appId?, action?: 'snapshot'\|'measure'\|'network', selector?, targetId?, bounds?: {x,y,width,height}, captureMs?: 2000, maxElements?: 200 }` | Read-only DOM snapshot, CSS selector measurement (`boundingClientRect` + computed styles), or bounded network metadata on debug-enabled Android WebViews (`appId` required) and iOS Simulator Safari/WKWebViews (`appId` optional) |
 
 Environment actions are deliberately limited to **iOS Simulator and Android Emulator**, with no physical-phone
 permission pre-grants or authentication bypass:

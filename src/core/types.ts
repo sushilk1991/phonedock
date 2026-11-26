@@ -441,7 +441,7 @@ export interface LaunchOptions {
   env?: Record<string, string>;
 }
 
-export interface BootOptions { headless?: boolean; coldBoot?: boolean; window?: boolean }
+export interface BootOptions { headless?: boolean; coldBoot?: boolean; window?: boolean; slim?: boolean | string }
 
 // ── retrievable flow run records (schemaVersion: 1; stateDir('runs')) ─────────
 export type RunStatus = 'pass' | 'fail' | 'skip';
@@ -661,6 +661,10 @@ export interface Backend {
   pullFile?(nativeId: string, remotePath: string, localPath: string): Promise<void>;
   logs?(nativeId: string, opts?: { lines?: number; filter?: string; appId?: string }): Promise<string>;
   setLocation?(nativeId: string, lat: number, lon: number): Promise<void>;
+  /** Start moving along GPS waypoints at `speedMps` m/s (iOS simulator: `simctl location start`). */
+  startLocationRoute?(nativeId: string, waypoints: { lat: number; lon: number }[], opts?: { speedMps?: number }): Promise<void>;
+  /** Clear / stop simulated GPS location or active route (iOS simulator: `simctl location clear`). */
+  clearLocation?(nativeId: string): Promise<void>;
   pushNotification?(nativeId: string, appId: string, payload: Record<string, unknown>): Promise<void>;
   /** Resolves once the screen has turned, or once it is clear the app on screen keeps its orientation. */
   rotate?(nativeId: string, orientation: Orientation): Promise<void>;

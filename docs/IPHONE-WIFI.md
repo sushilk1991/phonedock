@@ -76,14 +76,14 @@ about 0.1 s (verified on an unlocked phone: set, read back, restore). While the 
 so PhoneDock answers that the iPhone is locked (`device_locked`) instead of reporting an empty clipboard: unlock it
 first.
 
-Not available on a real iPhone:
+Not available (or hardware-unvalidated) on a real iPhone:
 
-- **Appearance (light or dark).** Use Settings › Display & Brightness on the phone.
 - **Rotation.** iOS only lets the phone rotate when you turn it, and only if Portrait Orientation Lock is off.
   Apple's orientation command works on simulators only.
-- **Logs.**
-- **The foreground app.** Reading which app is in front needs WebDriverAgent. `phonedock ui` shows what's on screen
-  instead.
+- **Appearance (light or dark), Logs, and Foreground app.** Not available on older iPhones without WebDriverAgent
+  (use Settings › Display & Brightness on the phone, and `phonedock ui` to see what's on screen). On iOS 27,
+  PhoneDock includes experimental native paths for these (`ios-device.ts`), though they have not yet been
+  validated on iOS 27 hardware.
 
 If something here fails on your phone, please open an issue on GitHub.
 

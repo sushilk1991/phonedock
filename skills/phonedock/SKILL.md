@@ -192,9 +192,15 @@ failed/timed-out initial provider. Full canonical `backend:nativeId` targets the
 - **Diagnose compatibility and UI.** `doctor` checks host prerequisites without contacting devices;
   `audit_ui` reports heuristic label, size, clipping and occlusion warnings from one tree. Unknown scale/density
   and OCR limit those checks. It is not accessibility certification or an automatic settings sweep.
-  `inspect_webview app_id="…"` reads only an already debug-enabled Android WebView, optionally bounded network
-  metadata (`action="network"`). It does not enable debugging, act on DOM, intercept native HTTP or inspect iOS.
-  CSS coordinates and diagnostic `w…` refs are not native input coordinates/refs; verify mapped bounds against the screen.
+  `inspect_webview` reads DOM elements (`action="snapshot"`), measures CSS selector bounding boxes & computed styles
+  (`action="measure" selector="…"`), or captures bounded network metadata (`action="network"`) from a debug-enabled
+  Android WebView (`app_id` required) or an iOS Simulator Safari tab / debuggable WKWebView (`app_id` optional).
+  It is strictly read-only: it never enables debugging, mutates DOM, or intercepts native HTTP.
+  CSS coordinates and diagnostic `w…`/`m…` refs are not native input coordinates/refs; verify mapped bounds against the screen.
+- **Slim iOS simulators & GPX routes.** Pass `slim=true` on `create_device` or `boot_device` (or `phonedock simslim on`)
+  to disable unused simulator daemons with `simslim` (~60% less RAM/processes, falling back cleanly to stock `simctl`
+  if unavailable). Use `set_location` with `lat`/`lon`, `gpx_path`, `waypoints` (`speed_mps`, `loop`), or `stop=true`
+  to simulate fixed GPS or moving routes.
 - **Record a regression.** `save_flow` → review the YAML → `run_flow`. Every run writes a self-contained,
   script-free `report.html` and persists a retrievable run record (`Run ID`) with device, app version/build, and git
   commit provenance (`list_runs`, `get_run format="summary"|"md"|"json"`, or CLI `phonedock runs` / `runs show` /

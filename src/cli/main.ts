@@ -36,10 +36,12 @@ Catalog:    backends | components | components install [id] [--no-wait]
 Devices:    devices|ls [--backend B --platform P --state S]
             create --backend B --name N [--image I --profile P --cpus N --ram MB --storage MB
                    --width W --height H --dpi D --disguise [PROFILE] --carrier C --seed HEX
-                   --boot --auto-start --no-wait]
-            boot <id> [--window] [--cold] [--no-wait] | shutdown <id> | rm <id> [--force]
+                   --slim [PROFILE_JSON] --boot --auto-start --no-wait]
+            boot <id> [--window] [--cold] [--slim [PROFILE_JSON] | --no-slim] [--no-wait] | shutdown <id> | rm <id> [--force]
             idle-sleep [off|10m|15m|30m|1h]   (no value: show it) put idle virtual phones to sleep after that long:
               their memory is freed; any use wakes them, usually where they left off (default off; 15m suggested)
+            simslim [status|on|off] | simslim <id> [status|measure|on|off] [--no-reboot]
+              Cut iOS simulator RAM/CPU ~40% using simslim (falls back to stock simctl when absent or failing)
             clone <id> <name> | window <id> | update <id> [--name N] [--auto-start true|false]
             snapshot ls|save|restore|rm <id> [name] | info <id>
 Observe:    screenshot <id> [-o file] [--max-size N] [--format png|jpeg] | ui <id> [--json] [--no-ocr]
@@ -59,7 +61,8 @@ Apps:       apps <id> [--system] | install <id> <path|url> | terminate|uninstall
             launch <id> <appId> [--arg VAL]... [--extra K=V]... [--args-json JSON] [--env K=V]...
             open-url <id> <url>
 System:     shell <id> -- <cmd…> | push <id> <local> <remote> | pull <id> <remote> [local]
-            logs <id> [-n N] [--filter F] | location <id> <lat> <lon> | rotate <id> portrait|landscape
+            logs <id> [-n N] [--filter F] | location <id> (<lat> <lon> | --gpx <file> [--speed MPS] [--loop] | --stop)
+            rotate <id> portrait|landscape
             notify <id> <appId> '<json payload>' | appearance <id> [dark|light]   (no mode: show the current one)
             settings <id> [key=value ...] | settings <id> --reset
             clipboard <id> [--get | --set TEXT]   (prints the text as is; --set with no TEXT reads it from stdin)
@@ -91,7 +94,7 @@ Diagnostics: doctor [--device ID] | audit <id> | environment <id> | request-resu
 Test setup: permissions <id> <appId> grant|revoke|reset <service...>
             biometric <id> enroll|unenroll|match|fail [--modality face|fingerprint] [--finger-id N]
             status-bar <id> override|clear [--time HH:MM] [--battery N] [--wifi N] [--cellular N]
-            media <id> <image-or-video> | webview <id> <appId> [--network] [--bounds x,y,w,h]
+            media <id> <image-or-video> | webview <id> [appId] [--measure SELECTOR] [--network] [--target ID] [--bounds x,y,w,h]
 Misc:       jobs [jobId] | watch | mcp [--http PORT] [--profile all|runtime | --compact] | help
 
 <id> accepts the full device id, the native id, or a unique name / prefix.
@@ -402,6 +405,9 @@ export function parseSpec(a: ParsedArgs): DeviceSpec & { boot?: boolean } {
       spec.options = { ...(spec.options ?? {}), disguise: d };
     }
   }
+  if (f.slim !== undefined) {
+    spec.options = { ...(spec.options ?? {}), slim: typeof f.slim === 'string' ? f.slim : f.slim !== false };
+  }
   return spec;
 }
 
@@ -457,11 +463,22 @@ export async function run(argv: string[]): Promise<number> {
       out(await c.setEnvironment(d.id, parseEnvironmentAction(change))); return 0;
     }
     case 'webview': {
-      const d = await dev(); if (!a.positionals[2]) usage('webview needs the app package ID');
+      const d = await dev();
+      const appId = a.positionals[2];
+      if (!appId && d.backend !== 'ios-simulator') usage('webview needs the app package ID on Android');
+      const selector = str(a.flags, 'measure') ?? str(a.flags, 'selector');
+      const action = a.flags.network ? 'network' : selector ? 'measure' : 'snapshot';
       const values = str(a.flags, 'bounds')?.split(',').map(Number);
       if (values && (values.length !== 4 || !values.every(Number.isFinite))) usage('--bounds must be x,y,width,height in screenshot pixels');
-      out(await c.inspectWebView(d.id, { appId: a.positionals[2], action: a.flags.network ? 'network' : 'snapshot', targetId: str(a.flags, 'target'), captureMs: num(a.flags, 'captureMs'), maxElements: num(a.flags, 'maxElements'),
-        ...(values ? { bounds: { x: values[0], y: values[1], width: values[2], height: values[3] } } : {}) })); return 0;
+      out(await c.inspectWebView(d.id, {
+        ...(appId ? { appId } : {}),
+        action,
+        ...(selector ? { selector } : {}),
+        targetId: str(a.flags, 'target'),
+        captureMs: num(a.flags, 'captureMs'),
+        maxElements: num(a.flags, 'maxElements'),
+        ...(values ? { bounds: { x: values[0], y: values[1], width: values[2], height: values[3] } } : {}),
+      })); return 0;
     }
     case 'setup': {
       const { setupCommand, parseAgents } = await import('./setup.ts');
@@ -569,6 +586,35 @@ export async function run(argv: string[]): Promise<number> {
       out(st, () => idleSleepText(st));
       return 0;
     }
+    case 'simslim': {
+      const sub = p[1];
+      if (!sub || sub === 'status') {
+        const st = await c.simslim();
+        out(st, () => `${st.enabled ? 'SimSlim is on' : 'SimSlim is off'} for PhoneDock-managed iOS simulators`
+          + ` (${st.available ? `installed: ${st.version ?? st.binary}` : 'simslim not installed'})`
+          + (st.profilePath ? `\n  profile: ${st.profilePath}` : `\n  kept categories: ${st.except.join(', ')}`)
+          + (st.source === 'env' ? '\n  (overridden by PHONEDOCK_SIMSLIM_ENABLED)' : ''));
+        return 0;
+      }
+      if (sub === 'on' || sub === 'off') {
+        const except = str(a.flags, 'except')?.split(',').map((s) => s.trim()).filter(Boolean);
+        const profilePath = str(a.flags, 'profile');
+        const st = await c.setSimslim({ enabled: sub === 'on', ...(except ? { except } : {}), ...(profilePath ? { profilePath } : {}) });
+        out(st, () => `SimSlim ${st.enabled ? 'enabled' : 'disabled'} for PhoneDock-managed iOS simulators.`);
+        return 0;
+      }
+      const d = await c.resolveDevice(sub);
+      const act = (p[2] ?? 'status') as 'status' | 'measure' | 'on' | 'off';
+      if (!['status', 'measure', 'on', 'off'].includes(act)) usage('simslim <device> [status|measure|on|off]');
+      const except = str(a.flags, 'except')?.split(',').map((s) => s.trim()).filter(Boolean);
+      const profilePath = str(a.flags, 'profile');
+      const r = await c.deviceSimslim(d.id, act, { ...(except ? { except } : {}), ...(profilePath ? { profilePath } : {}), noReboot: a.flags.noReboot === true });
+      out(r, () => `${d.name}: ${r.slimmed ? 'slimmed' : 'stock'}`
+        + (r.disabledCount !== undefined ? ` (${r.disabledCount}${r.managedTotal ? `/${r.managedTotal}` : ''} daemons disabled)` : '')
+        + (r.footprintMB !== undefined ? `, ${r.footprintMB} MB` : '')
+        + (r.processCount !== undefined ? `, ${r.processCount} processes` : ''));
+      return 0;
+    }
     case 'info': {
       const d = await dev(); const i = await c.info(d.id) as Record<string, any>;
       out(i, () => {
@@ -595,7 +641,8 @@ export async function run(argv: string[]): Promise<number> {
     }
     case 'boot': {
       const d = await dev();
-      const job = await c.boot(d.id, { window: a.flags.window === true, coldBoot: a.flags.cold === true, headless: a.flags.window === true ? false : undefined, wait: wantWait(a), onProgress: progressPrinter(quiet) });
+      const slim = a.flags.slim === undefined ? undefined : (typeof a.flags.slim === 'string' ? a.flags.slim : a.flags.slim === true);
+      const job = await c.boot(d.id, { window: a.flags.window === true, coldBoot: a.flags.cold === true, headless: a.flags.window === true ? false : undefined, ...(slim !== undefined ? { slim } : {}), wait: wantWait(a), onProgress: progressPrinter(quiet) });
       const woke = (job as { progress?: string[] } | undefined)?.progress?.findLast((l) => /^woke in /.test(l));
       out(job ?? { ok: true }, () => `${d.name}: ${wantWait(a) ? (woke ? (/started fresh/.test(woke) ? 'woke, started fresh (its previous screen is gone)' : 'woke where it left off') : 'booted') : `booting (job ${job?.id})`}`);
       return 0;
@@ -974,7 +1021,25 @@ export async function run(argv: string[]): Promise<number> {
       out({ text }, () => text); return 0;
     }
     case 'location': {
-      const d = await dev(); need(p, 4, '<lat> <lon>');
+      const d = await dev();
+      if (a.flags.stop === true) {
+        const r = await c.stopLocationRoute(d.id);
+        out(r, () => r.stopped ? `Stopped location route on ${d.name}` : `Cleared location on ${d.name}`);
+        return 0;
+      }
+      const gpxPath = str(a.flags, 'gpx');
+      if (gpxPath) {
+        const gpx = readFileSync(resolve(gpxPath), 'utf8');
+        const speedMps = num(a.flags, 'speed');
+        const r = await c.startLocationRoute(d.id, { gpx, ...(speedMps !== undefined ? { speedMps } : {}), loop: a.flags.loop === true });
+        out(r, () => `Started GPX route on ${d.name} (${r.route.waypoints} waypoints at ${r.route.speedMps} m/s${r.route.loop ? ', looping' : ''})`);
+        return 0;
+      }
+      if (p.length < 4) {
+        const st = await c.locationRoute(d.id);
+        out(st, () => st.active ? `Active route on ${d.name}: waypoint ${st.index + 1}/${st.waypoints} at ${st.speedMps} m/s` : `No active location route on ${d.name}. Pass <lat> <lon> or --gpx <file>.`);
+        return 0;
+      }
       const lat = toNum(p[2], 'lat'); const lon = toNum(p[3], 'lon');
       out(await c.setLocation(d.id, lat, lon), () => `Location set to ${lat},${lon}`); return 0;
     }

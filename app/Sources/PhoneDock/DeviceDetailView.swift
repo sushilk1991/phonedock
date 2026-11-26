@@ -423,9 +423,25 @@ private struct LiveScreen: View {
         return ScreenInputHandlers(
             tap: { p in send(["action": "tap", "x": Int(p.x), "y": Int(p.y)]) },
             swipe: { a, b, ms in send(["action": "swipe", "x1": Int(a.x), "y1": Int(a.y), "x2": Int(b.x), "y2": Int(b.y), "durationMs": ms]) },
+            pinch: { p, scale, ms in
+                guard d.can("pinch") else { return }
+                send(["action": "pinch", "x": Int(p.x), "y": Int(p.y), "scale": scale, "durationMs": ms])
+            },
             // While an agent's help request is open, what the person types is usually a password, code or card
             // number: send it as secret, so Activity, the action log and saved flows show ••• instead of the text.
             type: { t in send(["action": "type", "text": t, "secret": model.pendingHandoff(for: d.id) != nil]) },
+            paste: { t in send(["action": "type", "text": t, "secret": model.pendingHandoff(for: d.id) != nil]) },
+            copy: {
+                guard d.can("clipboard"), let c = model.client else { return }
+                Task {
+                    struct Clip: Decodable { var text: String? }
+                    if let clip = try? await c.get(Clip.self, c.dev(d.id, "/clipboard"), observe: true),
+                       let text = clip.text, !text.isEmpty {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                }
+            },
             // Esc means "go back" to a person at the keyboard; Android's KEYCODE_ESCAPE doesn't navigate, so send back.
             key: { k in send(["action": "key", "key": k == "escape" && d.platform == "android" ? "back" : k]) },
             dropFile: { url in model.installApp(d, path: url.path) },
@@ -509,6 +525,9 @@ private struct OffScreen: View {
     private var problem: FriendlyError? {
         switch device.state {
         case "unauthorized":
+            if device.platform == "ios" {
+                return FriendlyError(title: "Trust this Mac on the iPhone", message: "Unlock the iPhone, tap Trust, and enter its passcode.")
+            }
             return FriendlyError(title: "Allow USB debugging on the phone", message: "Unlock it and tap Allow.")
         case "offline" where device.kind == "physical":
             return FriendlyError(title: "\(device.name) isn’t connected", message: "Connect it over USB or Wi-Fi.")

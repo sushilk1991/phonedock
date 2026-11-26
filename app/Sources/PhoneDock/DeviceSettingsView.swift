@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 private struct DeviceSettingsValues: Decodable {
     var appearance: String?
@@ -75,6 +77,10 @@ struct DeviceSettingsView: View {
                 Text("Start the device to change its settings.").font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
                     .padding(.horizontal, Theme.Space.l)
             }
+            if device.can("location") {
+                Divider().padding(.vertical, Theme.Space.m)
+                DeviceLocationSection(device: device)
+            }
         }
         .task(id: "\(device.id):\(device.state)") { await load() }
     }
@@ -109,6 +115,180 @@ struct DeviceSettingsView: View {
             } catch {
                 model.fail("Couldn’t change device settings", error, device: device)
                 await load()
+            }
+        }
+    }
+}
+
+private struct LocationRouteState: Decodable {
+    var active: Bool
+    var name: String?
+    var waypoints: Int
+    var index: Int
+    var speedMps: Double
+    var loop: Bool
+}
+
+/// Location & GPX route controls inside Inspector › Device Settings.
+private struct DeviceLocationSection: View {
+    @Environment(AppModel.self) private var model
+    let device: Device
+    @State private var latText = ""
+    @State private var lonText = ""
+    @State private var speedMps = 5.0
+    @State private var loopRoute = false
+    @State private var route: LocationRouteState?
+    @State private var statusMessage: String?
+    @State private var working = false
+
+    private static let presets: [(String, Double, Double)] = [
+        ("San Francisco", 37.7749, -122.4194),
+        ("New York", 40.7128, -74.0060),
+        ("Boston", 42.3601, -71.0589),
+        ("London", 51.5074, -0.1278),
+        ("Tokyo", 35.6762, 139.6503),
+        ("Bengaluru", 12.9716, 77.5946),
+        ("Sydney", -33.8688, 151.2093),
+    ]
+
+    private var disabled: Bool { working || !device.isRunning || device.leasedByAgent }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            SectionHeader("Location & GPX")
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                HStack(spacing: Theme.Space.s) {
+                    TextField("Lat", text: $latText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(Theme.Fonts.numeric)
+                    TextField("Lon", text: $lonText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(Theme.Fonts.numeric)
+                    Button("Set") { setCoordinates() }
+                        .controlSize(.small)
+                        .disabled(Double(latText.trimmingCharacters(in: .whitespaces)) == nil || Double(lonText.trimmingCharacters(in: .whitespaces)) == nil)
+                }
+                HStack(spacing: Theme.Space.s) {
+                    Menu("Presets") {
+                        ForEach(Self.presets, id: \.0) { city, lat, lon in
+                            Button(city) {
+                                latText = String(format: "%.4f", lat)
+                                lonText = String(format: "%.4f", lon)
+                                applyLocation(lat: lat, lon: lon, label: city)
+                            }
+                        }
+                    }
+                    .controlSize(.small)
+                    Spacer()
+                    Button("Load GPX…") { pickGpx() }
+                        .controlSize(.small)
+                }
+                HStack(spacing: Theme.Space.s) {
+                    Picker("Speed", selection: $speedMps) {
+                        Text("Walk").tag(1.4)
+                        Text("Bike").tag(5.0)
+                        Text("Drive").tag(13.4)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    Toggle("Loop", isOn: $loopRoute)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                }
+                if let route, route.active {
+                    HStack(spacing: Theme.Space.s) {
+                        Label("\(route.name ?? "GPX route") (\(route.waypoints) pts)", systemImage: "location.fill")
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.Ink.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button("Stop") { stopRoute() }
+                            .controlSize(.small)
+                    }
+                } else if let statusMessage {
+                    Text(statusMessage)
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.Ink.secondary)
+                }
+            }
+            .font(Theme.Fonts.callout)
+            .padding(.horizontal, Theme.Space.l)
+            .disabled(disabled)
+        }
+        .task(id: "\(device.id):\(device.state)") { await loadRoute() }
+    }
+
+    private func loadRoute() async {
+        guard device.isRunning, let c = model.client else { route = nil; return }
+        route = try? await c.get(LocationRouteState.self, c.dev(device.id, "/location"), observe: true)
+    }
+
+    private func setCoordinates() {
+        guard let lat = Double(latText.trimmingCharacters(in: .whitespaces)),
+              let lon = Double(lonText.trimmingCharacters(in: .whitespaces)) else { return }
+        applyLocation(lat: lat, lon: lon, label: String(format: "%.4f, %.4f", lat, lon))
+    }
+
+    private func applyLocation(lat: Double, lon: Double, label: String) {
+        guard !disabled, let c = model.client else { return }
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                _ = try await c.send("POST", c.dev(device.id, "/location"), json: ["lat": lat, "lon": lon])
+                route = nil
+                statusMessage = "Location set to \(label)"
+            } catch {
+                model.fail("Couldn’t set location", error, device: device)
+            }
+        }
+    }
+
+    private func pickGpx() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a GPX Route"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if let gpxType = UTType(filenameExtension: "gpx") {
+            panel.allowedContentTypes = [gpxType, .xml]
+        }
+        guard panel.runModal() == .OK, let url = panel.url,
+              let xml = try? String(contentsOf: url, encoding: .utf8),
+              let c = model.client else { return }
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                struct StartResp: Decodable { var route: LocationRouteState? }
+                let data = try await c.send("POST", c.dev(device.id, "/location"), json: [
+                    "gpx": xml,
+                    "name": url.deletingPathExtension().lastPathComponent,
+                    "speedMps": speedMps,
+                    "loop": loopRoute,
+                ])
+                if let resp = try? JSONDecoder().decode(StartResp.self, from: data) {
+                    route = resp.route
+                }
+                statusMessage = "Playing \(url.lastPathComponent)"
+            } catch {
+                model.fail("Couldn’t start GPX route", error, device: device)
+            }
+        }
+    }
+
+    private func stopRoute() {
+        guard !disabled, let c = model.client else { return }
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                _ = try await c.send("DELETE", c.dev(device.id, "/location"))
+                route = nil
+                statusMessage = "Location route stopped"
+            } catch {
+                model.fail("Couldn’t stop location route", error, device: device)
             }
         }
     }

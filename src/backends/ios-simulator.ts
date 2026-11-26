@@ -27,6 +27,7 @@ import {
   JpegSplitter, JsonState, ffmpegBin, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize, probeVideo, splitArgs, type IpsReport,
 } from './ios-common.ts';
 import { abortXctrace, parseLaunchctlPid, startXctrace, stopXctrace } from './ios-trace.ts';
+import { cachedSimslimStatus, clearSimslimStatus, prepareSimslimBoot, resolveSimslimBinary, simslimDeviceAction } from './ios-simslim.ts';
 
 const ID = 'ios-simulator';
 
@@ -242,6 +243,7 @@ async function toDevice(runtime: string, d: SimDevice, rts: SimRuntime[], types:
     meta: {
       runtime, deviceType: d.deviceTypeIdentifier, family: dt?.productFamily, modelIdentifier: dt?.modelIdentifier,
       dataPath: d.dataPath, lastBootedAt: d.lastBootedAt, ...(m?.clonedFrom ? { clonedFrom: m.clonedFrom } : {}),
+      ...(cachedSimslimStatus(d.udid) ? { slim: cachedSimslimStatus(d.udid) } : {}),
       ...(multiDisplay ? { inputLimitation: 'AXe input routing is not supported on multi-display simulators; use a single-display model.' } : {}),
     },
   };
@@ -694,11 +696,22 @@ async function shutdownQuiet(udid: string): Promise<void> {
   await waitFor(async () => (await findSim(udid)).dev.state === 'Shutdown', 60_000, 500, 'simulator shutdown');
 }
 
-async function bootAndWait(udid: string, opts: BootOptions = {}): Promise<void> {
+async function bootAndWait(udid: string, opts: BootOptions & { onProgress?: (line: string) => void } = {}): Promise<void> {
   booting.add(udid);
   try {
-    const r = await simctl(['boot', udid], { allowFail: true, timeoutMs: 120_000 });
-    if (r.code !== 0 && !/current state: Booted/i.test(r.stderr)) throw new PhoneDockError('Couldn’t start the simulator', 'boot_failed', 500, undefined, `boot failed: ${r.stderr.trim()}`);
+    const { dev } = await findSim(udid);
+    const managedEntry = state.read().devices?.[udid];
+    const slimOutcome = await prepareSimslimBoot(udid, {
+      bootSlim: opts.slim,
+      specSlim: managedEntry?.spec?.options?.slim,
+      managed: !!managedEntry,
+      alreadyBooted: dev.state === 'Booted',
+      onProgress: opts.onProgress,
+    });
+    if (!slimOutcome.applied) {
+      const r = await simctl(['boot', udid], { allowFail: true, timeoutMs: 120_000 });
+      if (r.code !== 0 && !/current state: Booted/i.test(r.stderr)) throw new PhoneDockError('Couldn’t start the simulator', 'boot_failed', 500, undefined, `boot failed: ${r.stderr.trim()}`);
+    }
     await simctl(['bootstatus', udid, '-b'], { timeoutMs: 180_000 }).catch((e: Error) => {
       throw new PhoneDockError("The simulator did not finish starting in time", 'timeout', 504, undefined, `Simulator did not finish booting within 180s: ${e instanceof PhoneDockError ? e.detail ?? e.message : e.message}`);
     });
@@ -1188,6 +1201,7 @@ export const backend: Backend = {
     state.update((s) => { delete s.devices?.[udid]; });
     rmSync(join(stateDir('ios-snapshots'), udid), { recursive: true, force: true });
     screenCache.delete(udid);
+    clearSimslimStatus(udid);
     try { naturals = screenStore.update((v) => { delete v[udid]; }); } catch { /* best effort */ }
   },
 
@@ -1523,6 +1537,13 @@ export const backend: Backend = {
   },
 
   async setLocation(udid, lat, lon) { await simctl(['location', udid, 'set', `${lat},${lon}`]); },
+  async startLocationRoute(udid, waypoints, opts = {}) {
+    await requireBooted(udid);
+    const speed = Number.isFinite(opts.speedMps) && (opts.speedMps ?? 0) > 0 ? opts.speedMps! : 5;
+    const coords = waypoints.map((w) => `${w.lat},${w.lon}`);
+    await simctl(['location', udid, 'start', `--speed=${speed}`, ...coords]);
+  },
+  async clearLocation(udid) { await simctl(['location', udid, 'clear'], { allowFail: true }); },
 
   async pushNotification(udid, appId, payload) {
     const dir = mkdtempSync(join(tmpdir(), 'pd-push-'));
@@ -1567,12 +1588,17 @@ export const backend: Backend = {
 
   async info(udid) {
     const [{ runtime, dev }, rts, types] = await Promise.all([findSim(udid), runtimes(), deviceTypes()]);
+    let simslim = cachedSimslimStatus(udid) ?? null;
+    if (dev.state === 'Booted' && resolveSimslimBinary()) {
+      simslim = await simslimDeviceAction(udid, 'status').catch(() => simslim);
+    }
     return {
       device: dev,
       runtime: rts.find((r) => r.identifier === runtime) ?? { identifier: runtime },
       deviceType: types.find((t) => t.identifier === dev.deviceTypeIdentifier),
       managed: state.read().devices?.[udid] ?? null,
       screen: screenCache.get(udid) ?? null,
+      simslim,
       snapshots: existsSync(join(stateDir('ios-snapshots'), udid)) ? readdirSync(join(stateDir('ios-snapshots'), udid)) : [],
       notes: ['key back = left-edge swipe (iOS has no hardware back)', 'rotate: xcrun devicectl device orientation (apps that keep portrait, like the iPhone home screen and Settings, do not turn)',
         'pinch / hideKeyboard are not supported (AXe has no multi-touch; no reliable keyboard dismissal)'],

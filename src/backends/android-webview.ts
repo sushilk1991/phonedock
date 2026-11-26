@@ -15,22 +15,33 @@ export interface AndroidWebViewDeps {
   wait(ms: number): Promise<void>;
 }
 export interface WebViewOptions {
-  appId: string; targetId?: string; action: 'snapshot' | 'network'; bounds?: Bounds;
+  appId?: string; targetId?: string; action: 'snapshot' | 'network' | 'measure'; selector?: string; bounds?: Bounds;
   captureMs?: number; maxElements?: number;
 }
-interface Target { id: string; title: string; url: string }
+export interface WebViewTarget { id: string; title: string; url: string; appId?: string }
 export interface WebViewElement { ref: string; tag: string; role?: string; label: string; cssBounds: Bounds; bounds?: Bounds }
+export interface WebViewMeasuredElement {
+  ref: string; tag: string; id?: string; classes?: string[]; text: string; visible: boolean;
+  cssBounds: Bounds; bounds?: Bounds;
+  styles: Record<string, string>;
+}
 export interface WebViewSnapshot {
-  action: 'snapshot'; source: 'webview-dom'; target: Target; coordinateSpace: 'css' | 'device';
+  action: 'snapshot'; source: 'webview-dom'; target: WebViewTarget; coordinateSpace: 'css' | 'device';
   viewport: { width: number; height: number; offsetLeft: number; offsetTop: number; scale: number };
   elements: WebViewElement[]; text: string; truncated: boolean; warnings: string[];
 }
+export interface WebViewMeasure {
+  action: 'measure'; source: 'webview-dom'; target: WebViewTarget; selector: string; matchCount: number;
+  coordinateSpace: 'css' | 'device';
+  viewport: { width: number; height: number; offsetLeft: number; offsetTop: number; scale: number };
+  elements: WebViewMeasuredElement[]; truncated: boolean; warnings: string[];
+}
 export interface WebViewNetwork {
-  action: 'network'; source: 'webview-cdp'; target: Target; captureMs: number;
+  action: 'network'; source: 'webview-cdp'; target: WebViewTarget; captureMs: number;
   requests: { method: string; url: string; status?: number; durationMs?: number; failed?: boolean }[];
   truncated: boolean; warnings: string[];
 }
-export type WebViewResult = WebViewSnapshot | WebViewNetwork;
+export type WebViewResult = WebViewSnapshot | WebViewMeasure | WebViewNetwork;
 const debugError = (message = 'The WebView debugger returned an invalid response', code = 'webview_debug_failed', status = 502) => new PhoneDockError(message, code, status);
 const notDebuggable = () => new PhoneDockError('No debug-enabled WebView was found for this running app', 'not_supported', 501,
   ['Enable WebView debugging in your own app build, open its WebView, and try again.', 'Use native accessibility or OCR when a WebView does not expose debugging.']);
@@ -120,11 +131,18 @@ class CdpSession {
 }
 
 // This expression only reads the DOM. Password/text-field values and executable caller code are never read/run.
-function snapshotExpression(maxElements: number): string {
+export function snapshotExpression(maxElements: number): string {
   return `(() => { const vv=window.visualViewport; const viewport={width:vv?.width||innerWidth,height:vv?.height||innerHeight,offsetLeft:vv?.offsetLeft||0,offsetTop:vv?.offsetTop||0,scale:vv?.scale||1}; const elements=[]; const nodes=document.querySelectorAll('button,a[href],input,textarea,select,[role="button"],[role="link"],[role="checkbox"],[role="switch"],[tabindex]'); for(const node of Array.from(nodes).slice(0,2000)){ const r=node.getBoundingClientRect(),s=getComputedStyle(node); if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0'||r.width<=0||r.height<=0||r.right<=viewport.offsetLeft||r.bottom<=viewport.offsetTop||r.left>=viewport.offsetLeft+viewport.width||r.top>=viewport.offsetTop+viewport.height)continue; elements.push({tag:node.tagName.toLowerCase(),role:node.getAttribute('role')||undefined,label:(node.getAttribute('aria-label')||node.getAttribute('placeholder')||node.innerText||node.getAttribute('title')||'').slice(0,240),bounds:{x:r.left,y:r.top,width:r.width,height:r.height}}); if(elements.length>=${maxElements})break;} return {viewport,elements,text:(document.body?.innerText||'').slice(0,12000),truncated:nodes.length>2000||elements.length>=${maxElements}}; })()`;
 }
+
+// Read-only CSS selector measurement: bounding boxes, visibility, and key computed layout/typography styles.
+export function measureExpression(selector: string, maxElements: number): string {
+  const selLit = JSON.stringify(selector);
+  return `(() => { const vv=window.visualViewport; const viewport={width:vv?.width||innerWidth,height:vv?.height||innerHeight,offsetLeft:vv?.offsetLeft||0,offsetTop:vv?.offsetTop||0,scale:vv?.scale||1}; let list; try { list=document.querySelectorAll(${selLit}); } catch (e) { return { invalidSelector: String(e && e.message || e) }; } const elements=[]; for(const node of Array.from(list).slice(0,${maxElements})){ const r=node.getBoundingClientRect(),s=getComputedStyle(node); const vis=s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0'&&r.width>0&&r.height>0; const cls=typeof node.className==='string'?node.className.trim().split(/\\s+/).filter(Boolean).slice(0,12):[]; elements.push({tag:node.tagName.toLowerCase(),id:node.id?String(node.id).slice(0,120):undefined,classes:cls.length?cls:undefined,text:(node.getAttribute('aria-label')||node.innerText||'').trim().slice(0,240),visible:vis,bounds:{x:r.left,y:r.top,width:r.width,height:r.height},styles:{display:s.display,position:s.position,visibility:s.visibility,opacity:s.opacity,zIndex:s.zIndex,fontSize:s.fontSize,fontFamily:s.fontFamily.slice(0,120),fontWeight:s.fontWeight,color:s.color,backgroundColor:s.backgroundColor,padding:s.padding,margin:s.margin,borderRadius:s.borderRadius}}); } return {viewport,matchCount:list.length,elements,truncated:list.length>${maxElements}}; })()`;
+}
+
 const finiteRect = (r: any): r is Bounds => r && [r.x, r.y, r.width, r.height].every((v) => typeof v === 'number' && Number.isFinite(v)) && r.width >= 0 && r.height >= 0;
-function snapshot(value: any, target: Target, bounds?: Bounds): WebViewSnapshot {
+export function parseSnapshotResult(value: any, target: WebViewTarget, bounds?: Bounds): WebViewSnapshot {
   const v = value?.viewport;
   if (!v || ![v.width, v.height, v.offsetLeft, v.offsetTop, v.scale].every((x) => typeof x === 'number' && Number.isFinite(x)) || v.width < 1 || v.width > 100_000 || v.height < 1 || v.height > 100_000 || v.scale <= 0 || v.scale > 100 || !Array.isArray(value.elements)) throw debugError();
   const warnings: string[] = [];
@@ -146,7 +164,55 @@ function snapshot(value: any, target: Target, bounds?: Bounds): WebViewSnapshot 
   return { action: 'snapshot', source: 'webview-dom', target, coordinateSpace: mapped ? 'device' : 'css', viewport: v,
     elements, text: typeof value.text === 'string' ? value.text.slice(0, 12000) : '', truncated: !!value.truncated || value.elements.length > 500, warnings };
 }
-async function network(session: CdpSession, target: Target, ms: number, deps: AndroidWebViewDeps): Promise<WebViewNetwork> {
+
+export function parseMeasureResult(value: any, target: WebViewTarget, selector: string, bounds?: Bounds): WebViewMeasure {
+  if (value && typeof value.invalidSelector === 'string') {
+    throw new PhoneDockError(`Invalid CSS selector: ${value.invalidSelector.slice(0, 200)}`, 'bad_request', 400);
+  }
+  const v = value?.viewport;
+  if (!v || ![v.width, v.height, v.offsetLeft, v.offsetTop, v.scale].every((x) => typeof x === 'number' && Number.isFinite(x)) || v.width < 1 || v.width > 100_000 || v.height < 1 || v.height > 100_000 || v.scale <= 0 || v.scale > 100 || !Array.isArray(value.elements)) throw debugError();
+  const warnings: string[] = [];
+  const mapped = !!bounds && Math.abs((bounds.width / bounds.height) / (v.width / v.height) - 1) <= 0.03;
+  if (!bounds) warnings.push('Native WebView bounds were not supplied; coordinates are CSS pixels, not device input coordinates.');
+  else if (!mapped) warnings.push('WebView bounds and CSS viewport aspect ratios differ; device coordinates were omitted.');
+  const elements: WebViewMeasuredElement[] = [];
+  for (const e of value.elements.slice(0, 500)) {
+    if (!finiteRect(e?.bounds) || typeof e.tag !== 'string') continue;
+    const cssBounds = { x: e.bounds.x, y: e.bounds.y, width: e.bounds.width, height: e.bounds.height };
+    const styles: Record<string, string> = {};
+    if (e.styles && typeof e.styles === 'object') {
+      for (const [k, val] of Object.entries(e.styles)) {
+        if (typeof val === 'string') styles[k] = val.slice(0, 160);
+      }
+    }
+    const entry: WebViewMeasuredElement = {
+      ref: `m${elements.length + 1}`,
+      tag: e.tag.slice(0, 32),
+      ...(typeof e.id === 'string' && e.id ? { id: e.id.slice(0, 120) } : {}),
+      ...(Array.isArray(e.classes) ? { classes: e.classes.filter((c: unknown) => typeof c === 'string').slice(0, 12) } : {}),
+      text: typeof e.text === 'string' ? e.text.slice(0, 240) : '',
+      visible: !!e.visible,
+      cssBounds,
+      styles,
+    };
+    if (mapped && bounds) {
+      entry.bounds = {
+        x: bounds.x + (cssBounds.x - v.offsetLeft) * bounds.width / v.width,
+        y: bounds.y + (cssBounds.y - v.offsetTop) * bounds.height / v.height,
+        width: cssBounds.width * bounds.width / v.width,
+        height: cssBounds.height * bounds.height / v.height,
+      };
+    }
+    elements.push(entry);
+  }
+  const matchCount = typeof value.matchCount === 'number' && Number.isFinite(value.matchCount) ? value.matchCount : elements.length;
+  return {
+    action: 'measure', source: 'webview-dom', target, selector, matchCount,
+    coordinateSpace: mapped ? 'device' : 'css', viewport: v,
+    elements, truncated: !!value.truncated || value.elements.length > 500, warnings,
+  };
+}
+async function network(session: CdpSession, target: WebViewTarget, ms: number, deps: AndroidWebViewDeps): Promise<WebViewNetwork> {
   const requests = new Map<string, { method: string; url: string; status?: number; durationMs?: number; failed?: boolean; start?: number }>();
   let truncated = false;
   const listener = (method: string, p: any) => {
@@ -174,20 +240,33 @@ async function network(session: CdpSession, target: Target, ms: number, deps: An
   } finally { session.events.delete(listener); }
 }
 
-export function validateWebViewOptions(input: unknown): asserts input is WebViewOptions {
+export function validateWebViewOptions(input: unknown, opts: { requireAppId?: boolean } = {}): asserts input is WebViewOptions {
   const options = input as WebViewOptions;
-  if (!options || typeof options !== 'object' || Array.isArray(options) || typeof options.appId !== 'string' || !/^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/.test(options.appId) || options.appId.length > 200 || !['snapshot', 'network'].includes(options.action)) throw new PhoneDockError('Pass a valid Android package and snapshot or network action', 'bad_request', 400);
-  if (options.targetId !== undefined && (typeof options.targetId !== 'string' || !/^[\w.-]{1,200}$/.test(options.targetId))) throw new PhoneDockError('Invalid WebView target ID', 'bad_request', 400);
+  const requireAppId = opts.requireAppId ?? true;
+  if (!options || typeof options !== 'object' || Array.isArray(options) || !['snapshot', 'network', 'measure'].includes(options.action)) {
+    throw new PhoneDockError('Pass a valid WebView action (snapshot, measure, or network)', 'bad_request', 400);
+  }
+  if (requireAppId || options.appId !== undefined) {
+    if (typeof options.appId !== 'string' || !/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/.test(options.appId) || options.appId.length > 200) {
+      throw new PhoneDockError('Pass a valid app package / bundle ID', 'bad_request', 400);
+    }
+  }
+  if (options.action === 'measure') {
+    if (typeof options.selector !== 'string' || !options.selector.trim() || options.selector.length > 500 || /[\0\r\n]/.test(options.selector)) {
+      throw new PhoneDockError('measure requires a non-empty CSS selector (max 500 chars)', 'bad_request', 400);
+    }
+  }
+  if (options.targetId !== undefined && (typeof options.targetId !== 'string' || !/^[\w.:-]{1,200}$/.test(options.targetId))) throw new PhoneDockError('Invalid WebView target ID', 'bad_request', 400);
   if (options.bounds !== undefined && (!finiteRect(options.bounds) || options.bounds.x < 0 || options.bounds.y < 0 || options.bounds.width <= 0 || options.bounds.height <= 0 || [options.bounds.x, options.bounds.y, options.bounds.width, options.bounds.height].some((x) => x > 100_000))) throw new PhoneDockError('WebView bounds must be finite device-pixel bounds', 'bad_request', 400);
   const ms = options.captureMs ?? 2000; const max = options.maxElements ?? 200;
   if (!Number.isInteger(ms) || ms < 1 || ms > 5000 || !Number.isInteger(max) || max < 1 || max > 500) throw new PhoneDockError('captureMs must be 1–5000 and maxElements 1–500', 'bad_request', 400);
 }
 export async function inspectAndroidWebView(serial: string, options: WebViewOptions, overrides: Partial<AndroidWebViewDeps> = {}): Promise<WebViewResult> {
   const deps: AndroidWebViewDeps = { ...defaults, ...overrides };
-  validateWebViewOptions(options);
+  validateWebViewOptions(options, { requireAppId: true });
   if (typeof serial !== 'string' || !serial || serial.length > 300 || /[\r\n\0]/.test(serial)) throw new PhoneDockError('An explicit Android device transport is required', 'bad_request', 400);
   const ms = options.captureMs ?? 2000; const max = options.maxElements ?? 200;
-  const p = await deps.adb(serial, ['shell', 'pidof', options.appId]);
+  const p = await deps.adb(serial, ['shell', 'pidof', options.appId!]);
   const pids = p.code === 0 ? p.stdout.trim().split(/\s+/).filter((pid) => /^\d+$/.test(pid) && Number.isSafeInteger(Number(pid)) && Number(pid) > 0).slice(0, 32) : [];
   if (!pids.length) throw notDebuggable();
   const unix = await deps.adb(serial, ['shell', 'cat', '/proc/net/unix']);
@@ -205,12 +284,16 @@ export async function inspectAndroidWebView(serial: string, options: WebViewOpti
     if (!selected) throw targets.length ? new PhoneDockError('Choose one debug-enabled WebView target', 'ambiguous_target', 409,
       ['Pass targetId from the availableTargets error detail.'], JSON.stringify({ availableTargets: targets.slice(0, 20).map((t: any) => ({ id: t.id.slice(0, 200), title: String(t.title ?? '').slice(0, 200), url: diagnosticUrl(t.url) })) })) : notDebuggable();
     const url = debuggerUrl(selected.webSocketDebuggerUrl, port);
-    const target: Target = { id: selected.id.slice(0, 200), title: String(selected.title ?? '').slice(0, 200), url: diagnosticUrl(selected.url) };
+    const target: WebViewTarget = { id: selected.id.slice(0, 200), title: String(selected.title ?? '').slice(0, 200), url: diagnosticUrl(selected.url) };
     session = new CdpSession(deps.socket(url)); await session.connect();
     if (options.action === 'snapshot') {
       const reply = await session.send('Runtime.evaluate', { expression: snapshotExpression(max), returnByValue: true, silent: true, timeout: 2000 });
       if (reply.exceptionDetails) throw debugError('The WebView could not produce a DOM snapshot');
-      result = snapshot(reply.result?.value, target, options.bounds);
+      result = parseSnapshotResult(reply.result?.value, target, options.bounds);
+    } else if (options.action === 'measure') {
+      const reply = await session.send('Runtime.evaluate', { expression: measureExpression(options.selector!, max), returnByValue: true, silent: true, timeout: 2000 });
+      if (reply.exceptionDetails) throw debugError('The WebView could not measure that CSS selector');
+      result = parseMeasureResult(reply.result?.value, target, options.selector!, options.bounds);
     } else result = await network(session, target, ms, deps);
     return result;
   } catch (e) {

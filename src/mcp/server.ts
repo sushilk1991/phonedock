@@ -7,7 +7,7 @@
 // gets SIGTERM/SIGINT; the daemon also reclaims leases whose owner process (mcp:<client>:<pid>) has exited.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -433,11 +433,14 @@ export function createMcpServer(ctx: McpContext): McpServer {
   tool('audit_ui', 'Read the current UI and return heuristic warnings for labels, touch target sizes, clipping and occlusion. Uses iOS points or Android density when known; this is not an accessibility compliance certification.', {
     device: deviceParam, include_offscreen: z.boolean().optional(),
   }, async (a) => { const d = await target(a.device); return { content: [text(JSON.stringify(await c.auditUi(d.id, { includeOffscreen: a.include_offscreen })))] }; });
-  tool('inspect_webview', 'Read DOM elements or bounded network metadata from a debug-enabled Android WebView belonging to app_id. Does not enable debugging or perform DOM actions. Without confirmed WebView bounds, coordinates remain CSS pixels and must not be used for device input. iOS is unsupported.', {
-    device: deviceParam, app_id: z.string(), action: z.enum(['snapshot', 'network']).optional(), target_id: z.string().optional(),
+  tool('inspect_webview', 'Read DOM elements, measure CSS selector matches (bounding box + computed styles), or capture bounded network metadata from a debug-enabled Android WebView or an iOS Simulator Safari tab / debuggable WKWebView. Read-only: never performs DOM actions. On Android, pass app_id; on iOS Simulator, app_id is optional (defaults to Safari / single inspectable WebView). Without confirmed WebView bounds, coordinates remain CSS pixels.', {
+    device: deviceParam, app_id: z.string().optional().describe('Android package name (required on Android) or optional iOS bundle ID (e.g. com.apple.mobilesafari)'),
+    action: z.enum(['snapshot', 'measure', 'network']).optional().describe('snapshot (interactive DOM elements + text), measure (bounding box + computed CSS styles for selector), or network'),
+    selector: z.string().optional().describe('CSS selector to measure when action="measure" (e.g. "h1", ".cta-button", "nav a")'),
+    target_id: z.string().optional(),
     bounds: z.object({ x: z.number(), y: z.number(), width: z.number().positive(), height: z.number().positive() }).optional(),
     capture_ms: z.number().int().min(1).max(5000).optional(), max_elements: z.number().int().min(1).max(500).optional(),
-  }, async (a) => { const d = await target(a.device); return { content: [text(JSON.stringify(await c.inspectWebView(d.id, { appId: a.app_id, action: a.action ?? 'snapshot', targetId: a.target_id, bounds: a.bounds, captureMs: a.capture_ms, maxElements: a.max_elements })))] }; });
+  }, async (a) => { const d = await target(a.device); return { content: [text(JSON.stringify(await c.inspectWebView(d.id, { ...(a.app_id ? { appId: a.app_id } : {}), action: a.action ?? (a.selector ? 'measure' : 'snapshot'), ...(a.selector ? { selector: a.selector } : {}), targetId: a.target_id, bounds: a.bounds, captureMs: a.capture_ms, maxElements: a.max_elements })))] }; });
   tool('get_request_result', 'Inspect the retained outcome of a lost input response. Never resend input just because delivery is unknown; use this receipt and read the screen.', {
     device: deviceParam, request_id: z.string().regex(/^[A-Za-z0-9._-]{1,128}$/),
   }, async (a) => {
@@ -534,6 +537,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     disguise: z.union([z.boolean(), z.string()]).optional().describe('Android emulator only: present as a real phone. Pass true for default (pixel_8) or a profile id (pixel_8, pixel_8a, pixel_7a, galaxy_s23, galaxy_s24, oneplus_12).'),
     carrier: z.string().optional().describe('Android emulator disguise carrier id (e.g. tmobile_us, att_us, verizon_us, ee_uk, vodafone_uk, jio_in, airtel_in, telekom_de)'),
     seed: z.string().optional().describe('Android emulator disguise hex seed for deterministic IMEI/serial/MAC/Android ID/SIM generation'),
+    slim: z.union([z.boolean(), z.string()]).optional().describe('iOS simulator only: slim background daemons via simslim (~40% less RAM/CPU). Pass true or a profile JSON path.'),
     wait_seconds: z.number().int().min(0).max(600).optional().describe('Wait up to this long for creation (+boot) to finish (default 120)'),
   }, async (a) => {
     let options: Record<string, unknown> | undefined;
@@ -546,6 +550,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         options = { disguise: d };
       }
     }
+    if (a.slim !== undefined) options = { ...(options ?? {}), slim: a.slim };
     const spec = { backend: a.backend, name: a.name, image: a.image, profile: a.profile, cpus: a.cpus, ramMB: a.ram_mb, storageMB: a.storage_mb,
       width: a.width, height: a.height, dpi: a.dpi, boot: a.boot, autoStart: a.auto_start, ...(options ? { options } : {}) };
     const r = await c.createDeviceAsync(spec);
@@ -559,12 +564,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
     device: deviceParam,
     cold: z.boolean().optional().describe('Cold boot (ignore quick-boot snapshot)'),
     window: z.boolean().optional().describe('Show a native window on the Mac'),
+    slim: z.union([z.boolean(), z.string()]).optional().describe('iOS simulator only: slim background daemons with simslim (~40% less RAM/CPU). Pass true, false, or a profile JSON path.'),
     wait_seconds: z.number().int().min(0).max(600).optional().describe('Max wait for boot to complete (default 180)'),
   }, async (a) => {
     const d = await target(a.device);
     if (d.state === 'running' && !a.window) return { content: [text(`${d.name} is already running.`)] };
     const asleep = !!d.sleep && !a.cold && !a.window;
-    const job = await c.boot(d.id, { coldBoot: a.cold, window: a.window, headless: a.window ? false : undefined, wait: false });
+    const job = await c.boot(d.id, { coldBoot: a.cold, window: a.window, headless: a.window ? false : undefined, ...(a.slim !== undefined ? { slim: a.slim } : {}), wait: false });
     ctx.scales.delete(d.id); ctx.deviceCache = undefined;
     if (!job?.id) return { content: [text(`${d.name}: boot requested.`)] };
     const j = await waitJobUpTo(c, job, a.wait_seconds ?? 180);
@@ -969,10 +975,30 @@ export function createMcpServer(ctx: McpContext): McpServer {
     return { content: [text(t.length > 80_000 ? '…(truncated)\n' + t.slice(-80_000) : t || '(empty)')] };
   });
 
-  tool('set_location', 'Set the simulated GPS location.', {
-    device: deviceParam, lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180),
+  tool('set_location', 'Set the simulated GPS location, play a GPX route / waypoint path, or stop an active route.', {
+    device: deviceParam,
+    lat: z.number().min(-90).max(90).optional().describe('Latitude (when setting a single coordinate)'),
+    lon: z.number().min(-180).max(180).optional().describe('Longitude (when setting a single coordinate)'),
+    gpx_path: z.string().optional().describe('Path to a local .gpx file to play back along its track/route'),
+    waypoints: z.array(z.object({ lat: z.number().min(-90).max(90), lon: z.number().min(-180).max(180) })).optional().describe('Ordered list of { lat, lon } waypoints to move through'),
+    speed_mps: z.number().min(0.5).max(200).optional().describe('Playback speed in meters/sec (default 5; walk ~1.4, drive ~13)'),
+    loop: z.boolean().optional().describe('Loop the route continuously (default false)'),
+    stop: z.boolean().optional().describe('Stop an active GPS route and clear simulated location'),
   }, async (a) => {
-    const d = await target(a.device); await c.setLocation(d.id, a.lat, a.lon);
+    const d = await target(a.device);
+    if (a.stop) {
+      const r = await c.stopLocationRoute(d.id);
+      return { content: [text(r.stopped ? `Stopped GPS route on ${d.name}.` : `Cleared simulated location on ${d.name}.`)] };
+    }
+    if (a.gpx_path || a.waypoints) {
+      const gpx = a.gpx_path ? readFileSync(expandHome(a.gpx_path), 'utf8') : undefined;
+      const r = await c.startLocationRoute(d.id, { ...(gpx ? { gpx } : {}), ...(a.waypoints ? { waypoints: a.waypoints } : {}), ...(a.speed_mps !== undefined ? { speedMps: a.speed_mps } : {}), loop: a.loop });
+      return { content: [text(`Started GPS route on ${d.name} (${r.route.waypoints} waypoints at ${r.route.speedMps} m/s${r.route.loop ? ', looping' : ''}).`)] };
+    }
+    if (a.lat === undefined || a.lon === undefined) {
+      return { content: [text('Pass lat and lon, gpx_path, waypoints, or stop=true.')], isError: true };
+    }
+    await c.setLocation(d.id, a.lat, a.lon);
     return { content: [text(`Location of ${d.name} set to ${a.lat},${a.lon}.`)] };
   });
 

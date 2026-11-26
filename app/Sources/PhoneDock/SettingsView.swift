@@ -287,6 +287,7 @@ private struct GeneralSettings: View {
                 SettingsCard { OpenAtLoginRow() }
             }
             IdleSleepSection()
+            SimSlimRowSection()
             UpdatesSettingsSection()   // UpdatesSettingsSection.swift
         }
         .onChange(of: notify) { _, on in
@@ -419,6 +420,90 @@ struct IdleSleepSection: View {
             } catch {
                 timeout = before
                 problem = "Couldn’t change it: \((error as? APIError)?.message ?? error.localizedDescription)"
+            }
+        }
+    }
+}
+
+/// General › iOS Simulators (SimSlim): optional toggle backed by GET/POST /v1/simslim.
+private struct SimSlimRowSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var enabled = false
+    @State private var available = false
+    @State private var version: String?
+    @State private var source = "default"
+    @State private var loaded = false
+    @State private var saving = false
+    @State private var problem: String?
+
+    var body: some View {
+        SettingsSection("iOS Simulators", note: "Uses SimSlim to disable unused simulator background daemons (Siri, Widgets, Spotlight, telemetry) while keeping Safari, StoreKit, Photos and iCloud working. Falls back to stock Xcode booting if unavailable.") {
+            SettingsCard {
+                SettingsRow {
+                    VStack(alignment: .leading, spacing: Theme.Space.xxs) {
+                        SettingsRowText(
+                            title: "Slim iOS simulators when booting",
+                            detail: available
+                                ? (version.map { "Using \($0) · cuts RAM and background processes ~40%." } ?? "Cuts RAM and background processes ~40%.")
+                                : (loaded ? "Install simslim (`brew install sushilk1991/tap/simslim`) to enable." : "Checking SimSlim…")
+                        )
+                        if source == "env" {
+                            Text("Set by PHONEDOCK_SIMSLIM_ENABLED for this background service.")
+                                .font(Theme.Fonts.callout).foregroundStyle(Theme.Ink.secondary)
+                        }
+                        if let problem {
+                            Text(problem).font(Theme.Fonts.callout).foregroundStyle(Theme.Status.errorText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                } trailing: {
+                    Toggle("Slim iOS simulators when booting", isOn: Binding(get: { enabled }, set: { save($0) }))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(!loaded || !available || source == "env" || saving || !model.connection.isConnected)
+                        .testAnchor("simslim-toggle")
+                }
+            }
+        }
+        .task(id: model.connection.isConnected) { await load() }
+    }
+
+    private struct Status: Decodable {
+        var enabled: Bool
+        var available: Bool
+        var version: String?
+        var source: String?
+    }
+
+    private func load() async {
+        guard let c = model.client else { loaded = false; return }
+        do {
+            let s = try await c.get(Status.self, "/v1/simslim", timeout: 15)
+            enabled = s.enabled; available = s.available; version = s.version; source = s.source ?? "default"
+            loaded = true; problem = nil
+        } catch {
+            loaded = false
+            if (error as? APIError)?.status != 404 {
+                problem = "Couldn’t read SimSlim status from PhoneDock’s background service."
+            }
+        }
+    }
+
+    private func save(_ want: Bool) {
+        guard let c = model.client, want != enabled else { return }
+        let before = enabled
+        enabled = want; saving = true
+        Task {
+            defer { saving = false }
+            do {
+                let data = try await c.send("POST", "/v1/simslim", json: ["enabled": want], timeout: 15)
+                if let s = try? JSONDecoder().decode(Status.self, from: data) {
+                    enabled = s.enabled; available = s.available; version = s.version; source = s.source ?? source
+                }
+                problem = nil
+            } catch {
+                enabled = before
+                problem = (error as? APIError)?.message ?? "Couldn’t save SimSlim setting."
             }
         }
     }
