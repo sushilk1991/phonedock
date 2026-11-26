@@ -19,6 +19,9 @@ struct SettingsView: View {
             AgentSettings()
                 .tabItem { Label("Agents", systemImage: "sparkles") }
                 .tag("agents")
+            ProxiesSettings()
+                .tabItem { Label("Proxies", systemImage: "network") }
+                .tag("proxies")
             AdvancedSettings()
                 .tabItem { Label("Advanced", systemImage: "gearshape.2") }
                 .tag("advanced")

@@ -185,6 +185,51 @@ struct DaemonClient: Sendable {
     func input(_ id: String, _ action: [String: Any]) async throws {
         try await send("POST", dev(id, "/input"), json: action, timeout: 30)
     }
+
+    // MARK: Proxies
+
+    func proxies() async throws -> [SavedProxy] {
+        try await get([SavedProxy].self, "/v1/proxies", timeout: 15)
+    }
+
+    func testProxyUrl(_ url: String) async throws -> ProxyTestResult {
+        let data = try await send("POST", "/v1/proxies/test", json: ["url": url], timeout: 30)
+        return try JSONDecoder().decode(ProxyTestResult.self, from: data)
+    }
+
+    func addProxy(name: String, url: String, lastTest: ProxyTestResult? = nil) async throws -> SavedProxy {
+        var payload: [String: Any] = ["name": name, "url": url]
+        if let lastTest,
+           let encoded = try? JSONEncoder().encode(lastTest),
+           let obj = try? JSONSerialization.jsonObject(with: encoded) {
+            payload["lastTest"] = obj
+        }
+        let data = try await send("POST", "/v1/proxies", json: payload, timeout: 30)
+        return try JSONDecoder().decode(SavedProxy.self, from: data)
+    }
+
+    func testSavedProxy(_ id: String) async throws -> SavedProxyTestResponse {
+        let data = try await send("POST", "/v1/proxies/\(Self.enc(id))/test", json: [:], timeout: 30)
+        return try JSONDecoder().decode(SavedProxyTestResponse.self, from: data)
+    }
+
+    func deleteProxy(_ id: String) async throws {
+        _ = try await send("DELETE", "/v1/proxies/\(Self.enc(id))", timeout: 30)
+    }
+
+    func deviceProxy(_ deviceId: String) async throws -> DeviceProxyState {
+        try await get(DeviceProxyState.self, dev(deviceId, "/proxy"), timeout: 15, observe: true)
+    }
+
+    func attachProxy(_ deviceId: String, proxyId: String) async throws -> DeviceProxyState {
+        let data = try await send("PUT", dev(deviceId, "/proxy"), json: ["proxyId": proxyId], timeout: 30)
+        return try JSONDecoder().decode(DeviceProxyState.self, from: data)
+    }
+
+    func detachProxy(_ deviceId: String) async throws -> DeviceProxyState {
+        let data = try await send("DELETE", dev(deviceId, "/proxy"), timeout: 30)
+        return try JSONDecoder().decode(DeviceProxyState.self, from: data)
+    }
 }
 
 struct AnyEncodable: Encodable {

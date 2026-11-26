@@ -372,6 +372,10 @@ struct InfoTab: View {
                         sectionDivider
                         DeviceSettingsView(device: device).id(device.id)
                     }
+                    if device.platform == "android" || device.platform == "ios" {
+                        sectionDivider
+                        DeviceProxyView(device: device).id(device.id)
+                    }
                     if device.can("snapshot") {
                         sectionDivider
                         snapshots
