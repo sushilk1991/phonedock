@@ -75,7 +75,7 @@ def _q(s: str) -> str:
 
 _APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}")
 _REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
-_INPUT_PATH = re.compile(r"/v1/devices/[^/]+/(?:input|fill|scroll-to|swipe|back|gesture|keyboard/hide|alert|environment|clipboard|apps/[^/]+/launch)/?$")
+_INPUT_PATH = re.compile(r"/v1/devices/[^/]+/(?:input|fill|scroll-to|swipe|back|gesture|keyboard/hide|alert|environment|clipboard|unlock|apps/[^/]+/launch)/?$")
 
 
 def _never_connected(error: BaseException) -> bool:
@@ -1016,9 +1016,9 @@ class PhoneDock:
         """Remove a device's saved passcode."""
         return self._request("DELETE", self._dev(device_id, "/passcode"))
 
-    def unlock(self, device_id: str) -> Dict[str, Any]:
+    def unlock(self, device_id: str, request_id: Optional[str] = None) -> Dict[str, Any]:
         """Wake and unlock a device using its saved passcode (if required)."""
-        return self._request("POST", self._dev(device_id, "/unlock"), {})
+        return self._request("POST", self._dev(device_id, "/unlock"), {}, request_id=request_id)
 
     # ── events ────────────────────────────────────────────────────────────
     def events(self) -> Iterator[Dict[str, Any]]:

@@ -48,7 +48,9 @@ async function promptPasscode(label: string): Promise<string> {
           if (buf.length > 0) buf = buf.slice(0, -1);
           continue;
         }
-        if (ch >= '\x20' && ch <= '\x7e') {
+        // Keep all non-control characters (including non-ASCII) so validatePasscode() rejects unsupported chars cleanly
+        // rather than silently dropping them and saving a different passcode than the user typed.
+        if (ch >= '\x20' && ch !== '\u007f') {
           buf += ch;
         }
       }
@@ -88,12 +90,13 @@ export async function passcodeCmd(c: PhoneDockClient, a: ParsedArgs, jsonOut: bo
       if (p.length < 3) throw new Error('Usage: phonedock passcode set <device> [--stdin] [--disabled]');
       if (p.length > 3) throw new Error('Do not pass the passcode as a CLI argument (it would be saved in shell history). Omit it to be prompted, or pipe it with --stdin.');
       const d = await c.resolveDevice(p[2]);
-      const passcode = a.flags.stdin === true
+      // Always mask when attached to an interactive terminal, even if --stdin was passed.
+      const passcode = a.flags.stdin === true && !process.stdin.isTTY
         ? await readStdinPasscode()
         : await promptPasscode(`Enter passcode for ${d.name} (hidden): `);
       if (!passcode) throw new Error('Passcode cannot be empty');
-      const enabled = a.flags.disabled === true ? false : true;
-      const st = await c.setPasscode(d.id, { passcode, enabled });
+      const opts = a.flags.disabled === true ? { passcode, enabled: false } : { passcode };
+      const st = await c.setPasscode(d.id, opts);
       emit(st, () => fmtStatus(st, d.name));
       return 0;
     }

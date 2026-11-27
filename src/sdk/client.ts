@@ -1144,9 +1144,10 @@ export class PhoneDockClient {
   removePasscode(deviceId: string): Promise<{ ok: boolean; removed: boolean }> {
     return this.request('DELETE', this.dev(deviceId, '/passcode'));
   }
-  /** Wake and unlock a device using its saved passcode (if credentials are required). */
-  unlock(deviceId: string): Promise<UnlockResponse> {
-    return this.request('POST', this.dev(deviceId, '/unlock'), { body: {} });
+  /** Wake and unlock a device using its saved passcode (if credentials are required).
+   *  Treated as a receipt-backed input so ambiguous network failures are never blindly resent. */
+  unlock(deviceId: string, opts: { requestId?: string } = {}): Promise<UnlockResponse> {
+    return this.request('POST', this.dev(deviceId, '/unlock'), { body: {}, input: true, requestId: opts.requestId });
   }
 }
 

@@ -1149,7 +1149,7 @@ Bring-your-own HTTP (`http://`) and SOCKS5 (`socks5://`, `socks5h://`) proxies. 
 
 ## Unattended Unlock (Passcode)
 
-Keychain-backed unattended passcode unlock for locked Android devices/emulators (PIN, password, or swipe lock) and iOS 27+ native iPhones. Passcodes are stored in **macOS Keychain** (written over stdin via `security -i` with `-X <hex>`, never in process argv; mode-`0600` file fallback on non-macOS) while non-secret metadata (`enabled`, `tripped`, `lastUnlock`) lives in `$PHONEDOCK_HOME/passcodes.json` (mode `0600`). Passcodes are never returned by any route, never written to `actions.jsonl`, and scrubbed from errors.
+Keychain-backed unattended passcode unlock for locked Android devices/emulators (PIN, password, or swipe lock) and iOS 27+ native iPhones. Passcodes are stored in **macOS Keychain** (written over stdin via `security -i` with `-X <hex>`, never in process argv; mode-`0600` file fallback on non-macOS) while non-secret metadata (`enabled`, `tripped`, in-flight `pending` reservations, `lastUnlock`) lives in a shared SQLite WAL database (`$PHONEDOCK_HOME/passcodes.sqlite`, mode `0600`). Passcodes are never returned by any route, never written to `actions.jsonl`, and never echoed in errors.
 
 | Method | Path | Body | Response |
 |---|---|---|---|

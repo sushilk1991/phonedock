@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   PasscodeStore,
   createFileSecretStore,
   createKeychainSecretStore,
   keychainAccount,
+  keychainService,
   validatePasscode,
 } from './passcode-store.ts';
 import type { PhoneDockError } from './types.ts';
@@ -22,7 +23,27 @@ test('validatePasscode accepts printable ASCII and rejects empty, newlines, non-
   assert.throws(() => validatePasscode('a'.repeat(129)), (e: PhoneDockError) => e.code === 'bad_request');
 });
 
-test('createKeychainSecretStore writes hex over stdin via `security -i`, never puts secret in argv, and redacts errors', async () => {
+test('keychainService derives canonically from path regardless of PHONEDOCK_HOME env presence', () => {
+  const defaultPath = join(homedir(), 'Library', 'Application Support', 'PhoneDock');
+  const prevHome = process.env.PHONEDOCK_HOME;
+  const prevSvc = process.env.PHONEDOCK_PASSCODE_SERVICE;
+  delete process.env.PHONEDOCK_PASSCODE_SERVICE;
+  try {
+    delete process.env.PHONEDOCK_HOME;
+    const implicit = keychainService(defaultPath);
+    process.env.PHONEDOCK_HOME = defaultPath;
+    const explicit = keychainService(defaultPath);
+    assert.equal(implicit, 'com.phonedock.passcode');
+    assert.equal(explicit, 'com.phonedock.passcode');
+    const custom = keychainService('/tmp/pd-custom-home-xyz');
+    assert.match(custom, /^com\.phonedock\.passcode\.[0-9a-f]{12}$/);
+  } finally {
+    if (prevHome === undefined) delete process.env.PHONEDOCK_HOME; else process.env.PHONEDOCK_HOME = prevHome;
+    if (prevSvc === undefined) delete process.env.PHONEDOCK_PASSCODE_SERVICE; else process.env.PHONEDOCK_PASSCODE_SERVICE = prevSvc;
+  }
+});
+
+test('createKeychainSecretStore writes hex over stdin via `security -i`, never puts secret in argv, and uses fixed errors', async () => {
   const calls: { cmd: string; args: string[]; input?: string }[] = [];
   const store = createKeychainSecretStore('com.phonedock.test', async (cmd, args, opts) => {
     calls.push({ cmd, args, input: typeof opts?.input === 'string' ? opts.input : undefined });
@@ -44,7 +65,6 @@ test('createKeychainSecretStore writes hex over stdin via `security -i`, never p
   await store.del(acct);
   assert.deepEqual(calls[2].args, ['delete-generic-password', '-s', 'com.phonedock.test', '-a', acct]);
 
-  // Error from security -i must redact both raw secret and hex representation.
   const failing = createKeychainSecretStore('com.phonedock.test', async () => ({
     stdout: '',
     stderr: 'security: SecKeychainItemAdd failed for 9876 / 39383736',
@@ -55,7 +75,6 @@ test('createKeychainSecretStore writes hex over stdin via `security -i`, never p
     (e: PhoneDockError) => e.code === 'keychain_failed' && !String(e.detail).includes('9876') && !String(e.detail).includes('39383736'),
   );
 
-  // Not found (exit 44) returns null cleanly.
   const missing = createKeychainSecretStore('com.phonedock.test', async () => ({
     stdout: '',
     stderr: 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.',
@@ -64,61 +83,69 @@ test('createKeychainSecretStore writes hex over stdin via `security -i`, never p
   assert.equal(await missing.get(acct), null);
 });
 
-test('PasscodeStore persists 0600 metadata without secrets, enforces 1-failure circuit breaker, and cleans up on delete', async () => {
+test('PasscodeStore SQLite shares state across instances, preserves enabled on update, blocks unfinished attempts, and revokes durably on delete', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pd-passcode-test-'));
+  let store1: PasscodeStore | undefined;
+  let store2: PasscodeStore | undefined;
   try {
-    const metaPath = join(dir, 'passcodes.json');
+    const dbPath = join(dir, 'passcodes.sqlite');
     const secretPath = join(dir, 'passcodes.secrets.json');
     let ticks = 0;
-    const store = new PasscodeStore({
-      metaPath,
-      secretStore: createFileSecretStore(secretPath),
-      now: () => `2026-11-27T12:00:0${ticks++}Z`,
-    });
+    const secrets = createFileSecretStore(secretPath);
+    store1 = new PasscodeStore({ dbPath, secretStore: secrets, now: () => `2026-11-27T12:00:0${ticks++}Z` });
+    store2 = new PasscodeStore({ dbPath, secretStore: secrets, now: () => `2026-11-27T12:00:1${ticks++}Z` });
 
     const id = 'android-emulator:pdtest-pin';
-    assert.equal(store.isAutoUnlockReady(id), false);
-    assert.throws(() => store.setEnabled(id, true), (e: PhoneDockError) => e.code === 'passcode_not_set');
+    assert.equal(store1.isAutoUnlockReady(id), false);
+    assert.throws(() => store1!.setEnabled(id, true), (e: PhoneDockError) => e.code === 'passcode_not_set');
 
-    await store.savePasscode(id, '4321');
-    assert.equal(store.isAutoUnlockReady(id), true);
-    assert.equal(await store.getSecret(id), '4321');
+    // First save enables by default; second daemon immediately sees it.
+    await store1.savePasscode(id, '4321');
+    assert.equal(store1.isAutoUnlockReady(id), true);
+    assert.equal(store2.isAutoUnlockReady(id), true);
+    assert.equal(await store2.getSecret(id), '4321');
+    assert.equal(statSync(dbPath).mode & 0o777, 0o600);
+    assert.equal(readFileSync(dbPath).includes('4321'), false);
 
-    // passcodes.json must be mode 0600 and NEVER contain the passcode itself.
-    const metaRaw = readFileSync(metaPath, 'utf8');
-    assert.equal(metaRaw.includes('4321'), false);
-    assert.equal(statSync(metaPath).mode & 0o777, 0o600);
-    assert.equal(statSync(secretPath).mode & 0o777, 0o600);
+    // Updating a disabled passcode preserves enabled=false unless explicitly re-enabled.
+    store1.setEnabled(id, false);
+    assert.equal(store2.isAutoUnlockReady(id), false);
+    await store1.savePasscode(id, '5678');
+    assert.equal(store2.status(id, { supported: true }).enabled, false);
+    store2.setEnabled(id, true);
+    assert.equal(store1.isAutoUnlockReady(id), true);
 
-    const st = store.status(id, { supported: true });
-    assert.equal(st.hasPasscode, true);
-    assert.equal(st.enabled, true);
-    assert.equal(st.tripped, null);
-    assert.equal(JSON.stringify(st).includes('4321'), false);
+    // Unfinished (crash-interrupted) pending attempt immediately blocks a second daemon and persists across restart!
+    const attemptId = store1.reserveAttempt(id);
+    assert.ok(attemptId);
+    assert.equal(store2.isAutoUnlockReady(id), false);
+    assert.throws(() => store2!.reserveAttempt(id), (e: PhoneDockError) => e.code === 'passcode_tripped' && e.status === 409);
 
-    // Trip the 1-failure circuit breaker: disables auto-unlock and blocks re-enabling without re-saving.
-    store.recordOutcome(id, { ok: false, error: 'still locked', trip: true, tripReason: 'wrong pin' });
-    assert.equal(store.isAutoUnlockReady(id), false);
-    assert.equal(store.status(id, { supported: true }).enabled, false);
-    assert.equal(store.status(id, { supported: true }).tripped?.reason, 'wrong pin');
-    assert.throws(() => store.setEnabled(id, true), (e: PhoneDockError) => e.code === 'passcode_tripped' && e.status === 409);
+    // Completing as failed converts to tripped; setEnabled refuses until re-saved.
+    store1.completeAttempt(id, attemptId, { ok: false, error: 'still locked', tripReason: 'wrong pin' });
+    assert.throws(() => store2!.setEnabled(id, true), (e: PhoneDockError) => e.code === 'passcode_tripped');
 
-    // Re-saving clears the circuit breaker and re-enables.
-    await store.savePasscode(id, '5678');
-    assert.equal(store.isAutoUnlockReady(id), true);
-    assert.equal(store.status(id, { supported: true }).tripped, null);
-    assert.equal(await store.getSecret(id), '5678');
+    // Re-saving clears tripped; updating explicitly with enabled=true re-enables.
+    await store1.savePasscode(id, '1234', { enabled: true });
+    assert.equal(store2.isAutoUnlockReady(id), true);
 
-    // Reload from disk preserves metadata.
-    const reloaded = new PasscodeStore({ metaPath, secretStore: createFileSecretStore(secretPath) });
-    assert.equal(reloaded.isAutoUnlockReady(id), true);
-    assert.equal(await reloaded.getSecret(id), '5678');
-
-    // Deletion removes both metadata and secret.
-    await reloaded.onDeviceDeleted(id);
-    assert.equal(reloaded.isAutoUnlockReady(id), false);
-    assert.equal(await reloaded.getSecret(id), null);
+    // Durable pre-delete revocation: even if Keychain delete fails, SQLite record is already revoked!
+    const failingDelStore = new PasscodeStore({
+      dbPath,
+      secretStore: {
+        storageName: 'keychain',
+        set: async () => {},
+        get: async () => '1234',
+        del: async () => { throw new Error('keychain locked'); },
+      },
+    });
+    await failingDelStore.remove(id);
+    assert.equal(store1.status(id, { supported: true }).hasPasscode, false);
+    assert.equal(store2.isAutoUnlockReady(id), false);
+    failingDelStore.close();
   } finally {
+    store1?.close();
+    store2?.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -730,8 +730,10 @@ export interface Backend {
   // ── lock state & unattended unlock (optional; 501 not_supported when absent) ──
   /** Read whether the device is locked, whether it has been unlocked since boot, and whether credentials are required. */
   lockState?(nativeId: string): Promise<LockStateInfo>;
-  /** Wake and unlock the device using an optional saved passcode (daemon supplies from Keychain; never log or echo). */
-  unlock?(nativeId: string, passcode?: string): Promise<UnlockResult>;
+  /** Wake and unlock the device using an optional saved passcode (daemon supplies from Keychain; never log or echo).
+   *  `beforeDispatch` is invoked immediately before any credential byte can leave the host, after confirming the
+   *  device is still locked and ready to accept credentials. */
+  unlock?(nativeId: string, passcode?: string, opts?: { beforeDispatch?: () => void | Promise<void> }): Promise<UnlockResult>;
 }
 
 // ── Managed components (GET /v1/components, POST /v1/components/:id/install) ──

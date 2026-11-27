@@ -185,9 +185,10 @@ r.del('/v1/devices/:id', async (c) => {
     await stopRecordingFor(id, 'device deleted');
     await stopTraceFor(id, 'device deleted').catch(() => undefined);
     await stopLocationRoute(id, false);
+    // Durably revoke any saved passcode BEFORE destroying the device so a replacement same-named AVD cannot inherit it.
+    await maybePasscodeManager()?.revokeBeforeDelete(id);
     await need(b, 'delete', 'delete')(nid);
     await proxyManager().onDeviceDeleted(id);
-    await maybePasscodeManager()?.onDeviceDeleted(id);
     removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
     invalidateDevices();
     return { ok: true };

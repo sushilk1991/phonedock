@@ -79,9 +79,22 @@ async function withUiObservation(id: string, result: unknown, settleMs?: number)
   } catch { return { ...result, observationUnavailable: true }; }
 }
 
+/** True when the request consists solely of hardware power/lock/wake key presses (never auto-unlock before locking). */
+function isPowerOnlyInput(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const b = body as { action?: unknown; key?: unknown; actions?: unknown };
+  const list = Array.isArray(b.actions) ? b.actions : [b];
+  if (!list.length) return false;
+  return list.every((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const a = item as { action?: unknown; key?: unknown };
+    return a.action === 'key' && /^(lock|power|wake|keycode_sleep|keycode_power|keycode_wakeup)$/i.test(String(a.key ?? ''));
+  });
+}
+
 /** Wrap an input route: a result (a plain object) gets `delivery` and `retrySafe` (from the actions logged during the
  *  request); a thrown error gets `delivery` (sendError writes both). */
-export function inputRoute(h: Handler): Handler {
+export function inputRoute(h: Handler, opts: { skipAutoUnlock?: boolean } = {}): Handler {
   const execute = async (c: Ctx) => {
     const id = c.params.id;
     try { checkLease(id, c.owner); } catch (e) { if (e instanceof PhoneDockError) e.delivery = 'not_sent'; throw e; }
@@ -116,10 +129,10 @@ export function inputRoute(h: Handler): Handler {
         try {
           const started = performance.now();
           let result: unknown;
-          const pm = maybePasscodeManager();
-          const isPowerKey = body?.action === 'key' && /^(lock|power|wake|keycode_sleep|keycode_power|keycode_wakeup)$/i.test(String(body.key ?? ''));
+          const pm = opts.skipAutoUnlock ? undefined : maybePasscodeManager();
+          const powerOnly = isPowerOnlyInput(body);
           try {
-            if (!isPowerKey && pm?.isAutoUnlockReady(id)) {
+            if (!powerOnly && pm?.isAutoUnlockReady(id)) {
               try {
                 await pm.ensureUnlockedBeforeInput(id, c.owner);
               } catch (ue) {
@@ -131,15 +144,19 @@ export function inputRoute(h: Handler): Handler {
             try {
               result = await h(c);
             } catch (e) {
+              // Only replay when the lock guard explicitly proved nothing was dispatched (`delivery === 'not_sent'`).
               if (
                 !scope.sent && !scope.uncertain
-                && e instanceof PhoneDockError && e.code === 'device_locked'
+                && e instanceof PhoneDockError && e.code === 'device_locked' && e.delivery === 'not_sent'
                 && pm?.isAutoUnlockReady(id)
               ) {
                 try {
-                  await pm.unlock(id, c.owner, { auto: true, skipLeaseCheck: true });
+                  await pm.unlock(id, c.owner, { auto: true, skipLeaseCheck: true, assertOwnership: () => scope.assertAllowed() });
                 } catch (ue) {
-                  if (ue instanceof PhoneDockError && !ue.delivery) ue.delivery = 'not_sent';
+                  if (ue instanceof PhoneDockError) {
+                    // The caller's requested tap/launch was never sent (even if unlock status itself is unknown).
+                    ue.delivery = 'not_sent';
+                  }
                   throw ue;
                 }
                 scope.assertAllowed();

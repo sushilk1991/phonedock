@@ -1,10 +1,8 @@
 // Daemon-side unattended passcode unlock orchestration.
-// - Wraps PasscodeStore (Keychain + 0600 metadata) with per-device serialized unlock locks.
-// - Enforces the strict 1-failure circuit breaker so a changed passcode can never trigger device lockout/wipe.
-// - Provides lightweight cached lock-state checks for Android devices ONLY when unattended unlock is active.
-// - Never returns, logs, or leaks the passcode.
+// - Backed by PasscodeStore (Keychain + shared SQLite WAL metadata with atomic pending-attempt reservation).
+// - Enforces the strict 1-failure / 1-ambiguous-attempt circuit breaker across crashes and multiple daemons.
+// - Never returns, logs, or leaks raw exception stacks or credentials.
 import { PasscodeStore, type PasscodeStatus, type PasscodeStoreOptions } from '../core/passcode-store.ts';
-import { redactSecretStrings } from '../core/secrets.ts';
 import { PhoneDockError, type Backend, type Device, type LockStateInfo, type UnlockResult } from '../core/types.ts';
 
 export interface PasscodeDeps {
@@ -31,7 +29,8 @@ export function passcodeSupportForDevice(
     return { supported: false, reason: 'iOS simulators do not have a lock screen passcode.' };
   }
   if (d.backend === 'ios-device') {
-    if (d.capabilities.includes('unlock')) return { supported: true };
+    const major = Number.parseInt(String(d.osVersion ?? '').split('.')[0], 10) || 0;
+    if (d.capabilities.includes('unlock') || major >= 27) return { supported: true };
     return {
       supported: false,
       reason: 'iOS 18–26 blocks WebDriverAgent from entering passcodes. Turn off the passcode on this iPhone, or use an iPhone on iOS 27+.',
@@ -45,6 +44,14 @@ export function passcodeSupportForDevice(
 }
 
 const ANDROID_LOCK_TTL_MS = 1_500;
+
+/** Convert any thrown error in a credential path into a safe allowlisted PhoneDockError (never exposing raw stderr/stacks). */
+function safeCredentialError(e: unknown, fallbackMessage: string, fallbackCode: string, fallbackStatus: number, delivery: 'not_sent' | 'unknown'): PhoneDockError {
+  if (e instanceof PhoneDockError) {
+    return new PhoneDockError(e.message, e.code, e.status, e.hints, e.detail, e.delivery ?? delivery);
+  }
+  return new PhoneDockError(fallbackMessage, fallbackCode, fallbackStatus, undefined, undefined, delivery);
+}
 
 export class PasscodeManager {
   readonly store: PasscodeStore;
@@ -62,9 +69,10 @@ export class PasscodeManager {
         deps.emitEvent?.('passcode', { deviceId });
       },
     });
+    void this.store.drainPendingDeletes().catch(() => undefined);
   }
 
-  /** Serialize unlock & passcode mutations per device so concurrent requests never double-submit a passcode. */
+  /** Serialize unlock & passcode mutations per device within this daemon (SQLite serializes across daemons). */
   private withLock<T>(deviceId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.locks.get(deviceId) ?? Promise.resolve();
     const next = prev.then(fn, fn);
@@ -97,33 +105,40 @@ export class PasscodeManager {
     owner: string,
   ): Promise<PasscodeStatus> {
     return this.withLock(deviceId, async () => {
-      const d = await this.deps.getDevice(deviceId);
-      const support = passcodeSupportForDevice(d);
-      if (!support.supported) {
-        throw new PhoneDockError(
-          'Unattended passcode unlock is not supported on this device',
-          'not_supported',
-          501,
-          support.reason ? [support.reason] : undefined,
-        );
+      try {
+        const d = await this.deps.getDevice(deviceId);
+        const support = passcodeSupportForDevice(d);
+        if (!support.supported) {
+          throw new PhoneDockError(
+            'Unattended passcode unlock is not supported on this device',
+            'not_supported',
+            501,
+            support.reason ? [support.reason] : undefined,
+          );
+        }
+        const hasPasscodeInput = body.passcode !== undefined;
+        const hasEnabledInput = body.enabled !== undefined;
+        if (!hasPasscodeInput && !hasEnabledInput) {
+          throw new PhoneDockError('Provide passcode and/or enabled', 'bad_request', 400);
+        }
+        if (hasEnabledInput && typeof body.enabled !== 'boolean') {
+          throw new PhoneDockError('enabled must be a boolean', 'bad_request', 400);
+        }
+        if (hasPasscodeInput) {
+          const rec = await this.store.savePasscode(
+            deviceId,
+            body.passcode as string,
+            hasEnabledInput ? { enabled: body.enabled as boolean } : {},
+          );
+          this.deps.logAction?.(deviceId, owner, { action: 'device.passcode_saved', enabled: rec.enabled });
+        } else if (typeof body.enabled === 'boolean') {
+          this.store.setEnabled(deviceId, body.enabled);
+          this.deps.logAction?.(deviceId, owner, { action: 'device.passcode_toggled', enabled: body.enabled });
+        }
+        return this.store.status(deviceId, support);
+      } catch (e) {
+        throw safeCredentialError(e, 'Couldn’t save passcode configuration', 'passcode_config_failed', 500, 'not_sent');
       }
-      const hasPasscodeInput = body.passcode !== undefined;
-      const hasEnabledInput = body.enabled !== undefined;
-      if (!hasPasscodeInput && !hasEnabledInput) {
-        throw new PhoneDockError('Provide passcode and/or enabled', 'bad_request', 400);
-      }
-      if (hasEnabledInput && typeof body.enabled !== 'boolean') {
-        throw new PhoneDockError('enabled must be a boolean', 'bad_request', 400);
-      }
-      if (hasPasscodeInput) {
-        const enabled = typeof body.enabled === 'boolean' ? body.enabled : true;
-        await this.store.savePasscode(deviceId, body.passcode as string, { enabled });
-        this.deps.logAction?.(deviceId, owner, { action: 'device.passcode_saved', enabled });
-      } else if (typeof body.enabled === 'boolean') {
-        this.store.setEnabled(deviceId, body.enabled);
-        this.deps.logAction?.(deviceId, owner, { action: 'device.passcode_toggled', enabled: body.enabled });
-      }
-      return this.store.status(deviceId, support);
     });
   }
 
@@ -136,9 +151,13 @@ export class PasscodeManager {
     });
   }
 
-  async onDeviceDeleted(deviceId: string): Promise<void> {
-    this.androidLockCache.delete(deviceId);
-    await this.store.onDeviceDeleted(deviceId);
+  /** Durably revoke the credential under the per-device lock BEFORE destroying a device so a replacement
+   *  same-named AVD can never inherit the old credential. */
+  async revokeBeforeDelete(deviceId: string): Promise<void> {
+    await this.withLock(deviceId, async () => {
+      this.androidLockCache.delete(deviceId);
+      await this.store.remove(deviceId);
+    });
   }
 
   invalidateLockCache(deviceId: string): void {
@@ -181,14 +200,15 @@ export class PasscodeManager {
   }
 
   /** Unlock a device using its saved Keychain passcode (if credentials are required).
-   *  Enforces lease, opt-in toggle, BFU safety, and 1-failure circuit breaker. */
+   *  Enforces lease, opt-in toggle, BFU safety, ownership fence, and atomic 1-failure / 1-ambiguous-attempt breaker. */
   async unlock(
     deviceId: string,
     owner: string,
-    opts: { auto?: boolean; skipLeaseCheck?: boolean } = {},
+    opts: { auto?: boolean; skipLeaseCheck?: boolean; assertOwnership?: () => void } = {},
   ): Promise<UnlockResponse> {
     return this.withLock(deviceId, async () => {
       if (!opts.skipLeaseCheck) this.deps.checkLease(deviceId, owner);
+      opts.assertOwnership?.();
       const d = await this.deps.getDevice(deviceId);
       const support = passcodeSupportForDevice(d);
       const { backend, nativeId } = this.deps.splitId(deviceId);
@@ -200,6 +220,8 @@ export class PasscodeManager {
           'not_supported',
           501,
           support.reason ? [support.reason] : undefined,
+          undefined,
+          'not_sent',
         );
       }
 
@@ -209,22 +231,26 @@ export class PasscodeManager {
           'not_running',
           409,
           ['Start or connect the device first.'],
+          undefined,
+          'not_sent',
         );
       }
 
-      // Probe current lock state first so already-unlocked or swipe-only devices work smoothly.
+      // Probe current lock state first so already-unlocked or swipe-only devices work without touching Keychain.
       let state: LockStateInfo | undefined;
       if (typeof b.lockState === 'function') {
         state = await b.lockState(nativeId).catch(() => undefined);
       }
 
       if (state?.unlockedSinceBoot === false) {
-        this.store.recordOutcome(deviceId, { ok: false, error: 'Device has not been unlocked since reboot', trip: false });
+        this.store.recordPreDispatchOutcome(deviceId, { ok: false, error: 'Device has not been unlocked since reboot' });
         throw new PhoneDockError(
           'The device must be unlocked manually once after reboot',
           'before_first_unlock',
           409,
           ['Enter the passcode directly on the device once (request_human), then unattended unlock will work for future locks.'],
+          undefined,
+          'not_sent',
         );
       }
 
@@ -234,18 +260,25 @@ export class PasscodeManager {
         return { ok: true, deviceId, ...res };
       }
 
-      // Swipe-only lock screen on Android: unlock without touching any saved passcode.
-      if (state?.locked === true && state.secure === false) {
-        const res = await b.unlock(nativeId);
-        if (res.unlocked) {
-          this.androidLockCache.set(deviceId, { at: Date.now(), locked: false });
-          this.deps.clearUiCache?.(deviceId);
-          this.deps.logAction?.(deviceId, owner, { action: 'device.unlock', ok: true, method: res.method ?? 'dismiss_keyguard' });
-          return { ok: true, deviceId, ...res };
+      // Swipe-only or unknown-security confirmed keyguard on Android: try credential-free dismissal first.
+      if (state?.locked === true && (state.secure === false || state.secure === null) && (backend === 'android-device' || backend === 'android-emulator')) {
+        try {
+          const res = await b.unlock(nativeId, undefined);
+          if (res.unlocked) {
+            this.androidLockCache.set(deviceId, { at: Date.now(), locked: false });
+            this.deps.clearUiCache?.(deviceId);
+            this.deps.logAction?.(deviceId, owner, { action: 'device.unlock', ok: true, method: res.method ?? 'dismiss_keyguard' });
+            return { ok: true, deviceId, ...res };
+          }
+        } catch (e) {
+          // If backend reported passcode_required, continue to saved-passcode path below.
+          if (!(e instanceof PhoneDockError && e.code === 'passcode_required')) {
+            throw safeCredentialError(e, 'Couldn’t dismiss the lock screen', 'unlock_failed', 502, 'not_sent');
+          }
         }
       }
 
-      // Credentials required (or security unknown while locked): check saved passcode, opt-in toggle, and circuit breaker.
+      // Credentials required: validate latest shared SQLite state BEFORE reading Keychain.
       const rec = this.store.getRecord(deviceId);
       if (!rec) {
         throw new PhoneDockError(
@@ -253,82 +286,121 @@ export class PasscodeManager {
           'passcode_required',
           409,
           ['Save the device passcode in PhoneDock Device Settings (Unattended Unlock), or call request_human to have the user unlock it.'],
+          undefined,
+          'not_sent',
         );
       }
-      if (rec.tripped) {
+      if (rec.tripped || rec.pending) {
         throw new PhoneDockError(
-          'Unattended unlock is paused after a failed attempt',
+          'Unattended unlock is paused after a failed or unfinished attempt',
           'passcode_tripped',
           409,
           ['Re-save the device passcode in PhoneDock Device Settings to verify it and re-enable unattended unlock, or call request_human.'],
-          rec.tripped.reason,
+          rec.tripped?.reason,
+          'not_sent',
         );
       }
-      const isHumanApp = owner === 'app:human';
-      if (!rec.enabled && (opts.auto || !isHumanApp)) {
+      if (!rec.enabled) {
         throw new PhoneDockError(
           'Unattended unlock is turned off for this device',
           'unattended_unlock_disabled',
           403,
           ['Turn on "Allow agent to unlock" in PhoneDock Device Settings, or call request_human.'],
+          undefined,
+          'not_sent',
         );
       }
 
-      const secret = await this.store.getSecret(deviceId);
+      let secret: string | null;
+      try {
+        secret = await this.store.getSecret(deviceId);
+      } catch (e) {
+        throw safeCredentialError(e, 'Couldn’t read passcode from Keychain', 'keychain_failed', 500, 'not_sent');
+      }
       if (!secret) {
         throw new PhoneDockError(
           'Saved passcode is missing from Keychain',
           'passcode_missing',
           409,
           ['Re-save the passcode in PhoneDock Device Settings (Unattended Unlock).'],
+          undefined,
+          'not_sent',
         );
       }
 
+      // Reserve the one-shot attempt atomically inside SQLite right before the first credential byte leaves,
+      // re-checking ownership and shared permission state at the dispatch boundary.
+      let attemptId: string | undefined;
       let res: UnlockResult;
       try {
-        res = await b.unlock(nativeId, secret);
+        res = await b.unlock(nativeId, secret, {
+          beforeDispatch: () => {
+            if (!opts.skipLeaseCheck) this.deps.checkLease(deviceId, owner);
+            opts.assertOwnership?.();
+            attemptId = this.store.reserveAttempt(deviceId);
+          },
+        });
       } catch (e) {
-        const cleanMsg = redactSecretStrings(e instanceof Error ? e.message : String(e), [secret]);
-        if (e instanceof PhoneDockError) {
-          e.message = cleanMsg;
-          if (e.detail) e.detail = redactSecretStrings(e.detail, [secret]);
-          if (e.hints) e.hints = e.hints.map((h) => redactSecretStrings(h, [secret]));
+        const delivery = attemptId ? 'unknown' : 'not_sent';
+        const safe = safeCredentialError(e, 'Couldn’t complete the unlock operation', 'unlock_failed', 502, delivery);
+        if (attemptId) {
+          // Credential bytes may have left the host: keep the device paused across restarts/daemons.
+          this.store.completeAttempt(deviceId, attemptId, {
+            ok: false,
+            error: safe.message,
+            tripReason: 'Unlock attempt ended unexpectedly after credential dispatch; unattended unlock paused to prevent lockout.',
+          });
+          this.deps.logAction?.(deviceId, owner, { action: 'device.unlock_failed', reason: 'unlock_unverified', tripped: true });
+        } else {
+          this.store.recordPreDispatchOutcome(deviceId, { ok: false, error: safe.message });
+          this.deps.logAction?.(deviceId, owner, { action: 'device.unlock_failed', error: safe.message });
         }
-        // Channel/transport errors do NOT trip the wrong-passcode breaker.
-        this.store.recordOutcome(deviceId, { ok: false, error: cleanMsg, trip: false });
-        this.deps.logAction?.(deviceId, owner, { action: 'device.unlock_failed', error: cleanMsg });
-        throw e;
+        throw safe;
       }
 
       if (res.unlocked) {
-        this.store.recordOutcome(deviceId, { ok: true, method: res.method });
+        if (attemptId) {
+          this.store.completeAttempt(deviceId, attemptId, { ok: true, method: res.method });
+        } else {
+          this.store.recordPreDispatchOutcome(deviceId, { ok: true, method: res.method });
+        }
         this.androidLockCache.set(deviceId, { at: Date.now(), locked: false });
         this.deps.clearUiCache?.(deviceId);
         this.deps.logAction?.(deviceId, owner, { action: 'device.unlock', ok: true, method: res.method ?? 'passcode', ...(opts.auto ? { auto: true } : {}) });
         return { ok: true, deviceId, ...res };
       }
 
-      if (res.reason === 'before_first_unlock') {
-        this.store.recordOutcome(deviceId, { ok: false, error: 'Before first unlock after reboot', trip: false });
+      if (res.reason === 'before_first_unlock' && !attemptId) {
+        this.store.recordPreDispatchOutcome(deviceId, { ok: false, error: 'Before first unlock after reboot' });
         throw new PhoneDockError(
           'The device must be unlocked manually once after reboot',
           'before_first_unlock',
           409,
           ['Unlock the device manually once, then unattended unlock will work for future locks.'],
+          undefined,
+          'not_sent',
         );
       }
 
-      // Keystrokes were entered and the device stayed locked: TRIP THE 1-FAILURE CIRCUIT BREAKER immediately.
-      const tripReason = 'Device remained locked after entering the saved passcode; unattended unlock paused to prevent lockout.';
-      this.store.recordOutcome(deviceId, { ok: false, error: tripReason, trip: true, tripReason });
+      // Credential was dispatched and either stayed locked (wrong_passcode) or could not be verified (unlock_unverified).
+      const unverified = res.reason === 'unlock_unverified';
+      const tripReason = unverified
+        ? 'Unlock status could not be confirmed after credential dispatch; unattended unlock paused to prevent lockout.'
+        : 'Device remained locked after entering the saved passcode; unattended unlock paused to prevent lockout.';
+      if (attemptId) {
+        this.store.completeAttempt(deviceId, attemptId, { ok: false, error: tripReason, tripReason });
+      }
       this.androidLockCache.set(deviceId, { at: Date.now(), locked: true });
       this.deps.logAction?.(deviceId, owner, { action: 'device.unlock_failed', reason: res.reason ?? 'wrong_passcode', tripped: true });
       throw new PhoneDockError(
-        'Saved passcode did not unlock the device — unattended unlock paused',
+        unverified
+          ? 'Couldn’t confirm device unlocked — unattended unlock paused'
+          : 'Saved passcode did not unlock the device — unattended unlock paused',
         'passcode_tripped',
         409,
-        ['Check the passcode and re-save it in PhoneDock Device Settings to re-enable unattended unlock, or call request_human.'],
+        ['Check the device and re-save the passcode in PhoneDock Device Settings to re-enable unattended unlock, or call request_human.'],
         tripReason,
+        unverified ? 'unknown' : 'sent',
       );
     });
   }

@@ -274,5 +274,5 @@ export const backend: Backend & {
   async stopTrace(s) { return T.stopPerfetto(await requireOnline(s)); },
   async abortTrace(s) { await T.abortPerfetto(s); },
   async lockState(s) { return androidLockState(await requireOnline(s)); },
-  async unlock(s, passcode) { return androidUnlock(await requireOnline(s), passcode); },
+  async unlock(s, passcode, opts) { return androidUnlock(await requireOnline(s), passcode, { beforeDispatch: opts?.beforeDispatch }); },
 };

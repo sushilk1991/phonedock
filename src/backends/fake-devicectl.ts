@@ -15,10 +15,20 @@ export interface FakePhone {
   /** Only the deprecated `connectionProperties` (devicectl before Xcode 27), without `properties.connection`. */
   legacyOnly?: boolean;
 }
+export interface FakeApp {
+  bundleIdentifier: string;
+  url: string;
+  executable?: string;
+  pids: number[];
+  ignoresSigterm?: boolean;
+  ignoresSigkill?: boolean;
+}
 export interface FakeScenario {
   phones: FakePhone[];
   /** WebDriverAgent runner pids on each phone (by udid); terminate removes them. */
   runners: Record<string, number[]>;
+  /** Installed apps and their running processes (by udid), for terminateApp tests. */
+  apps?: Record<string, FakeApp[]>;
   /** `list devices` and `info processes` sleep this long (ms). */
   delayMs?: number;
 }
@@ -90,17 +100,37 @@ async function main(file: string, log: string, argv: string[]): Promise<number> 
     return reply({ devices: shown });
   }
   if (!phone) { writeFileSync(out, JSON.stringify({ info: { outcome: 'failed' }, error: { description: `no device ${dev}` } })); return 1; }
+  if (a === 'device' && b === 'info' && c === 'apps') {
+    const bundleId = argv.includes('--bundle-id') ? argv[argv.indexOf('--bundle-id') + 1] : undefined;
+    const all = s.apps?.[phone.udid] ?? [];
+    const list = bundleId ? all.filter((x) => x.bundleIdentifier === bundleId) : all;
+    return reply({ apps: list.map((x) => ({ bundleIdentifier: x.bundleIdentifier, url: x.url })) });
+  }
   if (a === 'device' && b === 'info' && c === 'processes') {
     await sleep();
     const pids = s.runners[phone.udid] ?? [];
+    const appProcs = (s.apps?.[phone.udid] ?? []).flatMap((app) =>
+      app.pids.map((pid) => ({
+        executable: app.executable ?? `${app.url.replace(/\/$/, '')}/AppBinary`,
+        processIdentifier: pid,
+      })),
+    );
     return reply({ runningProcesses: [
       { executable: 'file:///usr/libexec/backboardd', processIdentifier: 40 },
       ...pids.map((pid) => ({ executable: `file:///private/var/containers/Bundle/Application/X/WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner`, processIdentifier: pid })),
+      ...appProcs,
     ] });
   }
   if (a === 'device' && b === 'process' && c === 'terminate') {
     const pid = Number(argv[argv.indexOf('--pid') + 1]);
+    const kill = argv.includes('--kill');
     s.runners[phone.udid] = (s.runners[phone.udid] ?? []).filter((p) => p !== pid);
+    for (const app of s.apps?.[phone.udid] ?? []) {
+      if (!app.pids.includes(pid)) continue;
+      if (kill ? !app.ignoresSigkill : !app.ignoresSigterm) {
+        app.pids = app.pids.filter((p) => p !== pid);
+      }
+    }
     writeFileSync(file, JSON.stringify(s));
     return reply({});
   }

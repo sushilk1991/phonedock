@@ -16,7 +16,8 @@ export type LockProbe = (udid: string) => Promise<boolean | null>;
 export function lockedError(): PhoneDockError {
   return new PhoneDockError('The iPhone is locked', 'device_locked', 409,
     ['Ask the person to unlock the iPhone (request_human), then try again.'],
-    'devicectl lockState: passcodeRequired. Input on a locked iPhone lands on the Lock Screen, so PhoneDock didn’t send it.');
+    'devicectl lockState: passcodeRequired. Input on a locked iPhone lands on the Lock Screen, so PhoneDock didn’t send it.',
+    'not_sent');
 }
 
 export function lockGuard(probe: LockProbe, now: () => number = Date.now, ttlMs = LOCK_TTL_MS) {

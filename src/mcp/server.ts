@@ -1125,8 +1125,13 @@ function makeClient(base?: PhoneDockClient): PhoneDockClient {
 }
 
 function setOwnerOnInit(server: McpServer, client: PhoneDockClient, fixed?: string): void {
-  client.owner = fixed ?? process.env.PHONEDOCK_OWNER ?? `mcp:agent:${process.pid}`;
-  if (fixed || process.env.PHONEDOCK_OWNER) return;
+  const raw = fixed ?? process.env.PHONEDOCK_OWNER;
+  if (raw) {
+    // Keep MCP server identities inside the reserved `mcp:` namespace so launch config cannot spoof human/CLI roles.
+    client.owner = /^mcp:/i.test(raw) ? raw : `mcp:${raw}`;
+    return;
+  }
+  client.owner = `mcp:agent:${process.pid}`;
   server.server.oninitialized = () => {
     const name = server.server.getClientVersion()?.name?.replace(/[^\w.-]+/g, '-') || 'agent';
     client.owner = `mcp:${name}:${process.pid}`;

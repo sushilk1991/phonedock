@@ -349,6 +349,7 @@ private struct DevicePasscodeSection: View {
     @Environment(AppModel.self) private var model
     let device: Device
     @State private var status: PasscodeStatusResponse?
+    @State private var loadFailed = false
     @State private var passcodeInput = ""
     @State private var working = false
     @State private var feedback: String?
@@ -419,7 +420,7 @@ private struct DevicePasscodeSection: View {
                                 Spacer()
                                 Button("Unlock Now") { unlockNow() }
                                     .controlSize(.small)
-                                    .disabled(working || !device.isRunning || device.leasedByAgent || status.tripped != nil)
+                                    .disabled(working || !device.isRunning || device.leasedByAgent || !status.enabled || status.tripped != nil)
                                     .testAnchor("Unlock Now")
                                 Button("Remove", role: .destructive) { removePasscode() }
                                     .controlSize(.small)
@@ -444,6 +445,9 @@ private struct DevicePasscodeSection: View {
                             .font(Theme.Fonts.meta)
                             .foregroundStyle(Theme.Ink.tertiary)
                     }
+                } else if loadFailed {
+                    Button("Retry Unattended Unlock") { Task { await load() } }
+                        .controlSize(.small)
                 } else {
                     DelayedSpinner().frame(height: 28)
                 }
@@ -451,28 +455,38 @@ private struct DevicePasscodeSection: View {
             .font(Theme.Fonts.callout)
             .padding(.horizontal, Theme.Space.l)
         }
-        .task(id: "\(device.id):\(device.state)") { await load() }
+        .task(id: "\(device.id):\(device.state):\(device.meta?["passcode"]?.description ?? "")") { await load() }
     }
 
     private func load() async {
         guard let c = model.client else { return }
-        if let res = try? await c.get(PasscodeStatusResponse.self, c.dev(device.id, "/passcode"), observe: true) {
-            status = res
+        do {
+            status = try await c.get(PasscodeStatusResponse.self, c.dev(device.id, "/passcode"), observe: true)
+            loadFailed = false
+        } catch {
+            loadFailed = true
         }
     }
 
     private func savePasscode() {
         let secret = passcodeInput
         guard !secret.isEmpty, !working, let c = model.client else { return }
+        let wasExisting = status?.hasPasscode == true
+        let wasTripped = status?.tripped != nil
+        let targetEnabled: Bool = wasExisting ? (wasTripped ? false : (status?.enabled ?? false)) : true
         working = true
         feedback = nil
         Task {
             defer { working = false }
             do {
-                let data = try await c.send("PUT", c.dev(device.id, "/passcode"), json: ["passcode": secret, "enabled": true])
+                let data = try await c.send("PUT", c.dev(device.id, "/passcode"), json: ["passcode": secret, "enabled": targetEnabled])
                 status = try JSONDecoder().decode(PasscodeStatusResponse.self, from: data)
                 passcodeInput = ""
-                feedback = "Passcode saved in macOS Keychain."
+                if wasTripped {
+                    feedback = "Passcode updated. Turn on \"Allow agent to unlock\" to re-enable."
+                } else {
+                    feedback = wasExisting ? "Passcode updated in macOS Keychain." : "Passcode saved in macOS Keychain."
+                }
             } catch {
                 model.fail("Couldn’t save passcode", error, device: device)
             }

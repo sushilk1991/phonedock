@@ -261,7 +261,7 @@ export const wokeHeader = (w: WakeResult) => `${w.ms}; name=${encodeURIComponent
 /** Input routes not aimed at a screen: after a fresh start they go ahead; every other (tap, swipe, back…) is handed back. */
 const NOT_SCREEN_INPUT = new Set([
   'POST /v1/devices/:id/apps/:appId/launch', 'POST /v1/devices/:id/clipboard', 'PUT /v1/devices/:id/clipboard',
-  'POST /v1/devices/:id/keyboard/hide', 'POST /v1/devices/:id/environment',
+  'POST /v1/devices/:id/keyboard/hide', 'POST /v1/devices/:id/environment', 'POST /v1/devices/:id/unlock',
 ]);
 /** Requests without a receipt that may act on a screen: a replay's job, and a shell command (`input tap …`, or anything
  *  else written for the screen it had). After a fresh start they are handed back before they run. */

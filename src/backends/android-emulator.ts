@@ -805,7 +805,7 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   async stopTrace(name) { return T.stopPerfetto(await requireSerial(name)); },
   async abortTrace(name) { const s = await serialFor(name).catch(() => undefined); if (s) await T.abortPerfetto(s); },
   async lockState(name) { return androidLockState(await requireSerial(name)); },
-  async unlock(name, passcode) { return androidUnlock(await requireSerial(name), passcode); },
+  async unlock(name, passcode, opts) { return androidUnlock(await requireSerial(name), passcode, { beforeDispatch: opts?.beforeDispatch }); },
   async info(name) {
     const a = requireAvd(name);
     const s = await serialFor(name);

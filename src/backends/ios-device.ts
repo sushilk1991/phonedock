@@ -14,7 +14,6 @@ import { basename, dirname, join } from 'node:path';
 import { run, runBuffer, sleep, type RunOptions } from '../core/exec.ts';
 import { assertInputFence } from '../core/input-fence.ts';
 import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
-import { redactSecretStrings } from '../core/secrets.ts';
 import { getComponentManager, resolveWdaSource } from '../core/components.ts';
 import {
   PhoneDockError,
@@ -1362,18 +1361,109 @@ export const backend: Backend & {
   },
 
   async terminateApp(udid, appId) {
-    if (wdaUrl(udid)) { await wdaSession(udid, 'POST', '/wda/apps/terminate', { bundleId: appId }); return; }
-    // devicectl terminates by pid: find the app's bundle URL, then its running process
-    udid = dcId(udid);
-    // --include-all-apps: without it, system apps (Calculator, Settings…) come back as an empty list.
-    const apps = await devicectl<{ apps?: any[] }>(['device', 'info', 'apps', '--device', udid, '--bundle-id', appId, '--include-all-apps'])
-      .catch(() => devicectl<{ apps?: any[] }>(['device', 'info', 'apps', '--device', udid, '--bundle-id', appId]));
-    const url: string | undefined = apps?.apps?.[0]?.url;
+    const matchPids = (procs: { executable?: string; processIdentifier: number }[] | undefined, appUrl: string): number[] => {
+      const base = appUrl.endsWith('/') ? appUrl : `${appUrl}/`;
+      return (procs ?? [])
+        .filter((pr) => {
+          const exe = pr.executable ?? '';
+          if (!exe) return false;
+          if (exe === appUrl) return true;
+          if (!exe.startsWith(base)) return false;
+          const rel = exe.slice(base.length);
+          return !rel.startsWith('PlugIns/') && !rel.includes('/PlugIns/');
+        })
+        .map((pr) => pr.processIdentifier);
+    };
+    const lookupAppUrl = async (dcUdid: string): Promise<string | undefined> => {
+      // --include-all-apps: without it, system apps (Calculator, Settings…) come back as an empty list.
+      const apps = await devicectl<{ apps?: any[] }>(['device', 'info', 'apps', '--device', dcUdid, '--bundle-id', appId, '--include-all-apps'])
+        .catch(() => devicectl<{ apps?: any[] }>(['device', 'info', 'apps', '--device', dcUdid, '--bundle-id', appId]));
+      return apps?.apps?.[0]?.url;
+    };
+    const listAppPids = async (dcUdid: string, appUrl: string): Promise<number[]> => {
+      const procs = await devicectl<{ runningProcesses?: { executable?: string; processIdentifier: number }[] }>(
+        ['device', 'info', 'processes', '--device', dcUdid],
+      );
+      return matchPids(procs?.runningProcesses, appUrl);
+    };
+    const waitForPidsToExit = async (dcUdid: string, appUrl: string, targetPids: number[], attempts: number, intervalMs: number): Promise<number[]> => {
+      let alive = targetPids;
+      for (let i = 0; i < attempts; i++) {
+        const cur = await listAppPids(dcUdid, appUrl);
+        alive = targetPids.filter((pid) => cur.includes(pid));
+        if (!alive.length) return [];
+        if (i + 1 < attempts) await sleep(intervalMs);
+      }
+      return alive;
+    };
+    const forceKillAndVerify = async (dcUdid: string, appUrl: string, pids: number[], via: string): Promise<void> => {
+      for (const pid of pids) {
+        await devicectl(['device', 'process', 'terminate', '--device', dcUdid, '--pid', String(pid), '--kill']).catch(() => undefined);
+      }
+      const surviving = await waitForPidsToExit(dcUdid, appUrl, pids, 5, 200);
+      if (surviving.length) {
+        throw new PhoneDockError(
+          `Couldn’t terminate ${appId}`,
+          'terminate_failed',
+          502,
+          ['Force-quit the app on the iPhone and try again.'],
+          `Process pid ${surviving.join(', ')} for ${appId} was still running after ${via} and devicectl --kill.`,
+        );
+      }
+    };
+
+    let dc: string | undefined;
+    try { dc = dcId(udid); } catch { /* WDA-only manual entry without UDID */ }
+
+    if (wdaUrl(udid)) {
+      let wdaRes: any;
+      let wdaErr: unknown;
+      try {
+        wdaRes = await wdaSession(udid, 'POST', '/wda/apps/terminate', { bundleId: appId });
+      } catch (e) {
+        if (!dc) throw e;
+        wdaErr = e;
+      }
+      if (dc) {
+        const url = await lookupAppUrl(dc).catch(() => undefined);
+        if (url) {
+          const initial = await listAppPids(dc, url);
+          if (!initial.length) return;
+          // Give WDA a short beat to finish tearing down, then escalate to SIGKILL if the pid is still there.
+          const afterWda = wdaErr ? initial : await waitForPidsToExit(dc, url, initial, 2, 200);
+          if (!afterWda.length) return;
+          await forceKillAndVerify(dc, url, afterWda, wdaErr ? 'WDA error' : 'WDA terminate');
+          return;
+        }
+        if (wdaErr) throw wdaErr;
+      }
+      if (wdaRes?.value === false) {
+        const active = await wdaFetch(wdaUrl(udid)!, 'GET', '/wda/activeAppInfo', undefined, 10_000).catch(() => undefined);
+        if (active?.value?.bundleId === appId) {
+          throw new PhoneDockError(
+            `Couldn’t terminate ${appId}`,
+            'terminate_failed',
+            502,
+            ['Pair the iPhone with this Mac so PhoneDock can force-kill stubborn apps, or force-quit it on the iPhone.'],
+            `WDA /wda/apps/terminate returned false and ${appId} is still in the foreground.`,
+          );
+        }
+      }
+      return;
+    }
+
+    // devicectl terminates by pid: find the app's bundle URL, then its running process(es).
+    const dcUdid = dcId(udid);
+    const url = await lookupAppUrl(dcUdid);
     if (!url) throw new PhoneDockError('The app is not installed', 'not_found', 404, undefined, `App ${appId} is not installed`);
-    const procs = await devicectl<{ runningProcesses?: { executable?: string; processIdentifier: number }[] }>(['device', 'info', 'processes', '--device', udid]);
-    const hit = procs?.runningProcesses?.find((pr) => pr.executable?.startsWith(url));
-    if (!hit) return;
-    await devicectl(['device', 'process', 'terminate', '--device', udid, '--pid', String(hit.processIdentifier)]);
+    const pids = await listAppPids(dcUdid, url);
+    if (!pids.length) return;
+    for (const pid of pids) {
+      await devicectl(['device', 'process', 'terminate', '--device', dcUdid, '--pid', String(pid)]).catch(() => undefined);
+    }
+    const afterTerm = await waitForPidsToExit(dcUdid, url, pids, 3, 200);
+    if (!afterTerm.length) return;
+    await forceKillAndVerify(dcUdid, url, afterTerm, 'SIGTERM');
   },
 
   // Verified on an iOS 27 iPhone: `devicectl device process openURL` opens the phone's default browser (which may not
@@ -1613,16 +1703,35 @@ export const backend: Backend & {
     return { locked, unlockedSinceBoot, secure: locked };
   },
 
-  async unlock(nid, passcode?: string): Promise<UnlockResult> {
-    if (!(await ensureNative(nid))) {
+  async unlock(nid, passcode?: string, opts?: { beforeDispatch?: () => void | Promise<void> }): Promise<UnlockResult> {
+    // Check iOS 27+ native HID availability independently of whether WDA is configured.
+    let dc: string;
+    try { dc = dcId(nid); } catch {
+      throw new PhoneDockError(
+        'Unattended passcode unlock requires a paired iPhone on iOS 27 or later',
+        'not_supported',
+        501,
+        ['Pair the iPhone by USB or Wi-Fi, or use request_human.'],
+        undefined,
+        'not_sent',
+      );
+    }
+    if (!osByUdid.has(dc)) {
+      const d = await findDev(dc).catch(() => undefined);
+      const v = (d as any)?.deviceProperties?.osVersionNumber;
+      if (v) osByUdid.set(dc, String(v));
+    }
+    if (!isNativeInputCapable(osByUdid.get(dc))) {
       throw new PhoneDockError(
         'Unattended passcode unlock requires an iPhone on iOS 27 or later',
         'not_supported',
         501,
         ['iOS 18–26 blocks WebDriverAgent from entering passcodes on the lock screen. Turn off the passcode on this iPhone, or use request_human.'],
+        undefined,
+        'not_sent',
       );
     }
-    const dc = dcId(nid);
+
     const before = await this.lockState!(nid);
     if (before.unlockedSinceBoot === false) {
       return { unlocked: false, reason: 'before_first_unlock' };
@@ -1637,44 +1746,72 @@ export const backend: Backend & {
         'passcode_required',
         409,
         ['Save a passcode in PhoneDock Device Settings (Unattended Unlock) or unlock the iPhone manually.'],
+        undefined,
+        'not_sent',
       );
     }
+    if (before.unlockedSinceBoot !== true || before.locked !== true) {
+      return { unlocked: false, reason: 'before_first_unlock' };
+    }
 
-    // Wake screen using Indigo hardware button (doesn't require the screen stream), then raise passcode field and type via virtual HID keyboard.
-    // Note: if the HID channel fails to open while locked (before keystrokes are sent), throw `unlock_failed` so the daemon does not trip the wrong-passcode breaker.
-    let keystrokesSent = false;
+    // Wake screen and bring up passcode field before reserving/typing; if wake itself unlocked (e.g. Face ID), do not type.
     try {
       await hidKey(dc, 'home').catch(() => hidKey(dc, 'power'));
       await sleep(350);
       await hidKey(dc, 'space');
       await sleep(350);
-      await hidType(dc, passcode);
-      keystrokesSent = true;
-      await sleep(120);
-      await hidKey(dc, 'enter');
-    } catch (e) {
-      const cleanDetail = redactSecretStrings(
-        e instanceof PhoneDockError ? (e.detail ?? e.message) : ((e as Error).message ?? String(e)),
-        [passcode],
+    } catch {
+      throw new PhoneDockError(
+        'Couldn’t wake the locked iPhone for passcode entry',
+        'unlock_failed',
+        502,
+        ['Keep the iPhone paired and awake on the same Wi-Fi or USB, or unlock it manually.'],
+        'iOS HID wake channel failed before passcode dispatch.',
+        'not_sent',
       );
-      if (!keystrokesSent) {
-        throw new PhoneDockError(
-          'Couldn’t send passcode keystrokes to the locked iPhone',
-          'unlock_failed',
-          502,
-          ['Keep the iPhone paired and awake on the same Wi-Fi or USB, or unlock it manually once.'],
-          cleanDetail,
-        );
-      }
     }
 
+    const preDispatch = await this.lockState!(nid).catch(() => ({ locked: null, unlockedSinceBoot: null } as LockStateInfo));
+    if (preDispatch.locked === false) {
+      locks.reset(dc);
+      return { unlocked: true, method: 'wake' };
+    }
+    if (preDispatch.locked !== true || preDispatch.unlockedSinceBoot !== true) {
+      throw new PhoneDockError(
+        'Couldn’t confirm the iPhone lock screen is ready for passcode entry',
+        'unlock_failed',
+        502,
+        ['Unlock the iPhone manually or try again.'],
+        'iOS lock state was uncertain before credential dispatch.',
+        'not_sent',
+      );
+    }
+
+    // Reserve the one-shot attempt BEFORE the first passcode character can leave.
+    await opts?.beforeDispatch?.();
+
+    let dispatchFailed = false;
+    try {
+      await hidType(dc, passcode);
+      await sleep(120);
+      await hidKey(dc, 'enter');
+    } catch {
+      dispatchFailed = true;
+    }
+
+    let sawLocked = false;
     for (let i = 0; i < 8; i++) {
       await sleep(400);
-      const after = await this.lockState!(nid).catch(() => ({ locked: null }));
+      const after = await this.lockState!(nid).catch(() => ({ locked: null } as LockStateInfo));
       if (after.locked === false) {
         locks.reset(dc);
         return { unlocked: true, method: 'ios_hid_passcode' };
       }
+      if (after.locked === true) sawLocked = true;
+    }
+
+    if (dispatchFailed || !sawLocked) {
+      return { unlocked: false, reason: 'unlock_unverified' };
     }
     return { unlocked: false, reason: 'wrong_passcode' };
   },
