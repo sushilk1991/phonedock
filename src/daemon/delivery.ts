@@ -15,6 +15,7 @@ import { deliveryOf, ownershipEpoch, runInput, type InputScope } from './executi
 import { Raw, type Ctx, type Handler } from './http.ts';
 import { withRequestReceipt } from './requests.ts';
 import { metrics } from './metrics.ts';
+import { maybePasscodeManager } from './passcodes.ts';
 import { inputSecretValues, redactInputValue, redactSecretStrings } from '../core/secrets.ts';
 
 export { deliveryOf } from './execution.ts';
@@ -115,7 +116,39 @@ export function inputRoute(h: Handler): Handler {
         try {
           const started = performance.now();
           let result: unknown;
-          try { result = await h(c); } finally { metrics.record('phases', 'input.execute', performance.now() - started); }
+          const pm = maybePasscodeManager();
+          const isPowerKey = body?.action === 'key' && /^(lock|power|wake|keycode_sleep|keycode_power|keycode_wakeup)$/i.test(String(body.key ?? ''));
+          try {
+            if (!isPowerKey && pm?.isAutoUnlockReady(id)) {
+              try {
+                await pm.ensureUnlockedBeforeInput(id, c.owner);
+              } catch (ue) {
+                if (ue instanceof PhoneDockError && !ue.delivery) ue.delivery = 'not_sent';
+                throw ue;
+              }
+              scope.assertAllowed();
+            }
+            try {
+              result = await h(c);
+            } catch (e) {
+              if (
+                !scope.sent && !scope.uncertain
+                && e instanceof PhoneDockError && e.code === 'device_locked'
+                && pm?.isAutoUnlockReady(id)
+              ) {
+                try {
+                  await pm.unlock(id, c.owner, { auto: true, skipLeaseCheck: true });
+                } catch (ue) {
+                  if (ue instanceof PhoneDockError && !ue.delivery) ue.delivery = 'not_sent';
+                  throw ue;
+                }
+                scope.assertAllowed();
+                result = await h(c);
+              } else {
+                throw e;
+              }
+            }
+          } finally { metrics.record('phases', 'input.execute', performance.now() - started); }
           return body?.returnUi ? await withUiObservation(id, result, body?.settleMs) : result;
         } finally { claim.release(); released = true; }
       });

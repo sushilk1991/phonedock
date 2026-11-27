@@ -33,6 +33,7 @@ import { finishExpect, prepareExpect } from './expect.ts';
 import { requestResult } from './requests.ts';
 import { assertSleepTarget, ensureAwake, forgetSleep, settleSleep, sleepInProgress, touchUse, withLifecycle } from './idle-sleep.ts';
 import { proxyManager } from './proxies.ts';
+import { maybePasscodeManager } from './passcodes.ts';
 import {
   cancelLocationRouteOnOwnershipChange, getLocationRouteStatus, parseLocationRouteInput, setFixedDeviceLocation, startDeviceLocationRoute, stopLocationRoute,
 } from './location-routes.ts';
@@ -186,6 +187,7 @@ r.del('/v1/devices/:id', async (c) => {
     await stopLocationRoute(id, false);
     await need(b, 'delete', 'delete')(nid);
     await proxyManager().onDeviceDeleted(id);
+    await maybePasscodeManager()?.onDeviceDeleted(id);
     removeRecord(id); uiCache.delete(id); clearLaunchSecrets(id); releaseLease(id, c.owner, true);
     invalidateDevices();
     return { ok: true };
@@ -602,7 +604,9 @@ export async function runAction(id: string, b: Backend, nid: string, a: InputAct
       await b.type(nid, a.text, { secret: a.secret }); return undefined;
     case 'key':
       if (!a.key) throw badRequest('key needs key');
-      await b.key(nid, a.key); return undefined;
+      await b.key(nid, a.key);
+      if (/^(lock|power|keycode_sleep|keycode_power)$/i.test(String(a.key))) maybePasscodeManager()?.invalidateLockCache(id);
+      return undefined;
     default:
       throw badRequest(`Unknown action "${(a as { action?: string }).action}"`, ['tap | longPress | doubleTap | pinch | swipe | type | key']);
   }

@@ -14,6 +14,7 @@ import {
   type WakeReport,
 } from '../core/types.ts';
 import * as A from './android-common.ts';
+import { androidLockState, androidUnlock } from './android-lock.ts';
 import * as T from './android-trace.ts';
 import * as C from './android-clipboard.ts';
 import { adbFrameStream, adbVideoStream } from './android-video.ts';
@@ -803,6 +804,8 @@ export const backend: Backend & { runningSerial(name: string): Promise<string | 
   async startTrace(name, dir, o) { return T.startPerfetto(await requireSerial(name), dir, o); },
   async stopTrace(name) { return T.stopPerfetto(await requireSerial(name)); },
   async abortTrace(name) { const s = await serialFor(name).catch(() => undefined); if (s) await T.abortPerfetto(s); },
+  async lockState(name) { return androidLockState(await requireSerial(name)); },
+  async unlock(name, passcode) { return androidUnlock(await requireSerial(name), passcode); },
   async info(name) {
     const a = requireAvd(name);
     const s = await serialFor(name);

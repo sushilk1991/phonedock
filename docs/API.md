@@ -1146,3 +1146,22 @@ Bring-your-own HTTP (`http://`) and SOCKS5 (`socks5://`, `socks5h://`) proxies. 
 * **Android (emulators and real Android phones over adb):** the daemon runs one local HTTP forwarder per attached proxy bound strictly to `127.0.0.1` on an ephemeral port, relaying only to the configured upstream (HTTP CONNECT with Basic auth or SOCKS5/SOCKS5H with RFC 1929 auth). It forwards the port with `adb -s <serial> reverse tcp:P tcp:P` and sets `adb -s <serial> shell settings put global http_proxy 127.0.0.1:P`. Multiple Android devices can share one proxy forwarder; the forwarder closes when the last attached device detaches or stops. Attachments persist across reboots, idle-sleep wakes, and daemon restarts. Android's global HTTP proxy covers apps that honor the system proxy; UDP/QUIC is not proxied (Chrome falls back to TCP).
 * **iOS:** iOS simulators share the Mac's network stack and real iPhones keep their HTTP proxy in Settings › Wi-Fi on the device, so `PUT`/`DELETE /v1/devices/:id/proxy` return `501 not_supported` with an explanation and hint.
 * **Surfaces:** CLI `phonedock proxy ls|add|test|rm|attach|detach|show` (`-` reads URL from stdin), MCP tool `device_proxy`, TypeScript/Python SDKs, and **Settings › Proxies** + **Info › Proxy** in the Mac app. SSE emits `event: proxies` when saved proxies change, and `Device.meta.proxy` exposes redacted attachment metadata.
+
+## Unattended Unlock (Passcode)
+
+Keychain-backed unattended passcode unlock for locked Android devices/emulators (PIN, password, or swipe lock) and iOS 27+ native iPhones. Passcodes are stored in **macOS Keychain** (written over stdin via `security -i` with `-X <hex>`, never in process argv; mode-`0600` file fallback on non-macOS) while non-secret metadata (`enabled`, `tripped`, `lastUnlock`) lives in `$PHONEDOCK_HOME/passcodes.json` (mode `0600`). Passcodes are never returned by any route, never written to `actions.jsonl`, and scrubbed from errors.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | /v1/devices/:id/passcode | – | `PasscodeStatus`: `{ supported, reason?, hasPasscode, enabled, storage?, savedAt?, tripped, lastUnlock }` (observe-only; never wakes a sleeping phone; never returns the passcode) |
+| PUT | /v1/devices/:id/passcode | `{ passcode?, enabled? }` | `PasscodeStatus` (saves/updates passcode and/or toggles unattended unlock; control route — never wakes sleeping phones; **`403 forbidden` for `mcp:*` agent owners**) |
+| DELETE | /v1/devices/:id/passcode | – | `{ ok: true, removed: boolean }` (removes Keychain item and metadata; **`403 forbidden` for `mcp:*` agent owners**) |
+| POST | /v1/devices/:id/unlock | `{}` | `{ ok: true, deviceId, unlocked: true, alreadyUnlocked?, method? }` (needs the lease; takes no passcode parameter — daemon reads Keychain itself) |
+
+* **Safety invariants:**
+  * **Zero agent visibility:** agents (`mcp:*`) cannot save, modify, read, or delete passcodes; `unlock_device` takes no passcode argument.
+  * **1-failure circuit breaker:** if the device remains locked after entering a saved passcode, PhoneDock immediately trips `tripped` and sets `enabled: false`, returning `409 passcode_tripped` on subsequent attempts until the user re-saves the passcode. Transport/channel failures (`502 unlock_failed`) do not trip the breaker.
+  * **Before First Unlock (AFU only):** after a reboot, devices with `unlockedSinceBoot === false` return `409 before_first_unlock` without attempting passcode entry or tripping the breaker.
+  * **Auto-unlock on input:** when unattended unlock is enabled and not tripped, input routes automatically unlock a locked Android device (cached lock probe, zero overhead when off) or retry once on iOS 27 `device_locked` before delivering the input.
+  * **Platform support:** Android phones/emulators (PIN, password, swipe; lock patterns unsupported; some OEMs require "USB debugging (Security settings)"), iOS 27+ native CoreDevice HID (implemented, pending iOS 27 hardware verification). iOS 18–26 (WDA) and iOS simulators return `501 not_supported`. Face ID, Touch ID, purchases, and account prompts still require `request_human`.
+* **Surfaces:** CLI `phonedock passcode set|status|enable|disable|rm <device>` (masked TTY prompt or `--stdin`, never positional) and `phonedock unlock <device>`, MCP tool `unlock_device`, TypeScript/Python SDKs, and **Inspector › Device Settings › Unattended Unlock** in the Mac app. SSE emits `event: passcode` on changes and `Device.meta.passcode` exposes redacted status.

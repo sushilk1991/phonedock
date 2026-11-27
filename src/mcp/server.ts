@@ -26,6 +26,7 @@ import { registerFlowTools } from './tools-flow.ts';
 import { notesHint, registerNotesTools } from './tools-notes.ts';
 import { registerTraceTools } from './tools-trace.ts';
 import { registerProxyTools } from './tools-proxy.ts';
+import { registerPasscodeTools } from './tools-passcode.ts';
 import { formatUiObservation, humanNeeded, noteBatchDeviceWrite, resolveObserve, type FormatUiResult, type ObserveMode } from './ui-format.ts';
 export { humanNeeded };
 
@@ -1089,6 +1090,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
   registerTraceTools(kit);
   registerNotesTools(kit);
   registerProxyTools(kit);
+  registerPasscodeTools(kit);
 
   return server;
 }

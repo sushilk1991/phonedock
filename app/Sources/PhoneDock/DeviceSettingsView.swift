@@ -81,6 +81,10 @@ struct DeviceSettingsView: View {
                 Divider().padding(.vertical, Theme.Space.m)
                 DeviceLocationSection(device: device)
             }
+            if device.backend != "ios-simulator" {
+                Divider().padding(.vertical, Theme.Space.m)
+                DevicePasscodeSection(device: device)
+            }
         }
         .task(id: "\(device.id):\(device.state)") { await load() }
     }
@@ -304,6 +308,225 @@ private struct DeviceLocationSection: View {
                 statusMessage = "Location route stopped"
             } catch {
                 model.fail("Couldn’t stop location route", error, device: device)
+            }
+        }
+    }
+}
+
+private struct PasscodeTrippedInfo: Decodable {
+    var at: String
+    var reason: String
+}
+
+private struct PasscodeUnlockInfo: Decodable {
+    var at: String
+    var ok: Bool
+    var method: String?
+    var error: String?
+}
+
+private struct PasscodeStatusResponse: Decodable {
+    var supported: Bool
+    var reason: String?
+    var hasPasscode: Bool
+    var enabled: Bool
+    var storage: String?
+    var savedAt: String?
+    var tripped: PasscodeTrippedInfo?
+    var lastUnlock: PasscodeUnlockInfo?
+}
+
+private struct UnlockActionResponse: Decodable {
+    var ok: Bool
+    var unlocked: Bool
+    var alreadyUnlocked: Bool?
+    var method: String?
+}
+
+/// Keychain-backed unattended passcode unlock controls inside Inspector › Device Settings.
+/// Passcodes are written directly to the local daemon (stored in macOS Keychain) and never returned or exposed to agents.
+private struct DevicePasscodeSection: View {
+    @Environment(AppModel.self) private var model
+    let device: Device
+    @State private var status: PasscodeStatusResponse?
+    @State private var passcodeInput = ""
+    @State private var working = false
+    @State private var feedback: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            SectionHeader("Unattended Unlock")
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                if let status {
+                    if !status.supported {
+                        Text(status.reason ?? "Unattended passcode unlock isn’t supported on this device.")
+                            .font(Theme.Fonts.callout)
+                            .foregroundStyle(Theme.Ink.secondary)
+                    } else {
+                        if let tripped = status.tripped {
+                            HStack(alignment: .top, spacing: Theme.Space.s) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(Theme.Status.handoffStrong)
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Paused after a failed unlock attempt")
+                                        .font(Theme.Fonts.callout.weight(.semibold))
+                                        .foregroundStyle(Theme.Status.handoffText)
+                                    Text("Re-enter and save your passcode below to re-enable unattended unlock.")
+                                        .font(Theme.Fonts.meta)
+                                        .foregroundStyle(Theme.Ink.secondary)
+                                        .help(tripped.reason)
+                                }
+                            }
+                            .padding(Theme.Space.s)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Theme.Status.handoffTint, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                        }
+
+                        HStack {
+                            Text("Allow agent to unlock")
+                            Spacer()
+                            Toggle("Allow agent to unlock", isOn: Binding(
+                                get: { status.enabled },
+                                set: { setEnabled($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .disabled(working || !status.hasPasscode || status.tripped != nil)
+                            .testAnchor("Allow agent to unlock")
+                        }
+
+                        HStack(spacing: Theme.Space.s) {
+                            SecureField(status.hasPasscode ? "New passcode to update" : "Passcode or PIN", text: $passcodeInput)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit { savePasscode() }
+                                .testAnchor("Device passcode")
+                            Button(status.hasPasscode ? "Update" : "Save") { savePasscode() }
+                                .controlSize(.small)
+                                .disabled(working || passcodeInput.isEmpty)
+                                .testAnchor("Save passcode")
+                        }
+
+                        if status.hasPasscode {
+                            HStack(spacing: Theme.Space.s) {
+                                Label(
+                                    status.storage == "keychain" ? "Saved in macOS Keychain" : "Saved locally",
+                                    systemImage: "key.fill"
+                                )
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.Ink.secondary)
+                                Spacer()
+                                Button("Unlock Now") { unlockNow() }
+                                    .controlSize(.small)
+                                    .disabled(working || !device.isRunning || device.leasedByAgent || status.tripped != nil)
+                                    .testAnchor("Unlock Now")
+                                Button("Remove", role: .destructive) { removePasscode() }
+                                    .controlSize(.small)
+                                    .disabled(working)
+                                    .testAnchor("Remove passcode")
+                            }
+                        }
+
+                        if let feedback {
+                            Text(feedback)
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.Ink.secondary)
+                        } else if let last = status.lastUnlock {
+                            Text(last.ok
+                                ? "Last unlock succeeded\(last.method.map { " (\($0))" } ?? "")."
+                                : "Last unlock failed: \(last.error ?? "unknown error")")
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.Ink.secondary)
+                        }
+
+                        Text("Agents never see your passcode. Face ID, Touch ID, and purchases still wait for you.")
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.Ink.tertiary)
+                    }
+                } else {
+                    DelayedSpinner().frame(height: 28)
+                }
+            }
+            .font(Theme.Fonts.callout)
+            .padding(.horizontal, Theme.Space.l)
+        }
+        .task(id: "\(device.id):\(device.state)") { await load() }
+    }
+
+    private func load() async {
+        guard let c = model.client else { return }
+        if let res = try? await c.get(PasscodeStatusResponse.self, c.dev(device.id, "/passcode"), observe: true) {
+            status = res
+        }
+    }
+
+    private func savePasscode() {
+        let secret = passcodeInput
+        guard !secret.isEmpty, !working, let c = model.client else { return }
+        working = true
+        feedback = nil
+        Task {
+            defer { working = false }
+            do {
+                let data = try await c.send("PUT", c.dev(device.id, "/passcode"), json: ["passcode": secret, "enabled": true])
+                status = try JSONDecoder().decode(PasscodeStatusResponse.self, from: data)
+                passcodeInput = ""
+                feedback = "Passcode saved in macOS Keychain."
+            } catch {
+                model.fail("Couldn’t save passcode", error, device: device)
+            }
+        }
+    }
+
+    private func setEnabled(_ enabled: Bool) {
+        guard !working, let c = model.client else { return }
+        working = true
+        feedback = nil
+        Task {
+            defer { working = false }
+            do {
+                let data = try await c.send("PUT", c.dev(device.id, "/passcode"), json: ["enabled": enabled])
+                status = try JSONDecoder().decode(PasscodeStatusResponse.self, from: data)
+                feedback = enabled ? "Unattended unlock turned on." : "Unattended unlock turned off."
+            } catch {
+                model.fail("Couldn’t update unattended unlock", error, device: device)
+                await load()
+            }
+        }
+    }
+
+    private func removePasscode() {
+        guard !working, let c = model.client else { return }
+        working = true
+        feedback = nil
+        Task {
+            defer { working = false }
+            do {
+                _ = try await c.send("DELETE", c.dev(device.id, "/passcode"))
+                passcodeInput = ""
+                await load()
+                feedback = "Passcode removed."
+            } catch {
+                model.fail("Couldn’t remove passcode", error, device: device)
+            }
+        }
+    }
+
+    private func unlockNow() {
+        guard !working, device.isRunning, let c = model.client else { return }
+        working = true
+        feedback = nil
+        Task {
+            defer { working = false }
+            do {
+                let data = try await c.send("POST", c.dev(device.id, "/unlock"), json: [:])
+                let res = try? JSONDecoder().decode(UnlockActionResponse.self, from: data)
+                feedback = res?.alreadyUnlocked == true ? "Device is already unlocked." : "Device unlocked."
+                await load()
+            } catch {
+                model.fail("Couldn’t unlock device", error, device: device)
+                await load()
             }
         }
     }

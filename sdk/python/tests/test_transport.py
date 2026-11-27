@@ -27,6 +27,7 @@ def serve(reply):
         do_POST = handle_request
         do_PUT = handle_request
         do_GET = handle_request
+        do_DELETE = handle_request
 
         def log_message(self, *_args):
             pass
@@ -389,6 +390,36 @@ class TransportTests(unittest.TestCase):
             ("GET", "/v1/jobs/job-axe"),
             ("POST", "/v1/components/axe/install"),
         ])
+
+    def test_passcode_and_unlock_endpoints(self) -> None:
+        seen = []
+
+        def handle(handler, body):
+            seen.append((handler.command, handler.path, json.loads(body.decode()) if body else None))
+            if handler.command == "GET":
+                return json_reply(handler, {"supported": True, "hasPasscode": True, "enabled": True, "tripped": None, "lastUnlock": None})
+            if handler.command == "PUT":
+                return json_reply(handler, {"supported": True, "hasPasscode": True, "enabled": True, "tripped": None, "lastUnlock": None})
+            if handler.command == "POST":
+                return json_reply(handler, {"ok": True, "deviceId": "android-device:SER1", "unlocked": True, "method": "android_pin"})
+            if handler.command == "DELETE":
+                return json_reply(handler, {"ok": True, "removed": True})
+            return json_reply(handler, {"error": {"code": "not_found", "message": "not found"}}, status=404)
+
+        with serve(handle) as url:
+            c = PhoneDock(base_url=url, token="tok", auto_start=False)
+            st = c.passcode_status("android-device:SER1")
+            self.assertTrue(st["hasPasscode"])
+            c.set_passcode("android-device:SER1", passcode="1234", enabled=True)
+            res = c.unlock("android-device:SER1")
+            self.assertTrue(res["unlocked"])
+            rm = c.remove_passcode("android-device:SER1")
+            self.assertTrue(rm["removed"])
+
+        self.assertEqual(seen[0], ("GET", "/v1/devices/android-device%3ASER1/passcode", None))
+        self.assertEqual(seen[1], ("PUT", "/v1/devices/android-device%3ASER1/passcode", {"passcode": "1234", "enabled": True}))
+        self.assertEqual(seen[2], ("POST", "/v1/devices/android-device%3ASER1/unlock", {}))
+        self.assertEqual(seen[3], ("DELETE", "/v1/devices/android-device%3ASER1/passcode", None))
 
 
 if __name__ == "__main__":

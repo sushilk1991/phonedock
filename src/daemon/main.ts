@@ -17,6 +17,7 @@ import './routes-diagnostics.ts';
 import './routes-idle.ts'; // GET/POST /v1/idle-sleep
 import './routes-simslim.ts'; // GET/POST /v1/simslim + POST /v1/devices/:id/simslim
 import './routes-proxy.ts'; // saved proxies and per-device proxy attachment
+import './routes-passcode.ts'; // per-device Keychain-backed unattended passcode unlock
 import { enterRequest, isSleeping, startIdleSleep } from './idle-sleep.ts';
 import { proxyManager } from './proxies.ts';
 import { initComponents, stopComponents } from './routes-components.ts';

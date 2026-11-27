@@ -74,6 +74,7 @@ Raw input in one call (device pixels): `phonedock input <id> '[{"action":"tap","
 | SimSlim (iOS) | `simslim [status\|on\|off]` · `simslim <id> [status\|measure\|on\|off]` · `boot <id> --slim` |
 | Web Inspector | `webview <id> [appId]` · `webview <id> [appId] --measure "h1, .cta"` · `webview <id> [appId] --network` |
 | Proxies | `proxy test <url\|id\|->` · `proxy add <name> <url\|-> [--test]` · `proxy ls` · `proxy attach <id> <proxyId> [--sync-location]` · `proxy detach <id>` · `proxy show <id>` |
+| Unattended Unlock | `passcode set <id> [--stdin] [--disabled]` · `passcode status <id>` · `passcode enable\|disable <id>` · `passcode rm <id>` · `unlock <id>` |
 | Debugging | `logs <id> -n 200 --filter MyApp` · `crashes <id> --since 15m` · `crashes <id> <crashId>` · `foreground <id>` |
 | Evidence | `screenshot <id> -o file.png` · `record <id> start --max 120` … `record <id> stop` |
 | Performance | `trace start <id> --app <appId> [--template T] [--time-limit 60] [--launch]` … `trace stop <id>` (summary, compared with the last run) · `trace run <id> --app <appId> --flow f.yaml` · `trace ls <id>` |

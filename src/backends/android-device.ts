@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { toolEnv, which } from '../core/paths.ts';
 import { PhoneDockError, type Availability, type Backend, type Device, type DeviceState } from '../core/types.ts';
 import * as A from './android-common.ts';
+import { androidLockState, androidUnlock } from './android-lock.ts';
 import * as T from './android-trace.ts';
 import * as C from './android-clipboard.ts';
 import { adbFrameStream, adbVideoStream } from './android-video.ts';
@@ -272,4 +273,6 @@ export const backend: Backend & {
   async startTrace(s, dir, o) { return T.startPerfetto(await requireOnline(s), dir, o); },
   async stopTrace(s) { return T.stopPerfetto(await requireOnline(s)); },
   async abortTrace(s) { await T.abortPerfetto(s); },
+  async lockState(s) { return androidLockState(await requireOnline(s)); },
+  async unlock(s, passcode) { return androidUnlock(await requireOnline(s), passcode); },
 };

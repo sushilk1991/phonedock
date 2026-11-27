@@ -69,7 +69,7 @@ export function shQuote(s: string): string { return `'${s.replace(/'/g, `'\\''`)
 
 export const ANDROID_CAPS: Capability[] = [
   'screenshot', 'stream', 'uiTree', 'tap', 'longPress', 'swipe', 'type', 'key', 'install', 'apps', 'launch',
-  'openUrl', 'shell', 'files', 'logs', 'rotate', 'window', 'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'settings', 'trace', 'video',
+  'openUrl', 'shell', 'files', 'logs', 'rotate', 'window', 'doubleTap', 'record', 'crashes', 'appData', 'appearance', 'settings', 'trace', 'video', 'unlock',
 ];
 
 // Read the same overlay that Android Settings uses, including vendor overrides.

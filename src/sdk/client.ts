@@ -15,7 +15,7 @@ import type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
-  DeviceSleep,
+  DeviceSleep, LockStateInfo, UnlockResult,
 } from '../core/types.ts';
 import { validateAppId, type AppNotesInfo } from '../core/app-notes.ts';
 import type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult } from '../core/environment.ts';
@@ -23,9 +23,17 @@ import type { UiAuditResult } from '../core/ui-audit.ts';
 import type { DoctorReport, DeviceDiagnosis } from '../core/doctor.ts';
 import type { WebViewOptions, WebViewResult, WebViewMeasure, WebViewMeasuredElement, WebViewTarget } from '../backends/android-webview.ts';
 import type { ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState } from '../core/proxy.ts';
+import type { PasscodeStatus, PasscodeStorage, PasscodeTripped, PasscodeUnlockOutcome } from '../core/passcode-store.ts';
+import type { UnlockResponse } from '../daemon/passcodes.ts';
 import type { SimslimStatus, SimslimDeviceInfo } from '../backends/ios-simslim.ts';
 import type { LocationRouteStatus } from '../daemon/location-routes.ts';
-export type { EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis, WebViewOptions, WebViewResult, WebViewMeasure, WebViewMeasuredElement, WebViewTarget, ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState, SimslimStatus, SimslimDeviceInfo, LocationRouteStatus };
+export type {
+  EnvironmentAction, EnvironmentCapabilities, EnvironmentResult, UiAuditResult, DoctorReport, DeviceDiagnosis,
+  WebViewOptions, WebViewResult, WebViewMeasure, WebViewMeasuredElement, WebViewTarget,
+  ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState,
+  PasscodeStatus, PasscodeStorage, PasscodeTripped, PasscodeUnlockOutcome, UnlockResponse,
+  SimslimStatus, SimslimDeviceInfo, LocationRouteStatus,
+};
 
 export type {
   AppInfo, BootOptions, Device, DeviceSpec, ExecResult, HardwareProfile, InputAction, KeyName, LaunchArgs, LaunchArgValue, LaunchOptions, Lease,
@@ -35,7 +43,7 @@ export type {
   TraceSummary, TraceMetrics, TraceHangs, TraceHotspot, TraceFrames, TraceComparison,
   RunRecord, RunSummary, RunStatus, RunStepRecord, RunStepStatus, RunFlowProvenance, RunSourceProvenance, RunDeviceProvenance, RunAppProvenance, RunArtifacts,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
-  DeviceSleep,
+  DeviceSleep, LockStateInfo, UnlockResult,
 };
 
 /** GET /v1/idle-sleep (docs/API.md "Idle sleep"). `timeoutSec` null: never. */
@@ -1121,6 +1129,24 @@ export class PhoneDockClient {
   /** Detach any proxy from a device. */
   detachProxy(deviceId: string): Promise<DeviceProxyState> {
     return this.request('DELETE', this.dev(deviceId, '/proxy'));
+  }
+
+  // ── unattended passcode unlock ──────────────────────────────────────────
+  /** Read redacted unattended unlock status for a device (never returns the passcode). */
+  passcodeStatus(deviceId: string): Promise<PasscodeStatus> {
+    return this.request('GET', this.dev(deviceId, '/passcode'));
+  }
+  /** Save a device passcode (stored in macOS Keychain) and/or toggle unattended unlock. */
+  setPasscode(deviceId: string, opts: { passcode?: string; enabled?: boolean }): Promise<PasscodeStatus> {
+    return this.request('PUT', this.dev(deviceId, '/passcode'), { body: opts });
+  }
+  /** Delete a device's saved passcode from Keychain. */
+  removePasscode(deviceId: string): Promise<{ ok: boolean; removed: boolean }> {
+    return this.request('DELETE', this.dev(deviceId, '/passcode'));
+  }
+  /** Wake and unlock a device using its saved passcode (if credentials are required). */
+  unlock(deviceId: string): Promise<UnlockResponse> {
+    return this.request('POST', this.dev(deviceId, '/unlock'), { body: {} });
   }
 }
 

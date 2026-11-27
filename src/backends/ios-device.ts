@@ -11,14 +11,15 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { run, runBuffer, type RunOptions } from '../core/exec.ts';
+import { run, runBuffer, sleep, type RunOptions } from '../core/exec.ts';
 import { assertInputFence } from '../core/input-fence.ts';
 import { developerDir, stateDir, toolEnv, which } from '../core/paths.ts';
+import { redactSecretStrings } from '../core/secrets.ts';
 import { getComponentManager, resolveWdaSource } from '../core/components.ts';
 import {
   PhoneDockError,
   type AppInfo, type Availability, type Backend, type Capability, type ComponentStatus, type CrashReport, type Device, type DeviceState, type KeyName,
-  type LaunchOptions, type ScreenInfo, type UiElement, type UiTree,
+  type LaunchOptions, type LockStateInfo, type ScreenInfo, type UiElement, type UiTree, type UnlockResult,
 } from '../core/types.ts';
 import { hasLaunchOptions, iosLaunchArgv, iosPrefixedEnv } from '../core/launch-options.ts';
 import { JsonState, ScreenshotRecorder, finalizeMp4, ipsKind, ipsRender, ipsSummary, ipsTime, parseIps, pngSize } from './ios-common.ts';
@@ -45,7 +46,7 @@ const WDA_ONLY_CAPS: Capability[] = ['screenshot', 'stream', 'uiTree', 'ocr', 't
 // iOS 27+ without WDA: real touch/keyboard/buttons via the CoreDevice HID sidecar (ios-hid.ts) and the accessibility
 // tree via remoteAXService (ios-native.ts, read-only); the daemon falls back to OCR when the tree is unavailable.
 // 'stream': live video from the same sidecar's screen stream (ios-video.ts).
-const NATIVE_CAPS: Capability[] = [...DC_CAPS, 'stream', 'tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap', 'pinch'];
+const NATIVE_CAPS: Capability[] = [...DC_CAPS, 'stream', 'tap', 'longPress', 'swipe', 'type', 'key', 'doubleTap', 'pinch', 'unlock'];
 function nativeCaps(osv?: string): Capability[] { return isNativeCapable(osv) ? [...NATIVE_CAPS, 'uiTree', 'appearance', 'logs'] : NATIVE_CAPS; }
 /** iOS 27+: the pasteboard through the native sidecar (CoreDevice pasteboard service), with or without WDA. */
 function withClipboard(caps: Capability[], osv?: string): Capability[] { return isNativeCapable(osv) ? [...new Set<Capability>([...caps, 'clipboard', 'appearance', 'logs'])] : caps; }
@@ -1599,6 +1600,84 @@ export const backend: Backend & {
   },
   async stopTrace(nid) { return stopXctrace(nid); },
   async abortTrace(nid) { await abortXctrace(nid); },
+
+  async lockState(nid): Promise<LockStateInfo> {
+    const udid = dcId(nid);
+    const r = await devicectl<{ passcodeRequired?: boolean; unlockedSinceBoot?: boolean }>(
+      ['device', 'info', 'lockState', '--device', udid],
+      { timeoutMs: 20_000 },
+    );
+    const locked = typeof r?.passcodeRequired === 'boolean' ? r.passcodeRequired : null;
+    const unlockedSinceBoot = typeof r?.unlockedSinceBoot === 'boolean' ? r.unlockedSinceBoot : null;
+    if (locked !== null) lockCache.set(udid, { at: Date.now(), locked });
+    return { locked, unlockedSinceBoot, secure: locked };
+  },
+
+  async unlock(nid, passcode?: string): Promise<UnlockResult> {
+    if (!(await ensureNative(nid))) {
+      throw new PhoneDockError(
+        'Unattended passcode unlock requires an iPhone on iOS 27 or later',
+        'not_supported',
+        501,
+        ['iOS 18–26 blocks WebDriverAgent from entering passcodes on the lock screen. Turn off the passcode on this iPhone, or use request_human.'],
+      );
+    }
+    const dc = dcId(nid);
+    const before = await this.lockState!(nid);
+    if (before.unlockedSinceBoot === false) {
+      return { unlocked: false, reason: 'before_first_unlock' };
+    }
+    if (before.locked === false) {
+      locks.reset(dc);
+      return { unlocked: true, alreadyUnlocked: true, method: 'already_unlocked' };
+    }
+    if (!passcode) {
+      throw new PhoneDockError(
+        'The iPhone is locked and requires a passcode',
+        'passcode_required',
+        409,
+        ['Save a passcode in PhoneDock Device Settings (Unattended Unlock) or unlock the iPhone manually.'],
+      );
+    }
+
+    // Wake screen using Indigo hardware button (doesn't require the screen stream), then raise passcode field and type via virtual HID keyboard.
+    // Note: if the HID channel fails to open while locked (before keystrokes are sent), throw `unlock_failed` so the daemon does not trip the wrong-passcode breaker.
+    let keystrokesSent = false;
+    try {
+      await hidKey(dc, 'home').catch(() => hidKey(dc, 'power'));
+      await sleep(350);
+      await hidKey(dc, 'space');
+      await sleep(350);
+      await hidType(dc, passcode);
+      keystrokesSent = true;
+      await sleep(120);
+      await hidKey(dc, 'enter');
+    } catch (e) {
+      const cleanDetail = redactSecretStrings(
+        e instanceof PhoneDockError ? (e.detail ?? e.message) : ((e as Error).message ?? String(e)),
+        [passcode],
+      );
+      if (!keystrokesSent) {
+        throw new PhoneDockError(
+          'Couldn’t send passcode keystrokes to the locked iPhone',
+          'unlock_failed',
+          502,
+          ['Keep the iPhone paired and awake on the same Wi-Fi or USB, or unlock it manually once.'],
+          cleanDetail,
+        );
+      }
+    }
+
+    for (let i = 0; i < 8; i++) {
+      await sleep(400);
+      const after = await this.lockState!(nid).catch(() => ({ locked: null }));
+      if (after.locked === false) {
+        locks.reset(dc);
+        return { unlocked: true, method: 'ios_hid_passcode' };
+      }
+    }
+    return { unlocked: false, reason: 'wrong_passcode' };
+  },
 
   /** Fast: findDev (3 s list cache), lockState and displays run in parallel with the slow `info details`, which is
    *  cached for 10 min per device (its tunnel setup over Wi-Fi was most of the old 78 s) and capped at 25 s. */

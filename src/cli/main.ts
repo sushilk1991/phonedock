@@ -20,8 +20,8 @@ const NOTES_USAGE = 'app-notes list | show <appId> | save <appId> [--file F] | r
 // Keep flow parsing, visual comparison and report generation out of ordinary CLI startup.
 // Help still uses the commands' own text, so it cannot drift from their usage output.
 async function helpText(): Promise<string> {
-  const [{ FLOW_HELP }, { RUNS_HELP }, { TRACE_USAGE }, { PROXY_USAGE }] = await Promise.all([
-    import('./flow-cmds.ts'), import('./runs-cmds.ts'), import('./trace-cmds.ts'), import('./proxy-cmds.ts'),
+  const [{ FLOW_HELP }, { RUNS_HELP }, { TRACE_USAGE }, { PROXY_USAGE }, { PASSCODE_USAGE }] = await Promise.all([
+    import('./flow-cmds.ts'), import('./runs-cmds.ts'), import('./trace-cmds.ts'), import('./proxy-cmds.ts'), import('./passcode-cmds.ts'),
   ]);
   return `phonedock – device runtime for AI agents
 
@@ -69,6 +69,9 @@ System:     shell <id> -- <cmd…> | push <id> <local> <remote> | pull <id> <rem
             clipboard <id> [--get | --set TEXT]   (prints the text as is; --set with no TEXT reads it from stdin)
             ${PROXY_USAGE}
               Saved HTTP/SOCKS5 proxies (0600 store; pass "-" for URL to read from stdin). Applies live on Android.
+            ${PASSCODE_USAGE}
+            unlock <id>
+              Save a device passcode in macOS Keychain for unattended unlock (Android & iOS 27+; never exposed to agents).
 Multi-agent: lease <id> [--ttl S] [--force] | release <id> [--pool]
             acquire [--platform P] [--backend B] [--ttl S]
 Physical:   discover --android | pair <code> [--serial S] | pair <host:port> <code> | disconnect <id>
@@ -1176,6 +1179,12 @@ export async function run(argv: string[]): Promise<number> {
     }
     case 'proxy': case 'proxies': {
       const { proxyCmd } = await import('./proxy-cmds.ts'); return proxyCmd(c, a, JSON_OUT);
+    }
+    case 'passcode': {
+      const { passcodeCmd } = await import('./passcode-cmds.ts'); return passcodeCmd(c, a, JSON_OUT);
+    }
+    case 'unlock': {
+      const { unlockCmd } = await import('./passcode-cmds.ts'); return unlockCmd(c, a, JSON_OUT);
     }
     default: usage(`Unknown command "${cmd}". Run \`phonedock help\`.`);
   }

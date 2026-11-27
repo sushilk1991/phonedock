@@ -998,6 +998,28 @@ class PhoneDock:
     def detach_proxy(self, device_id: str) -> Dict[str, Any]:
         return self._request("DELETE", self._dev(device_id, "/proxy"))
 
+    # ── unattended passcode unlock ────────────────────────────────────────
+    def passcode_status(self, device_id: str) -> Dict[str, Any]:
+        """Return redacted unattended unlock status for a device (never returns the passcode)."""
+        return self._request("GET", self._dev(device_id, "/passcode"))
+
+    def set_passcode(self, device_id: str, passcode: Optional[str] = None, enabled: Optional[bool] = None) -> Dict[str, Any]:
+        """Save a device passcode (Keychain on macOS) and/or toggle unattended unlock."""
+        body: Dict[str, Any] = {}
+        if passcode is not None:
+            body["passcode"] = passcode
+        if enabled is not None:
+            body["enabled"] = bool(enabled)
+        return self._request("PUT", self._dev(device_id, "/passcode"), body)
+
+    def remove_passcode(self, device_id: str) -> Dict[str, Any]:
+        """Remove a device's saved passcode."""
+        return self._request("DELETE", self._dev(device_id, "/passcode"))
+
+    def unlock(self, device_id: str) -> Dict[str, Any]:
+        """Wake and unlock a device using its saved passcode (if required)."""
+        return self._request("POST", self._dev(device_id, "/unlock"), {})
+
     # ── events ────────────────────────────────────────────────────────────
     def events(self) -> Iterator[Dict[str, Any]]:
         """Yield {event, data} from the SSE stream (blocking)."""

@@ -230,6 +230,7 @@ const OBSERVE = new Set([
   'GET /v1/devices/:id/environment',   // the controls a kind of device supports: from its backend and kind alone
   'GET /v1/devices/:id/proxy',
   'GET /v1/devices/:id/location',
+  'GET /v1/devices/:id/passcode',
 ]);
 /** Lifecycle requests deal with a sleeping phone themselves (boot wakes it, shutdown and delete forget its sleep). */
 const CONTROL = new Set([
@@ -238,6 +239,7 @@ const CONTROL = new Set([
   'POST /v1/devices/:id/window',   // a sleeping phone wakes with its own window, as a stopped one boots with it
   'PUT /v1/devices/:id/proxy', 'DELETE /v1/devices/:id/proxy',   // attach/detach saves now and applies on wake
   'DELETE /v1/devices/:id/location',
+  'PUT /v1/devices/:id/passcode', 'DELETE /v1/devices/:id/passcode',
 ]);
 /** `X-PhoneDock-Observe: 1` on a GET (the app's background reads): never wakes, never counts. Other methods are use. */
 export const OBSERVE_HEADER = 'x-phonedock-observe';

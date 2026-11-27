@@ -19,7 +19,24 @@ export type Capability =
   | 'shell' | 'files' | 'logs' | 'location' | 'push' | 'rotate' | 'clipboard' | 'root' | 'window'
   | 'record' | 'crashes' | 'appData' | 'doubleTap' | 'pinch' | 'appearance' | 'settings'
   | 'trace'    // performance trace of one app (startTrace/stopTrace)
-  | 'video';   // live H.264 video (Backend.video, GET /v1/devices/:id/video)
+  | 'video'    // live H.264 video (Backend.video, GET /v1/devices/:id/video)
+  | 'unlock';  // unattended passcode/keyguard unlock (Backend.unlock, POST /v1/devices/:id/unlock)
+
+/** Current lock-screen / keyguard state for a device (additive; null = unknown). */
+export interface LockStateInfo {
+  locked: boolean | null;
+  unlockedSinceBoot?: boolean | null;
+  secure?: boolean | null;
+  screenOn?: boolean | null;
+}
+
+/** Result of Backend.unlock(). */
+export interface UnlockResult {
+  unlocked: boolean;
+  alreadyUnlocked?: boolean;
+  method?: string;
+  reason?: string;
+}
 
 /** System-wide light/dark appearance (iOS "Dark Appearance", Android night mode). */
 export type Appearance = 'dark' | 'light';
@@ -709,6 +726,12 @@ export interface Backend {
   stopTrace?(nativeId: string): Promise<TraceCapture>;
   /** Stop the recorder right away without summarizing (daemon exit). Never throws. */
   abortTrace?(nativeId: string): Promise<void>;
+
+  // ── lock state & unattended unlock (optional; 501 not_supported when absent) ──
+  /** Read whether the device is locked, whether it has been unlocked since boot, and whether credentials are required. */
+  lockState?(nativeId: string): Promise<LockStateInfo>;
+  /** Wake and unlock the device using an optional saved passcode (daemon supplies from Keychain; never log or echo). */
+  unlock?(nativeId: string, passcode?: string): Promise<UnlockResult>;
 }
 
 // ── Managed components (GET /v1/components, POST /v1/components/:id/install) ──

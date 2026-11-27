@@ -20,4 +20,5 @@ export type {
   OsImage, Platform, ScreenInfo, Snapshot, UiTree, UiElement, Bounds, Availability, Capability, DeviceKind, DeviceState,
   ComponentId, ComponentState, ComponentPhase, ComponentSource, ComponentProgress, ComponentErrorInfo, ComponentStatus,
   DeviceSleep, ProxyScheme, ProxyTestResult, ProxyView, DeviceProxyState, SimslimStatus, SimslimDeviceInfo, LocationRouteStatus,
+  PasscodeStatus, PasscodeStorage, PasscodeTripped, PasscodeUnlockOutcome, LockStateInfo, UnlockResult, UnlockResponse,
 } from './client.ts';

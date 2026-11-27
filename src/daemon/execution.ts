@@ -7,7 +7,8 @@ import { withInputFence } from '../core/input-fence.ts';
 const BEFORE_SEND = new Set([
   'bad_request', 'stale_ref', 'lease_conflict', 'not_found', 'no_match', 'not_supported', 'unsupported', 'bad_key',
   'unknown_key', 'unsupported_char', 'not_running', 'offline', 'device_unavailable', 'forbidden', 'busy', 'aborted',
-  'unauthorized', 'ui_unavailable',
+  'unauthorized', 'ui_unavailable', 'device_locked', 'passcode_required', 'passcode_tripped', 'passcode_missing',
+  'before_first_unlock', 'unattended_unlock_disabled',
 ]);
 
 /** Classify only known validation/availability failures as safe to retry. */
