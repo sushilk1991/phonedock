@@ -39,7 +39,7 @@ import {
 import { ownershipChangeListeners } from './execution.ts';
 ownershipChangeListeners.add(cancelLocationRouteOnOwnershipChange);
 
-export const VERSION = '0.8.0';
+export const VERSION = '0.9.0';
 const startedAt = Date.now();
 export const router = new Router();
 const r = router;
